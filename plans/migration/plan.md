@@ -7,7 +7,7 @@
 - No non-essential Stockfish features: no NNUE, evaluation, search, UCI/XBoard, transposition tables, Zobrist hashing, or variant system
 - Zero `unsafe` Rust; magic bitboards via safe const/static arrays (no pext). Any future unsafe must be documented with a comment
 - Edition 2024, std only (no no_std)
-- Reference implementation: `Fairy-Stockfish/src/` — C++ files to consult:
+- Reference implementation: `~/projects/dirk/golmman/Fairy-Stockfish/src/` — C++ files to consult:
   - `types.h` — core types (Square, Bitboard, Move, Piece, Color)
   - `bitboard.h` / `bitboard.cpp` — bitboard constants and helpers
   - `position.h` / `position.cpp` — board state, do_move/undo_move, legality checking, FEN, blast logic
