@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "atomic_movegen"
+name = "atomic-movegen"
 version = "0.1.0"

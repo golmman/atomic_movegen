@@ -1,6 +1,9 @@
 [package]
-name = "atomic_movegen"
+name = "atomic-movegen"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+
+[[example]]
+name = "perft"

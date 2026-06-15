@@ -1,0 +1,41 @@
+use atomic_movegen::board::Board;
+use atomic_movegen::movegen;
+use atomic_movegen::perft;
+use std::env;
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 3 {
+        eprintln!("Usage: perft_divide <fen> <depth>");
+        return;
+    }
+    let fen = &args[1];
+    let depth: u32 = args[2].parse().unwrap_or(1);
+
+    let mut board = Board::from_fen(fen).expect("Invalid FEN");
+
+    let mut moves = Vec::with_capacity(256);
+    movegen::generate_legal(&board, &mut moves);
+    moves.sort_by_key(|m| (m.from_sq() as u16, m.to_sq() as u16));
+
+    let mut total = 0u64;
+    for &m in &moves {
+        let mut state = atomic_movegen::board::StateInfo::new();
+        board.do_move(m, &mut state);
+        let cnt = if depth <= 1 {
+            1
+        } else {
+            perft(&mut board, depth - 1)
+        };
+        board.undo_move(m, &state);
+        total += cnt;
+        println!("{}{}: {}", sq_str(m.from_sq()), sq_str(m.to_sq()), cnt);
+    }
+    println!("\nNodes searched: {}", total);
+}
+
+fn sq_str(sq: atomic_movegen::types::Square) -> String {
+    let files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+    let idx = sq as usize;
+    format!("{}{}", files[idx % 8], (idx / 8 + 1))
+}
