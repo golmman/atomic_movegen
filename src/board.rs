@@ -1034,4 +1034,99 @@ mod tests {
         let pinned = board.pinned(Color::White);
         assert!(!pinned.is_empty(), "Expected pinned pieces, got empty");
     }
+
+    #[test]
+    fn test_do_undo_restores_state() {
+        let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+        let mut board = Board::from_fen(fen).unwrap();
+        let orig_fen = board.fen();
+        let mut state = StateInfo::new();
+
+        // e4
+        let m = Move::make_move(Square::E2, Square::E4);
+        board.do_move(m, &mut state);
+        board.undo_move(m, &state);
+
+        assert_eq!(board.fen(), orig_fen);
+    }
+
+    #[test]
+    fn test_do_undo_capture_restores() {
+        let fen2 = "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2";
+        let mut board2 = Board::from_fen(fen2).unwrap();
+        let orig_fen = board2.fen();
+        let mut state2 = StateInfo::new();
+
+        let m = Move::make_move(Square::E4, Square::D5);
+        board2.do_move(m, &mut state2);
+        board2.undo_move(m, &state2);
+
+        assert_eq!(board2.fen(), orig_fen);
+    }
+
+    #[test]
+    fn test_self_explosion_illegal() {
+        // White commoner on d3, white rook on d5, black pawn on d4
+        // Rook takes pawn on d4 — blast zone (c3-e5) includes d3, destroying the commoner
+        let fen = "4k3/8/8/3R4/3p4/3C4/8/4K3 w - - 0 1";
+        let board = Board::from_fen(fen).unwrap();
+        let mut moves = Vec::new();
+        crate::movegen::generate_legal(&board, &mut moves);
+        // The rook on d5 has captures to d4 (pawn), but it's self-explosion
+        // since the commoner on d3 would be blasted. So no legal captures.
+        for &m in &moves {
+            assert!(
+                m.from_sq() != Square::D5 || m.to_sq() != Square::D4,
+                "rook capture on d4 should be illegal (self-explosion)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_blast_zone_removes_pieces() {
+        // White rook on e4, black knight on e5, black pawn on f5
+        // Rook captures knight — blast zone around e5 (d4-f4, d5-f5, d6-f6)
+        // removes: rook (non-pawn capturer), knight, but NOT the pawn on f5
+        let fen = "4k3/8/8/4np2/4R3/8/8/4K3 w - - 0 1";
+        let mut board = Board::from_fen(fen).unwrap();
+        let mut state = StateInfo::new();
+        let m = Move::make_move(Square::E4, Square::E5);
+        board.do_move(m, &mut state);
+        // The rook and knight should be gone; the black pawn on f5 should remain
+        assert!(board.piece_on(Square::E4) == NO_PIECE, "rook at e4 should be gone");
+        assert!(board.piece_on(Square::E5) == NO_PIECE, "knight at e5 should be gone");
+        assert!(board.piece_on(Square::F5) == B_PAWN, "pawn at f5 should survive");
+    }
+
+    #[test]
+    fn test_pinned_piece_capture_explodes_pinner() {
+        // Black rook on e5 (pinning), white rook on e3, black pawn on e4,
+        // white commoner on e1. The rook on e3 is pinned by the rook on e5
+        // (both on e-file, commoner on e1 behind).
+        // But rook captures pawn on e4 — blast zone (d3-f5) destroys the
+        // rook on e5, so the pin is removed and the move is legal.
+        let fen = "4k3/8/8/4r3/4p3/4R3/8/4K3 w - - 0 1";
+        let board = Board::from_fen(fen).unwrap();
+        let mut moves = Vec::new();
+        crate::movegen::generate_legal(&board, &mut moves);
+        let has_rook_e4 = moves.iter().any(|&m| {
+            m.from_sq() == Square::E3 && m.to_sq() == Square::E4
+        });
+        assert!(has_rook_e4, "rook capture on e4 should be legal (blast removes pinning rook)");
+    }
+
+    #[test]
+    fn test_en_passant_blast() {
+        // White pawn on d5, black pawn on c5 (just double-pushed), black knight on d4
+        // White plays dxc6 en passant — blast at c6
+        let fen2 = "4k3/8/8/2Pp4/8/8/8/4K3 w KQkq d6 0 2";
+        let mut board2 = Board::from_fen(fen2).unwrap();
+        let mut state2 = StateInfo::new();
+        let m = Move::make_enpassant(Square::C5, Square::D6);
+        board2.do_move(m, &mut state2);
+        // After EP capture + blast: pawns on c5 and d5 are gone,
+        // commoners should remain (out of blast zone)
+        assert!(board2.piece_on(Square::C5) == NO_PIECE);
+        assert!(board2.piece_on(Square::D5) == NO_PIECE);
+    }
 }

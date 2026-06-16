@@ -103,7 +103,7 @@ pub fn between_bb(s1: Square, s2: Square) -> Bitboard {
     }
 
     if df != 0 && dr != 0 && df.abs() != dr.abs() {
-        return square_bb(s2);
+        return Bitboard::EMPTY;
     }
 
     let f_step = df.signum();
