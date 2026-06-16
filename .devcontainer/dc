@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# dc — thin wrapper around the `devcontainer` CLI for this project.
+#
+#   dc            # start container (if needed) and run opencode (default)
+#   dc up         # just start the container
+#   dc shell      # start container and drop into the user's login shell
+#   dc opencode   # start container and run opencode (explicit form of `dc`)
+#   dc run <cmd>  # run an arbitrary command inside the container (interactive)
+#   dc rebuild    # remove and rebuild from scratch
+#   dc down       # stop and remove the container
+#   dc id         # print the container id
+#   dc logs       # tail container logs (useful when a build/postCreate failed)
+#
+# Honors:
+#   DC_RUNTIME    container runtime to use (default: podman; set to docker to override)
+#   DC_WORKSPACE  workspace folder (default: git repo root, falling back to PWD)
+#   DC_USER       user inside the container (default: vscode)
+#   DC_VERBOSE    if set to 1, show the full devcontainer-cli output
+
+set -euo pipefail
+
+RUNTIME="${DC_RUNTIME:-podman}"
+WS="${DC_WORKSPACE:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+USER_IN="${DC_USER:-vscode}"
+
+# Expose host UID/GID to the devcontainer build (consumed by
+# devcontainer.json -> Dockerfile -> usermod). This lets the in-container
+# user own host-bind-mounted files natively on both macOS and Linux.
+export DC_HOST_UID="${DC_HOST_UID:-$(id -u)}"
+export DC_HOST_GID="${DC_HOST_GID:-$(id -g)}"
+
+case "${1:-}" in
+  -h|--help|help)
+    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+    ;;
+esac
+
+for bin in devcontainer "$RUNTIME"; do
+  if ! command -v "$bin" >/dev/null 2>&1; then
+    echo "error: '$bin' not found in PATH" >&2
+    [ "$bin" = "devcontainer" ] && echo "  install with: npm i -g @devcontainers/cli" >&2
+    exit 127
+  fi
+done
+
+# Find the running container for this workspace, if any.
+# Devcontainers labels containers with devcontainer.local_folder=<absolute workspace path>.
+_dc_id() {
+  "$RUNTIME" ps --filter "label=devcontainer.local_folder=$WS" \
+                --format '{{.ID}}' 2>/dev/null | head -n1
+}
+
+_dc_up() {
+  # Ensure host-side bind sources exist so Podman doesn't auto-create them as root.
+  mkdir -p "${HOME}/.config/opencode"
+  local args=(--workspace-folder "$WS" --docker-path "$RUNTIME" "$@")
+  if [ "${DC_VERBOSE:-0}" = "1" ]; then
+    devcontainer up "${args[@]}"
+  else
+    # Hide noisy build output but keep errors and the final JSON.
+    # Stream to a temp file so we can show it if `up` fails.
+    local log
+    log="$(mktemp -t dc-up.XXXXXX)"
+    if ! devcontainer up "${args[@]}" >"$log" 2>&1; then
+      echo "error: 'devcontainer up' failed:" >&2
+      cat "$log" >&2
+      rm -f "$log"
+      return 1
+    fi
+    rm -f "$log"
+  fi
+}
+
+_dc_exec_interactive() {
+  local id
+  id="$(_dc_id)"
+  if [ -z "$id" ]; then
+    echo "error: no running container for $WS" >&2
+    return 1
+  fi
+  "$RUNTIME" exec -it -u "$USER_IN" -w /workspace "$id" "$@"
+}
+
+cmd="${1:-opencode}"
+case "$cmd" in
+  up)
+    shift || true
+    _dc_up "$@"
+    ;;
+  shell|sh)
+    _dc_up
+    _dc_exec_interactive /bin/sh -lc \
+      'exec "$(getent passwd "$(id -un)" | cut -d: -f7)" -l'
+    ;;
+  opencode|oc)
+    _dc_up
+    _dc_exec_interactive opencode
+    ;;
+  run)
+    shift
+    [ $# -gt 0 ] || { echo "usage: dc run <cmd> [args...]" >&2; exit 2; }
+    _dc_up
+    _dc_exec_interactive "$@"
+    ;;
+  id)
+    _dc_id
+    ;;
+  logs)
+    id="$(_dc_id)"
+    [ -n "$id" ] || { echo "no container for $WS" >&2; exit 1; }
+    "$RUNTIME" logs -f "$id"
+    ;;
+  rebuild)
+    _dc_up --remove-existing-container
+    ;;
+  down|stop)
+    id="$(_dc_id)"
+    if [ -n "$id" ]; then
+      "$RUNTIME" rm -f "$id" >/dev/null
+      echo "removed $id"
+    else
+      echo "no container for $WS"
+    fi
+    ;;
+  *)
+    echo "unknown subcommand: $cmd (try: dc help)" >&2
+    exit 2
+    ;;
+esac

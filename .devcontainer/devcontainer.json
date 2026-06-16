@@ -1,0 +1,85 @@
+{
+  "name": "opencode-devcontainer",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".",
+    "args": {
+      "DEFAULT_SHELL": "${localEnv:SHELL}",
+      "USER_UID": "${localEnv:DC_HOST_UID}",
+      "USER_GID": "${localEnv:DC_HOST_GID}"
+    }
+  },
+
+  "remoteUser": "vscode",
+  "containerUser": "vscode",
+  "updateRemoteUserUID": true,
+
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+
+  "mounts": [
+    "source=${localEnv:HOME}/.config/opencode,target=/home/vscode/.config/opencode,type=bind,consistency=cached",
+    "source=opencode-data-${devcontainerId},target=/home/vscode/.local/share/opencode,type=volume",
+    "source=opencode-cache-${devcontainerId},target=/home/vscode/.cache/opencode,type=volume"
+  ],
+
+  "containerEnv": {
+    "TERM": "xterm-256color",
+    "LANG": "C.UTF-8",
+    "TMPDIR": "/home/vscode/.cache/tmp"
+  },
+
+  "remoteEnv": {
+    "OPENCODE_API_KEY": "${localEnv:OPENCODE_API_KEY}",
+    "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
+    "OPENAI_API_KEY": "${localEnv:OPENAI_API_KEY}",
+    "GEMINI_API_KEY": "${localEnv:GEMINI_API_KEY}",
+    "OPENROUTER_API_KEY": "${localEnv:OPENROUTER_API_KEY}"
+  },
+
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "installZsh": true,
+      "configureZshAsDefaultShell": false,
+      "upgradePackages": false
+    },
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "22"
+    },
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+
+  "runArgs": [
+    "--userns=keep-id",
+    "--security-opt=label=disable"
+  ],
+
+  "forwardPorts": [],
+
+  "postCreateCommand": "bash .devcontainer/scripts/post-create.sh",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "anomalyco.opencode",
+        "eamodio.gitlens",
+        "EditorConfig.EditorConfig"
+      ],
+      "settings": {
+        "terminal.integrated.profiles.linux": {
+          "login": {
+            "path": "/bin/sh",
+            "args": ["-c", "exec $(getent passwd $(id -un) | cut -d: -f7) -l"]
+          },
+          "zsh": { "path": "/bin/zsh" },
+          "bash": { "path": "/bin/bash" }
+        },
+        "terminal.integrated.defaultProfile.linux": "login"
+      }
+    },
+    "jetbrains": {
+      "backend": "IntelliJ"
+    }
+  }
+}
