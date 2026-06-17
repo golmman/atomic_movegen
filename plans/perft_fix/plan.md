@@ -132,5 +132,5 @@ To cross-check against the reference:
 
 ```bash
 echo -e "setoption name UCI_Variant value atomic\nposition fen '<FEN>'\ngo perft <depth>" \
-  | /Users/d.kretschmann/projects/dirk/golmman/Fairy-Stockfish/src/stockfish
+  | ./Fairy-Stockfish/src/stockfish
 ```
