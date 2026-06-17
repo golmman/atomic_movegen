@@ -1,0 +1,3 @@
+[submodule "Fairy-Stockfish"]
+	path = Fairy-Stockfish
+	url = git@github.com:golmman/Fairy-Stockfish.git
