@@ -65,5 +65,5 @@ RUN install -d -o "$USERNAME" -g "$USERNAME" \
 
 # Belt: ensure /tmp is world-writable so coding agents that hardcode /tmp
 # (ignoring TMPDIR) can create temporary scripts. The primary fix is
-# onCreateCommand in devcontainer.json, since /tmp is often a runtime tmpfs.
+# the tmpfs mount in devcontainer.json, since /tmp is a runtime filesystem.
 RUN chmod 1777 /tmp
