@@ -72,9 +72,12 @@ fn perft_all_positions_depth_1() {
         let mut board = Board::from_fen(fen).unwrap();
         let result = perft(&mut board, 1);
         assert_eq!(
-            result, expected[0],
+            result,
+            expected[0],
             "Position {} (depth 1): expected {}, got {}",
-            i + 1, expected[0], result
+            i + 1,
+            expected[0],
+            result
         );
     }
 }

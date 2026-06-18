@@ -463,11 +463,8 @@ impl Board {
             let blast_zone = attacks::king_attacks(to) & !self.by_type[PieceType::Pawn as usize];
             let mut to_blast = blast_zone & self.pieces();
 
-            // Also blast the capturer at `to` unless it's a pawn (pawns are blast-immune)
-            let capturer = self.squares[to as usize];
-            if capturer == NO_PIECE || capturer.type_of() != PieceType::Pawn {
-                to_blast = to_blast | Bitboard::square_bb(to);
-            }
+            // Always blast the capturer at ground zero (pawns are NOT immune at `to`).
+            to_blast = to_blast | Bitboard::square_bb(to);
 
             let mut b = to_blast;
             while !b.is_empty() {
@@ -632,36 +629,29 @@ impl Board {
 
     pub fn legal(&self, m: Move) -> bool {
         let from = m.from_sq();
+        let to = m.to_sq();
+        let us = self.side_to_move;
+        let them = us.flip();
+
+        // Moving piece must exist
         if self.piece_on(from) == NO_PIECE {
             return false;
         }
 
-        // For castling, check pass-through squares BEFORE do_move
+        // Castling: check pass-through squares BEFORE the move
         // (with current board state, before king/rook move)
         if m.move_type() == MoveType::Castling {
             let ksq = from;
-            let to = m.to_sq();
-            let them = self.side_to_move.flip();
             let occupied = self.occupied();
-            // Pass-through squares = starting square through the square
-            // just before the destination (destination is checked post-move)
             let pass_through = if to > ksq {
-                [
-                    ksq,
-                    Square::from_index(ksq as i8 + 1),
-                ]
+                [ksq, Square::from_index(ksq as i8 + 1)]
             } else {
-                [
-                    Square::from_index(ksq as i8 - 1),
-                    ksq,
-                ]
+                [Square::from_index(ksq as i8 - 1), ksq]
             };
-            // Check all pass-through squares are not attacked
             for &sq in &pass_through {
                 // Blast adjacency immunity: skip attack check if an enemy
                 // commoner is adjacent (mutual destruction would protect it)
-                let adjacent_enemy_commoners =
-                    self.commoners(them) & attacks::king_attacks(sq);
+                let adjacent_enemy_commoners = self.commoners(them) & attacks::king_attacks(sq);
                 if adjacent_enemy_commoners.is_empty() {
                     let rook_attackers = attacks::rook_attacks(sq, occupied)
                         & self.by_type[PieceType::Rook as usize]
@@ -693,91 +683,143 @@ impl Board {
                     }
                 }
             }
+            // Fall through to destination check below
         }
 
-        let mut board = self.clone();
-        let mut state = StateInfo::new();
-        board.do_move(m, &mut state);
+        // Pre-compute occupied after the move (without cloning/do_move)
+        let mut occupied = self.pieces() ^ from; // remove moving piece from origin
+        let mut kto = to; // king/square destination (may differ from `to` for castling)
 
-        let us = self.side_to_move;
+        if m.move_type() == MoveType::Castling {
+            // Adjust for castling: king moves to kto_actual, rook moves rfrom->rto
+            let (kto_actual, rfrom, rto) = match (us, to > from) {
+                (Color::White, true) => (Square::G1, Square::H1, Square::F1),
+                (Color::White, false) => (Square::C1, Square::A1, Square::D1),
+                (Color::Black, true) => (Square::G8, Square::H8, Square::F8),
+                (Color::Black, false) => (Square::C8, Square::A8, Square::D8),
+            };
+            kto = kto_actual;
+            occupied = occupied ^ Bitboard::square_bb(rfrom); // remove rook from origin
+            occupied = occupied | Bitboard::square_bb(rto); // add rook at destination
+        } else if m.move_type() == MoveType::EnPassant {
+            // Remove the captured pawn (the e.p. target)
+            let capsq = match us {
+                Color::White => Square::from_index(to as i8 - 8),
+                Color::Black => Square::from_index(to as i8 + 8),
+            };
+            occupied = occupied & !Bitboard::square_bb(capsq);
+        } else if self.piece_on(to) != NO_PIECE {
+            // Regular capture: the captured piece at `to` will be removed
+            // by the blast (to is always blasted), so no explicit removal needed.
+        }
 
-        // After the move, the opponent is now the side to move in `board`
-        // We need to check if our commoners are safe
+        // Add the moving piece at its destination
+        occupied = occupied | Bitboard::square_bb(kto);
 
-        // 1. Self-explosion check: check if any of our commoners were blasted
-        // (i.e., check appeared in captured_pieces)
-        for &(_sq, piece) in &state.captured_pieces {
-            if piece.color() == us && piece.type_of() == PieceType::Commoner {
-                return false;
+        // Apply blast on capture
+        // Castling encodes the rook's square as `to`, not a capture target.
+        let is_capture = m.move_type() != MoveType::Castling
+            && (m.move_type() == MoveType::EnPassant || self.piece_on(to) != NO_PIECE);
+
+        if is_capture {
+            // Use PRE-MOVE board state for blast computation (matching reference).
+            // Adjacent blast removes non-pawn pieces within king-attacks of kto.
+            // Ground zero (kto) is always removed (Bug #1 fix).
+            let pre_pawns = self.by_type[PieceType::Pawn as usize];
+            let pre_non_pawns = self.pieces() ^ pre_pawns;
+            let blast_adjacent = attacks::king_attacks(kto) & pre_non_pawns;
+            occupied = occupied & !(blast_adjacent | Bitboard::square_bb(kto));
+        }
+
+        // Self-explosion check: ensure at least one own commoner survived.
+        // Note: self.commoners(us) is the PRE-MOVE position. Our commoner
+        // might have moved to `kto` (non-capture) or could have been destroyed
+        // by blast (capture). We add the moved commoner if it survived.
+        let mut our_commoners = self.commoners(us) & occupied;
+
+        // If the moving piece was a commoner and the move is not a capture
+        // (no blast → piece survives at kto), add it at its new location.
+        if m.move_type() == MoveType::Castling {
+            // Castling: the king moved to kto (no blast)
+            our_commoners = our_commoners | Bitboard::square_bb(kto);
+        } else if !is_capture {
+            let moving_piece = self.piece_on(from);
+            if moving_piece != NO_PIECE && moving_piece.type_of() == PieceType::Commoner {
+                // Non-capture: the commoner survived at kto (no blast destruction)
+                our_commoners = our_commoners | Bitboard::square_bb(kto);
             }
         }
+        // For captures: the piece at kto is ALWAYS destroyed by the blast
+        // (Bug #1 fix), so the moved commoner does NOT survive at kto.
 
-        // 2. Check if our commoner was the piece that moved and was blasted
-        // (it was moved to `to` then the blast happened)
-        if m.move_type() != MoveType::Castling {
-            let to = m.to_sq();
-            let moved_piece = board.piece_on(to);
-            if moved_piece == NO_PIECE {
-                // The moved piece was destroyed by blast
-                // Check if it was a commoner
-                let _us = self.side_to_move;
-                let from = m.from_sq();
-                let original_piece = self.piece_on(from);
-                if original_piece != NO_PIECE && original_piece.type_of() == PieceType::Commoner {
-                    return false;
-                }
-            }
-        }
-
-        // 3. No own commoner should be under attack (extinction pseudo-royal)
-        let them = us.flip();
-        let occupied = board.occupied();
-        let our_commoners = board.commoners(us);
         if our_commoners.is_empty() {
-            return false; // We lost all commoners
+            return false;
         }
 
-        let mut c = our_commoners;
-        while !c.is_empty() {
-            let ksq = c.pop_lsb();
+        // Extinction pseudo-royal: in atomic chess, only the last 1 commoner
+        // per side is "pseudo-royal" (extinctionPieceCount=0, threshold=1).
+        // Commoners beyond the threshold are not protected from attacks.
+        //
+        // Reference (Fairy-Stockfish position.cpp lines 1156-1188):
+        //   pseudoRoyals = st->pseudoRoyals & pieces(sideToMove);
+        //   // Computed at state-setup: only pieces with count <= threshold+1
+        //   if (!(pseudoRoyalsTheirs & ~occupied)) // skip if enemy PR destroyed
+        //       while (pseudoRoyals)              // for each own PR
+        //           // check adjacency immunity + attackers
+        let our_pr_count = self.commoners(us).count();
+        let them_pr_count = self.commoners(them).count();
 
-            // Blast adjacency immunity: if an enemy commoner is adjacent
-            // (within king-move radius), capturing this own commoner would
-            // also destroy the adjacent enemy commoner in the blast
-            // (mutual destruction), so this commoner is not meaningfully
-            // "in check" and we skip the attack check for it.
-            let adjacent_enemy_commoners =
-                board.commoners(them) & attacks::king_attacks(ksq);
-            if adjacent_enemy_commoners.is_empty() {
-                // No adjacent enemy commoner — check attackers normally.
-                // Use the same logic as attackers_to() but filtered to
-                // the opponent's non-pseudo-royal pieces (commoners are
-                // only considered attackers when they are adjacent, which
-                // is handled by the immunity check above).
-                let rook_attackers = attacks::rook_attacks(ksq, occupied)
-                    & board.by_type[PieceType::Rook as usize]
-                    & board.by_color[them as usize];
-                let bishop_attackers = attacks::bishop_attacks(ksq, occupied)
-                    & board.by_type[PieceType::Bishop as usize]
-                    & board.by_color[them as usize];
-                let queen_attackers = attacks::queen_attacks(ksq, occupied)
-                    & board.by_type[PieceType::Queen as usize]
-                    & board.by_color[them as usize];
-                let knight_attackers = attacks::knight_attacks(ksq)
-                    & board.by_type[PieceType::Knight as usize]
-                    & board.by_color[them as usize];
-                // Pawn attacks: opponent pawns that attack this square
-                let pawn_attackers = attacks::pawn_attacks(us, ksq)
-                    & board.by_type[PieceType::Pawn as usize]
-                    & board.by_color[them as usize];
-                if (rook_attackers
-                    | bishop_attackers
-                    | queen_attackers
-                    | knight_attackers
-                    | pawn_attackers)
-                    != Bitboard::EMPTY
-                {
-                    return false;
+        // Only check attacks if we have ≤1 commoner (pseudo-royal threshold).
+        if our_pr_count <= 1 {
+            // Skip the attack check entirely if we destroyed the enemy's last
+            // pseudo-royal commoner (winning move — no need to verify safety).
+            let enemy_pr_destroyed =
+                them_pr_count <= 1 && (self.commoners(them) & occupied).is_empty();
+
+            if !enemy_pr_destroyed {
+                // Use PRE-BLAST enemy commoner positions for adjacency immunity
+                // (Bug #2 fix).
+                let them_commoners = self.commoners(them);
+                // Filter opponent pieces to those that survived the blast
+                let enemy_survivors = self.by_color[them as usize] & occupied;
+
+                let mut c = our_commoners;
+                while !c.is_empty() {
+                    let ksq = c.pop_lsb();
+
+                    // Blast adjacency immunity: if an enemy commoner is adjacent
+                    // (pre-blast, even if destroyed by blast), this commoner is
+                    // immune to being "in check" (mutual destruction).
+                    let adjacent_enemy = them_commoners & attacks::king_attacks(ksq);
+                    if adjacent_enemy.is_empty() {
+                        // No adjacent enemy commoner — check attackers normally.
+                        // Use post-blast occupied for blocking and filter opponent
+                        // pieces to those that survived the blast.
+                        let rook_attackers = attacks::rook_attacks(ksq, occupied)
+                            & self.by_type[PieceType::Rook as usize]
+                            & enemy_survivors;
+                        let bishop_attackers = attacks::bishop_attacks(ksq, occupied)
+                            & self.by_type[PieceType::Bishop as usize]
+                            & enemy_survivors;
+                        let queen_attackers = attacks::queen_attacks(ksq, occupied)
+                            & self.by_type[PieceType::Queen as usize]
+                            & enemy_survivors;
+                        let knight_attackers = attacks::knight_attacks(ksq)
+                            & self.by_type[PieceType::Knight as usize]
+                            & enemy_survivors;
+                        let pawn_attackers = attacks::pawn_attacks(us, ksq)
+                            & self.by_type[PieceType::Pawn as usize]
+                            & enemy_survivors;
+                        if (rook_attackers
+                            | bishop_attackers
+                            | queen_attackers
+                            | knight_attackers
+                            | pawn_attackers)
+                            != Bitboard::EMPTY
+                        {
+                            return false;
+                        }
+                    }
                 }
             }
         }
@@ -1096,19 +1138,39 @@ mod tests {
     }
 
     #[test]
-    fn test_self_explosion_illegal() {
-        // White commoner on d3, white rook on d5, black pawn on d4
-        // Rook takes pawn on d4 — blast zone (c3-e5) includes d3, destroying the commoner
+    fn test_self_explosion_legal_with_surviving_commoner() {
+        // White commoners on d3 AND e1; white rook on d5, black pawn on d4.
+        // Rook takes pawn on d4 — blast zone (c3-e5) includes d3, destroying
+        // the commoner on d3, but the commoner on e1 survives.
+        // This is NOT self-explosion — only the LAST commoner being destroyed
+        // makes a move illegal.
         let fen = "4k3/8/8/3R4/3p4/3C4/8/4K3 w - - 0 1";
         let board = Board::from_fen(fen).unwrap();
         let mut moves = Vec::new();
         crate::movegen::generate_legal(&board, &mut moves);
-        // The rook on d5 has captures to d4 (pawn), but it's self-explosion
-        // since the commoner on d3 would be blasted. So no legal captures.
+        // The capture should be LEGAL because e1 survives and is not under attack.
+        let has_rook_d4 = moves
+            .iter()
+            .any(|&m| m.from_sq() == Square::D5 && m.to_sq() == Square::D4);
+        assert!(
+            has_rook_d4,
+            "rook capture on d4 should be legal (e1 commoner survives)"
+        );
+    }
+
+    #[test]
+    fn test_self_explosion_illegal_last_commoner() {
+        // White commoner ONLY on d3; white rook on d5, black pawn on d4.
+        // Rook takes pawn on d4 — blast zone includes d3, destroying the
+        // LAST (only) commoner → self-explosion, illegal.
+        let fen = "4k3/8/8/3R4/3p4/3C4/8/8 w - - 0 1";
+        let board = Board::from_fen(fen).unwrap();
+        let mut moves = Vec::new();
+        crate::movegen::generate_legal(&board, &mut moves);
         for &m in &moves {
             assert!(
                 m.from_sq() != Square::D5 || m.to_sq() != Square::D4,
-                "rook capture on d4 should be illegal (self-explosion)"
+                "rook capture on d4 should be illegal (last commoner destroyed)"
             );
         }
     }
@@ -1124,9 +1186,18 @@ mod tests {
         let m = Move::make_move(Square::E4, Square::E5);
         board.do_move(m, &mut state);
         // The rook and knight should be gone; the black pawn on f5 should remain
-        assert!(board.piece_on(Square::E4) == NO_PIECE, "rook at e4 should be gone");
-        assert!(board.piece_on(Square::E5) == NO_PIECE, "knight at e5 should be gone");
-        assert!(board.piece_on(Square::F5) == B_PAWN, "pawn at f5 should survive");
+        assert!(
+            board.piece_on(Square::E4) == NO_PIECE,
+            "rook at e4 should be gone"
+        );
+        assert!(
+            board.piece_on(Square::E5) == NO_PIECE,
+            "knight at e5 should be gone"
+        );
+        assert!(
+            board.piece_on(Square::F5) == B_PAWN,
+            "pawn at f5 should survive"
+        );
     }
 
     #[test]
@@ -1140,10 +1211,13 @@ mod tests {
         let board = Board::from_fen(fen).unwrap();
         let mut moves = Vec::new();
         crate::movegen::generate_legal(&board, &mut moves);
-        let has_rook_e4 = moves.iter().any(|&m| {
-            m.from_sq() == Square::E3 && m.to_sq() == Square::E4
-        });
-        assert!(has_rook_e4, "rook capture on e4 should be legal (blast removes pinning rook)");
+        let has_rook_e4 = moves
+            .iter()
+            .any(|&m| m.from_sq() == Square::E3 && m.to_sq() == Square::E4);
+        assert!(
+            has_rook_e4,
+            "rook capture on e4 should be legal (blast removes pinning rook)"
+        );
     }
 
     #[test]
