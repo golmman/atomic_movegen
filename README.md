@@ -29,15 +29,23 @@ cargo run --example perft "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 
 
 Output: `197326`
 
-## Tested positions
+## Verify against known perft values
 
-| Position | Depth | Expected | Status |
-|---|---|---|---|
-| Starting position | 1 | 20 | ✓ |
-| Starting position | 2 | 400 | ✓ |
-| Starting position | 3 | 8902 | ✓ |
-| Starting position | 4 | 197326 | ✓ |
-| `r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1` | 2 | 1939 | ✓ |
+The repository ships with 41 test positions and their expected node counts at
+depths 1–6 in [`perft_values.md`](./perft_values.md).  Use the
+`verify_perft` example to run all of them:
+
+```sh
+# Quick check at depth 3 (~5 s)
+cargo run --example verify_perft 3
+
+# Full verification at depth 6 — use --release for acceptable runtime
+cargo run --example verify_perft --release
+```
+
+The tool exits with status 0 if every position matches, or 1 on any mismatch.
+Depth 6 traverses billions of nodes; the `--release` flag is essential for a
+timely result at that depth.
 
 ## License
 
