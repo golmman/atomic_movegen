@@ -1,7 +1,7 @@
 use std::fmt;
 use std::ops;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Square {
     A1,
     B1,
@@ -696,7 +696,7 @@ pub fn type_of(p: Piece) -> PieceType {
     p.type_of()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MoveType {
     Normal = 0,
     Promotion = 1,

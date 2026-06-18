@@ -463,8 +463,11 @@ impl Board {
             let blast_zone = attacks::king_attacks(to) & !self.by_type[PieceType::Pawn as usize];
             let mut to_blast = blast_zone & self.pieces();
 
-            // Also blast the capturer at `to` regardless of piece type
-            to_blast = to_blast | Bitboard::square_bb(to);
+            // Also blast the capturer at `to` unless it's a pawn (pawns are blast-immune)
+            let capturer = self.squares[to as usize];
+            if capturer == NO_PIECE || capturer.type_of() != PieceType::Pawn {
+                to_blast = to_blast | Bitboard::square_bb(to);
+            }
 
             let mut b = to_blast;
             while !b.is_empty() {
@@ -640,42 +643,54 @@ impl Board {
             let to = m.to_sq();
             let them = self.side_to_move.flip();
             let occupied = self.occupied();
+            // Pass-through squares = starting square through the square
+            // just before the destination (destination is checked post-move)
             let pass_through = if to > ksq {
                 [
+                    ksq,
                     Square::from_index(ksq as i8 + 1),
-                    Square::from_index(ksq as i8 + 2),
                 ]
             } else {
                 [
                     Square::from_index(ksq as i8 - 1),
-                    Square::from_index(ksq as i8 - 2),
+                    ksq,
                 ]
             };
-            // Check all pass-through squares (including final square) are not attacked
+            // Check all pass-through squares are not attacked
             for &sq in &pass_through {
-                let rook_attackers = attacks::rook_attacks(sq, occupied)
-                    & self.by_type[PieceType::Rook as usize]
-                    & self.by_color[them as usize];
-                let bishop_attackers = attacks::bishop_attacks(sq, occupied)
-                    & self.by_type[PieceType::Bishop as usize]
-                    & self.by_color[them as usize];
-                let queen_attackers = attacks::queen_attacks(sq, occupied)
-                    & self.by_type[PieceType::Queen as usize]
-                    & self.by_color[them as usize];
-                let knight_attackers = attacks::knight_attacks(sq)
-                    & self.by_type[PieceType::Knight as usize]
-                    & self.by_color[them as usize];
-                let commoner_attackers = attacks::king_attacks(sq)
-                    & self.by_type[PieceType::Commoner as usize]
-                    & self.by_color[them as usize];
-                if (rook_attackers
-                    | bishop_attackers
-                    | queen_attackers
-                    | knight_attackers
-                    | commoner_attackers)
-                    != Bitboard::EMPTY
-                {
-                    return false;
+                // Blast adjacency immunity: skip attack check if an enemy
+                // commoner is adjacent (mutual destruction would protect it)
+                let adjacent_enemy_commoners =
+                    self.commoners(them) & attacks::king_attacks(sq);
+                if adjacent_enemy_commoners.is_empty() {
+                    let rook_attackers = attacks::rook_attacks(sq, occupied)
+                        & self.by_type[PieceType::Rook as usize]
+                        & self.by_color[them as usize];
+                    let bishop_attackers = attacks::bishop_attacks(sq, occupied)
+                        & self.by_type[PieceType::Bishop as usize]
+                        & self.by_color[them as usize];
+                    let queen_attackers = attacks::queen_attacks(sq, occupied)
+                        & self.by_type[PieceType::Queen as usize]
+                        & self.by_color[them as usize];
+                    let knight_attackers = attacks::knight_attacks(sq)
+                        & self.by_type[PieceType::Knight as usize]
+                        & self.by_color[them as usize];
+                    let commoner_attackers = attacks::king_attacks(sq)
+                        & self.by_type[PieceType::Commoner as usize]
+                        & self.by_color[them as usize];
+                    let pawn_attackers = attacks::pawn_attacks(self.side_to_move, sq)
+                        & self.by_type[PieceType::Pawn as usize]
+                        & self.by_color[them as usize];
+                    if (rook_attackers
+                        | bishop_attackers
+                        | queen_attackers
+                        | knight_attackers
+                        | commoner_attackers
+                        | pawn_attackers)
+                        != Bitboard::EMPTY
+                    {
+                        return false;
+                    }
                 }
             }
         }
@@ -725,29 +740,45 @@ impl Board {
         let mut c = our_commoners;
         while !c.is_empty() {
             let ksq = c.pop_lsb();
-            let rook_attackers = attacks::rook_attacks(ksq, occupied)
-                & board.by_type[PieceType::Rook as usize]
-                & board.by_color[them as usize];
-            let bishop_attackers = attacks::bishop_attacks(ksq, occupied)
-                & board.by_type[PieceType::Bishop as usize]
-                & board.by_color[them as usize];
-            let queen_attackers = attacks::queen_attacks(ksq, occupied)
-                & board.by_type[PieceType::Queen as usize]
-                & board.by_color[them as usize];
-            let knight_attackers = attacks::knight_attacks(ksq)
-                & board.by_type[PieceType::Knight as usize]
-                & board.by_color[them as usize];
-            let commoner_attackers = attacks::king_attacks(ksq)
-                & board.by_type[PieceType::Commoner as usize]
-                & board.by_color[them as usize];
-            if (rook_attackers
-                | bishop_attackers
-                | queen_attackers
-                | knight_attackers
-                | commoner_attackers)
-                != Bitboard::EMPTY
-            {
-                return false;
+
+            // Blast adjacency immunity: if an enemy commoner is adjacent
+            // (within king-move radius), capturing this own commoner would
+            // also destroy the adjacent enemy commoner in the blast
+            // (mutual destruction), so this commoner is not meaningfully
+            // "in check" and we skip the attack check for it.
+            let adjacent_enemy_commoners =
+                board.commoners(them) & attacks::king_attacks(ksq);
+            if adjacent_enemy_commoners.is_empty() {
+                // No adjacent enemy commoner — check attackers normally.
+                // Use the same logic as attackers_to() but filtered to
+                // the opponent's non-pseudo-royal pieces (commoners are
+                // only considered attackers when they are adjacent, which
+                // is handled by the immunity check above).
+                let rook_attackers = attacks::rook_attacks(ksq, occupied)
+                    & board.by_type[PieceType::Rook as usize]
+                    & board.by_color[them as usize];
+                let bishop_attackers = attacks::bishop_attacks(ksq, occupied)
+                    & board.by_type[PieceType::Bishop as usize]
+                    & board.by_color[them as usize];
+                let queen_attackers = attacks::queen_attacks(ksq, occupied)
+                    & board.by_type[PieceType::Queen as usize]
+                    & board.by_color[them as usize];
+                let knight_attackers = attacks::knight_attacks(ksq)
+                    & board.by_type[PieceType::Knight as usize]
+                    & board.by_color[them as usize];
+                // Pawn attacks: opponent pawns that attack this square
+                let pawn_attackers = attacks::pawn_attacks(us, ksq)
+                    & board.by_type[PieceType::Pawn as usize]
+                    & board.by_color[them as usize];
+                if (rook_attackers
+                    | bishop_attackers
+                    | queen_attackers
+                    | knight_attackers
+                    | pawn_attackers)
+                    != Bitboard::EMPTY
+                {
+                    return false;
+                }
             }
         }
 
