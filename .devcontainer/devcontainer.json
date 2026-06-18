@@ -44,10 +44,9 @@
       "upgradePackages": false
     },
     "ghcr.io/devcontainers/features/node:1": {
-      "version": "22"
+      "version": "24"
     },
     "ghcr.io/devcontainers/features/git:1": {},
-    "ghcr.io/devcontainers/features/github-cli:1": {},
     "ghcr.io/devcontainers/features/rust:1": {}
   },
 
@@ -57,6 +56,8 @@
   ],
 
   "forwardPorts": [],
+
+  "onCreateCommand": "chmod 1777 /tmp 2>/dev/null || true",
 
   "postCreateCommand": "bash .devcontainer/scripts/post-create.sh",
 

@@ -62,3 +62,8 @@ RUN install -d -o "$USERNAME" -g "$USERNAME" \
         "/home/$USERNAME/.local" \
         "/home/$USERNAME/.local/share" \
         "/home/$USERNAME/.local/share/opencode"
+
+# Belt: ensure /tmp is world-writable so coding agents that hardcode /tmp
+# (ignoring TMPDIR) can create temporary scripts. The primary fix is
+# onCreateCommand in devcontainer.json, since /tmp is often a runtime tmpfs.
+RUN chmod 1777 /tmp
