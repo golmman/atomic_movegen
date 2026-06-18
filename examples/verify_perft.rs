@@ -17,6 +17,7 @@ use atomic_movegen::perft;
 use std::env;
 use std::fs;
 use std::process;
+use std::time::Instant;
 
 /// A single test case parsed from the markdown table.
 struct TestCase {
@@ -138,6 +139,14 @@ fn main() {
     let mut failed = 0u64;
     let mut detail_lines: Vec<String> = Vec::new();
 
+    // Track timing for each test case.
+    struct CaseTiming {
+        number: usize,
+        elapsed: std::time::Duration,
+    }
+    let mut timings: Vec<CaseTiming> = Vec::with_capacity(cases.len());
+    let total_timer = Instant::now();
+
     for case in &cases {
         let mut board = match Board::from_fen(&case.fen) {
             Ok(b) => b,
@@ -164,6 +173,7 @@ fn main() {
         }
 
         let mut ok = true;
+        let case_timer = Instant::now();
 
         // Try each depth.
         for &(depth, expected) in &depths_to_test {
@@ -177,19 +187,28 @@ fn main() {
             }
         }
 
+        let elapsed = case_timer.elapsed();
+        timings.push(CaseTiming {
+            number: case.number,
+            elapsed,
+        });
+
         if ok {
             passed += 1;
-            // Print a compact one-liner for passes.
+            // Print a compact one-liner with time.
             println!(
-                "  Test #{:<4} PASS ({} depth{})",
+                "  Test #{:<4} PASS ({} depth{}) [{:.3} s]",
                 case.number,
                 depths_to_test.len(),
                 if depths_to_test.len() == 1 { "" } else { "s" },
+                elapsed.as_secs_f64(),
             );
         } else {
             failed += 1;
         }
     }
+
+    let total_elapsed = total_timer.elapsed();
 
     // Print any failure detail lines.
     if !detail_lines.is_empty() {
@@ -199,8 +218,37 @@ fn main() {
         }
     }
 
-    let total = passed + failed;
-    eprintln!("\n=== {passed}/{total} passed, {failed}/{total} failed ===");
+    // Compute summary stats.
+    let total_tests = passed + failed;
+    let fast = timings.iter().min_by(|a, b| a.elapsed.cmp(&b.elapsed));
+    let slow = timings.iter().max_by(|a, b| a.elapsed.cmp(&b.elapsed));
+    let total_time: std::time::Duration = timings.iter().map(|t| t.elapsed).sum();
+    let avg_time = if !timings.is_empty() {
+        total_time / timings.len() as u32
+    } else {
+        std::time::Duration::ZERO
+    };
+
+    // Summary block.
+    eprintln!();
+    eprintln!("--- Summary ---");
+    if let Some(f) = fast {
+        eprintln!(
+            "  Fastest:     Test #{} ({:.3} s)",
+            f.number,
+            f.elapsed.as_secs_f64()
+        );
+    }
+    if let Some(s) = slow {
+        eprintln!(
+            "  Slowest:     Test #{} ({:.3} s)",
+            s.number,
+            s.elapsed.as_secs_f64()
+        );
+    }
+    eprintln!("  Average:     {:.3} s per test", avg_time.as_secs_f64());
+    eprintln!("  Total time:  {:.3} s", total_elapsed.as_secs_f64());
+    eprintln!("  Result:      {passed}/{total_tests} passed, {failed}/{total_tests} failed");
 
     if failed > 0 {
         process::exit(1);
