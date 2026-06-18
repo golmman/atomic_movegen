@@ -1,0 +1,26 @@
+# AGENTS.md
+
+## Goal
+
+A fast, correct legal move generator for atomic chess in pure Rust. Use the C++ reference implementation at `./Fairy-Stockfish` as the oracle for correctness.
+
+## Commands
+
+```sh
+cargo build
+cargo test
+cargo clippy
+cargo fmt
+cargo run --example perft "FEN" DEPTH
+```
+
+## Conventions
+
+- Follow standard Rust 2024 edition idioms.
+- Use `cargo clippy` and `cargo fmt` before committing.
+- Zero `unsafe` — keep the crate entirely safe Rust.
+- Use `thiserror` for error types, `strum` for enums where appropriate.
+- Name public API types and functions clearly; prefer full words over abbreviations.
+- Keep `pub` surface minimal; document all public items with doc comments.
+- Example binaries go under `examples/`.
+- Tests go in a `#[cfg(test)] mod tests` at the bottom of each module.
