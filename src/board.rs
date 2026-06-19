@@ -28,7 +28,8 @@ pub struct StateInfo {
     pub castling_rights: u8,
     pub ep_square: Option<Square>,
     pub rule50: u8,
-    pub captured_pieces: Vec<(Square, Piece)>,
+    pub captured_count: u8,
+    pub captured: [(Square, Piece); 9],
     pub cap_sq: Option<Square>,
     pub cap_piece: Piece,
 }
@@ -39,7 +40,8 @@ impl StateInfo {
             castling_rights: 0,
             ep_square: None,
             rule50: 0,
-            captured_pieces: Vec::new(),
+            captured_count: 0,
+            captured: [(Square::NONE, NO_PIECE); 9],
             cap_sq: None,
             cap_piece: NO_PIECE,
         }
@@ -394,7 +396,7 @@ impl Board {
         state.castling_rights = self.castling_rights;
         state.ep_square = self.ep_square;
         state.rule50 = self.rule50;
-        state.captured_pieces.clear();
+        state.captured_count = 0;
         state.cap_sq = None;
         state.cap_piece = NO_PIECE;
 
@@ -434,7 +436,8 @@ impl Board {
                 Color::Black => Square::from_index(to as i8 + 8),
             };
             let cap_piece = self.squares[ep_cap as usize];
-            state.captured_pieces.push((ep_cap, cap_piece));
+            state.captured[state.captured_count as usize] = (ep_cap, cap_piece);
+            state.captured_count += 1;
             self.remove_piece(ep_cap);
         } else if is_capture {
             // Record the captured piece and remove it
@@ -471,7 +474,8 @@ impl Board {
                 let bsq = b.pop_lsb();
                 let bpiece = self.squares[bsq as usize];
                 if bpiece != NO_PIECE {
-                    state.captured_pieces.push((bsq, bpiece));
+                    state.captured[state.captured_count as usize] = (bsq, bpiece);
+                    state.captured_count += 1;
                     self.remove_piece(bsq);
                 }
             }
@@ -554,7 +558,10 @@ impl Board {
         }
 
         // Restore blast victims (includes capturer if non-pawn) in reverse order
-        for &(sq, piece) in state.captured_pieces.iter().rev() {
+        let mut i = state.captured_count;
+        while i > 0 {
+            i -= 1;
+            let (sq, piece) = state.captured[i as usize];
             self.place_piece(piece, sq);
         }
 
