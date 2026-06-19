@@ -1,4 +1,3 @@
-
 The following list describes four known performance optimizations:
 
 | Optimization                 | What it saves                                               | Notes                                               |
@@ -13,4 +12,12 @@ For each case create a dedicated implementation plan:
 * `plans/performance/plan_state_info.md`
 * `plans/performance/plan_checkers_pinners.md`
 * `plans/performance/plan_magic.md`
+
+---
+
+put the proposed order into a new file `plans/performance/notes.md
+
+---
+
+Make sure each plan references @Fairy-Stockfish/ as the reference implementation / source of truth. Fairy-Stockfish atomic variant is proven to be correct and very performant.
 
