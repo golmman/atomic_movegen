@@ -13,3 +13,7 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
+# perf
+perf.data
+perf.data.old
+
