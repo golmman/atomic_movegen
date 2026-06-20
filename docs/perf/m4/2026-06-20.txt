@@ -53,3 +53,61 @@ After implementation of plans/performance/plan_magic.md:
   Average:     3.237 s per test
   Total time:  132.734 s
   Result:      41/41 passed, 0/41 failed
+
+----
+
+After implementation of `plans/performance/plan_checkers_pinners.md`:
+
+=== Perft verification ===
+  Source:     perft_values.md
+  Max depth:  6
+  Test cases: 41
+
+  Test #1    PASS (6 depths) [1.361 s]
+  Test #2    PASS (6 depths) [17.188 s]
+  Test #3    PASS (6 depths) [1.675 s]
+  Test #4    PASS (6 depths) [1.598 s]
+  Test #5    PASS (6 depths) [0.281 s]
+  Test #6    PASS (6 depths) [0.281 s]
+  Test #7    PASS (6 depths) [0.128 s]
+  Test #8    PASS (6 depths) [0.023 s]
+  Test #9    PASS (6 depths) [0.124 s]
+  Test #10   PASS (6 depths) [0.359 s]
+  Test #11   PASS (6 depths) [0.203 s]
+  Test #12   PASS (6 depths) [1.380 s]
+  Test #13   PASS (6 depths) [21.543 s]
+  Test #14   PASS (6 depths) [2.644 s]
+  Test #15   PASS (6 depths) [3.413 s]
+  Test #16   PASS (6 depths) [7.760 s]
+  Test #17   PASS (6 depths) [0.291 s]
+  Test #18   PASS (6 depths) [0.088 s]
+  Test #19   PASS (6 depths) [0.113 s]
+  Test #20   PASS (6 depths) [1.017 s]
+  Test #21   PASS (6 depths) [7.793 s]
+  Test #22   PASS (6 depths) [9.489 s]
+  Test #23   PASS (6 depths) [7.103 s]
+  Test #24   PASS (6 depths) [8.374 s]
+  Test #25   PASS (6 depths) [0.761 s]
+  Test #26   PASS (6 depths) [4.900 s]
+  Test #27   PASS (6 depths) [0.204 s]
+  Test #28   PASS (6 depths) [0.014 s]
+  Test #29   PASS (6 depths) [0.015 s]
+  Test #30   PASS (6 depths) [0.001 s]
+  Test #31   PASS (6 depths) [3.195 s]
+  Test #32   PASS (6 depths) [6.372 s]
+  Test #33   PASS (6 depths) [17.296 s]
+  Test #34   PASS (6 depths) [0.267 s]
+  Test #35   PASS (6 depths) [0.779 s]
+  Test #36   PASS (6 depths) [0.057 s]
+  Test #37   PASS (6 depths) [0.252 s]
+  Test #38   PASS (6 depths) [0.504 s]
+  Test #39   PASS (6 depths) [0.153 s]
+  Test #40   PASS (6 depths) [0.017 s]
+  Test #41   PASS (6 depths) [0.210 s]
+
+--- Summary ---
+  Fastest:     Test #30 (0.001 s)
+  Slowest:     Test #13 (21.543 s)
+  Average:     3.152 s per test
+  Total time:  129.225 s
+  Result:      41/41 passed, 0/41 failed
