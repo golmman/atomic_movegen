@@ -4,7 +4,59 @@ use std::sync::LazyLock;
 
 const SQUARE_NB: usize = 64;
 
-// Re-export magic bitboard functions for sliding pieces.
+// ---------------------------------------------------------------------------
+// Sliding-attack dispatch
+//
+// On x86_64: runtime dispatch between PEXT (BMI2) and magic-multiply.
+// On other architectures (ARM etc.): direct re-export of the magic fallback
+// — zero overhead, since BMI2 is never available.
+// ---------------------------------------------------------------------------
+
+#[cfg(target_arch = "x86_64")]
+mod sliding_dispatch {
+    use crate::types::*;
+    use std::sync::LazyLock;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Impl {
+        Pext,
+        Magic,
+    }
+
+    static IMPL: LazyLock<Impl> = LazyLock::new(|| {
+        if crate::pext::has_bmi2() {
+            Impl::Pext
+        } else {
+            Impl::Magic
+        }
+    });
+
+    #[inline(always)]
+    pub fn bishop_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
+        match *IMPL {
+            Impl::Pext => unsafe { crate::pext::bishop_attacks_pext(sq, occupied) },
+            Impl::Magic => crate::magic::bishop_attacks(sq, occupied),
+        }
+    }
+
+    #[inline(always)]
+    pub fn rook_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
+        match *IMPL {
+            Impl::Pext => unsafe { crate::pext::rook_attacks_pext(sq, occupied) },
+            Impl::Magic => crate::magic::rook_attacks(sq, occupied),
+        }
+    }
+
+    #[inline(always)]
+    pub fn queen_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
+        bishop_attacks(sq, occupied) | rook_attacks(sq, occupied)
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+use sliding_dispatch::{bishop_attacks, queen_attacks, rook_attacks};
+
+#[cfg(not(target_arch = "x86_64"))]
 pub use crate::magic::{bishop_attacks, queen_attacks, rook_attacks};
 
 static KING_ATTACKS: LazyLock<Vec<Bitboard>> = LazyLock::new(|| {

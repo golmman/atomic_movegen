@@ -166,7 +166,7 @@ const BISHOP_INDEX_BITS: [u32; 64] = [
 // Precomputed occupancy masks (no edges) — computed offline, embedded as const.
 // ---------------------------------------------------------------------------
 
-const ROOK_MASKS: [Bitboard; 64] = [
+pub(crate) const ROOK_MASKS: [Bitboard; 64] = [
     Bitboard(0x000101010101017e),
     Bitboard(0x000202020202027c),
     Bitboard(0x000404040404047a),
@@ -233,7 +233,7 @@ const ROOK_MASKS: [Bitboard; 64] = [
     Bitboard(0x7e80808080808000),
 ];
 
-const BISHOP_MASKS: [Bitboard; 64] = [
+pub(crate) const BISHOP_MASKS: [Bitboard; 64] = [
     Bitboard(0x0040201008040200),
     Bitboard(0x0000402010080400),
     Bitboard(0x0000004020100a00),
@@ -335,14 +335,14 @@ const BISHOP_TABLE_SIZE: usize = total_table_size(&BISHOP_INDEX_BITS);
 // Direction constants for the reference sliding-attack computation
 // ---------------------------------------------------------------------------
 
-const ROOK_DIRS: [(i8, i8); 4] = [(0, 1), (0, -1), (1, 0), (-1, 0)];
-const BISHOP_DIRS: [(i8, i8); 4] = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
+pub(crate) const ROOK_DIRS: [(i8, i8); 4] = [(0, 1), (0, -1), (1, 0), (-1, 0)];
+pub(crate) const BISHOP_DIRS: [(i8, i8); 4] = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
 
 // ---------------------------------------------------------------------------
 // Reference sliding attack (loop-based, used only during table init)
 // ---------------------------------------------------------------------------
 
-fn sliding_attack(directions: &[(i8, i8)], sq: Square, occupied: Bitboard) -> Bitboard {
+pub(crate) fn sliding_attack(directions: &[(i8, i8)], sq: Square, occupied: Bitboard) -> Bitboard {
     let mut result = 0u64;
     let s_idx = sq as i8;
     let sf = s_idx % 8;
