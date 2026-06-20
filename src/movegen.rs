@@ -1,5 +1,5 @@
 use crate::attacks;
-use crate::board::{BK_CASTLE, BQ_CASTLE, Board, WK_CASTLE, WQ_CASTLE};
+use crate::board::{BK_CASTLE, BQ_CASTLE, Board, StateInfo, WK_CASTLE, WQ_CASTLE};
 use crate::types::*;
 
 pub fn generate_pseudo_legal(board: &Board, moves: &mut Vec<Move>) {
@@ -228,8 +228,9 @@ fn generate_castling(board: &Board, us: Color, moves: &mut Vec<Move>) {
 }
 
 pub fn generate_legal(board: &Board, moves: &mut Vec<Move>) {
+    let state = StateInfo::new();
     generate_pseudo_legal(board, moves);
-    moves.retain(|&m| board.legal(m));
+    moves.retain(|&m| board.legal(m, &state));
 }
 
 #[cfg(test)]

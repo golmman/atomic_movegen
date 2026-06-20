@@ -32,6 +32,10 @@ pub struct StateInfo {
     pub captured: [(Square, Piece); 9],
     pub cap_sq: Option<Square>,
     pub cap_piece: Piece,
+    pub checkers: Bitboard,
+    pub pinned: Bitboard,
+    pub commoners_count: u32,
+    pub them_commoners_count: u32,
 }
 
 impl StateInfo {
@@ -44,6 +48,10 @@ impl StateInfo {
             captured: [(Square::NONE, NO_PIECE); 9],
             cap_sq: None,
             cap_piece: NO_PIECE,
+            checkers: Bitboard::EMPTY,
+            pinned: Bitboard::EMPTY,
+            commoners_count: 0,
+            them_commoners_count: 0,
         }
     }
 }
@@ -317,8 +325,7 @@ impl Board {
         attackers
     }
 
-    pub fn checkers(&self) -> Bitboard {
-        let us = self.side_to_move;
+    pub(crate) fn compute_checkers(&self, us: Color) -> Bitboard {
         let them = us.flip();
         let commoners = self.commoners(us);
         if commoners.is_empty() {
@@ -361,10 +368,14 @@ impl Board {
         checkers
     }
 
-    pub fn pinned(&self, c: Color) -> Bitboard {
+    pub fn checkers(&self) -> Bitboard {
+        self.compute_checkers(self.side_to_move)
+    }
+
+    pub(crate) fn compute_pinned(&self, us: Color) -> Bitboard {
         let mut pinned = Bitboard::EMPTY;
-        let commoners = self.commoners(c);
-        let them = c.flip();
+        let commoners = self.commoners(us);
+        let them = us.flip();
         let occupied = self.occupied();
 
         let mut c_iter = commoners;
@@ -383,13 +394,17 @@ impl Board {
             while !s.is_empty() {
                 let sniper_sq = s.pop_lsb();
                 let between = between_bb(ksq, sniper_sq) & occupied;
-                if !between.more_than_one() {
+                if between.count() == 1 {
                     pinned = pinned | between;
                 }
             }
         }
 
         pinned
+    }
+
+    pub fn pinned(&self, c: Color) -> Bitboard {
+        self.compute_pinned(c)
     }
 
     pub fn do_move(&mut self, m: Move, state: &mut StateInfo) {
@@ -634,7 +649,7 @@ impl Board {
         }
     }
 
-    pub fn legal(&self, m: Move) -> bool {
+    pub fn legal(&self, m: Move, _state: &StateInfo) -> bool {
         let from = m.from_sq();
         let to = m.to_sq();
         let us = self.side_to_move;
