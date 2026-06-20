@@ -3,30 +3,9 @@ use crate::types::*;
 use std::sync::LazyLock;
 
 const SQUARE_NB: usize = 64;
-const ROOK_DIRS: [(i8, i8); 4] = [(0, 1), (0, -1), (1, 0), (-1, 0)];
-const BISHOP_DIRS: [(i8, i8); 4] = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
 
-fn sliding_attack(directions: &[(i8, i8)], sq: Square, occupied: Bitboard) -> Bitboard {
-    let mut result = 0u64;
-    let s_idx = sq as i8;
-    let sf = s_idx % 8;
-    let sr = s_idx / 8;
-
-    for &(df, dr) in directions {
-        let mut f = sf + df;
-        let mut r = sr + dr;
-        while f >= 0 && f < 8 && r >= 0 && r < 8 {
-            let idx = (r * 8 + f) as usize;
-            result |= 1u64 << idx;
-            if occupied.0 & (1u64 << idx) != 0 {
-                break;
-            }
-            f += df;
-            r += dr;
-        }
-    }
-    Bitboard(result)
-}
+// Re-export magic bitboard functions for sliding pieces.
+pub use crate::magic::{bishop_attacks, queen_attacks, rook_attacks};
 
 static KING_ATTACKS: LazyLock<Vec<Bitboard>> = LazyLock::new(|| {
     let mut attacks = vec![Bitboard::EMPTY; SQUARE_NB];
@@ -82,18 +61,6 @@ static PAWN_ATTACKS: LazyLock<Vec<[Bitboard; 2]>> = LazyLock::new(|| {
     }
     attacks
 });
-
-pub fn bishop_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
-    sliding_attack(&BISHOP_DIRS, sq, occupied)
-}
-
-pub fn rook_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
-    sliding_attack(&ROOK_DIRS, sq, occupied)
-}
-
-pub fn queen_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
-    bishop_attacks(sq, occupied) | rook_attacks(sq, occupied)
-}
 
 pub fn king_attacks(sq: Square) -> Bitboard {
     KING_ATTACKS[sq as usize]

@@ -21,3 +21,6 @@ put the proposed order into a new file `plans/performance/notes.md
 
 Make sure each plan references @Fairy-Stockfish/ as the reference implementation / source of truth. Fairy-Stockfish atomic variant is proven to be correct and very performant.
 
+---
+
+Look at the reports and propose further optimizations.
