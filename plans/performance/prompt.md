@@ -23,4 +23,5 @@ Make sure each plan references @Fairy-Stockfish/ as the reference implementation
 
 ---
 
-Look at the reports and propose further optimizations.
+Summarize the reports in `plans/performance` and compile a list of possible future performance optimizations with a rough indication for the performance impact.
+Write it to `plans/performance/report.md`
