@@ -26,7 +26,7 @@ cargo build --release && hyperfine \
   --warmup 3 \
   --min-runs 10 \
   --export-markdown docs/perf/iter/TIMESTAMP/hyperfine.md \
-  'cargo run --release --example perft "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" 5'
+  'cargo run --release --example perft "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" 6'
 ```
 
 ### Correctness check
@@ -45,7 +45,7 @@ cargo run --release --example verify_perft 6
 
 ```sh
 perf record --call-graph dwarf \
-  cargo run --release --example perft "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" 5
+  cargo run --release --example perft "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" 6
 perf report
 ```
 
@@ -220,7 +220,7 @@ RUSTFLAGS="-Cprofile-generate=/tmp/pgo-data" \
 
 # Step 2: Profile
 ./target/release/examples/perft \
-  "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" 5
+  "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" 6
 
 # Step 3: Optimize
 RUSTFLAGS="-Cprofile-use=/tmp/pgo-data -Cllvm-args=-pgo-warn-missing"
