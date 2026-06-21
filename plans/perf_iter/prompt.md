@@ -6,7 +6,7 @@ Given the benchmark command
 cargo run --example perft "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" 5
 ```
 
-I want a well documented iteration for every time the plan is executed.
+I want a well documented iteration for every time the plan is executed:
 
 | Stage          | File          | Task                                                                                                     |
 | -------------- | ------------- | -------------------------------------------------------------------------------------------------------- |
@@ -17,4 +17,4 @@ I want a well documented iteration for every time the plan is executed.
 | Implementation | `4-impl.md`   | Implement the implementation plan, test for regressions, then create a report.                           |
 | Analysis       | `5-report.md` | Redo the `perf` analysis on the benchmark command and create a final report.                             |
 
-I am not a performance specialist so push back if my ideas need polish.
+I am not a performance expert so push back if my ideas need polish.
