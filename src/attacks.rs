@@ -61,7 +61,7 @@ pub use crate::magic::{bishop_attacks, queen_attacks, rook_attacks};
 
 static KING_ATTACKS: LazyLock<Vec<Bitboard>> = LazyLock::new(|| {
     let mut attacks = vec![Bitboard::EMPTY; SQUARE_NB];
-    for sq_idx in 0..SQUARE_NB {
+    for (sq_idx, attack) in attacks.iter_mut().enumerate() {
         let sq = Square::from_u8(sq_idx as u8);
         let b = Bitboard::square_bb(sq);
         let mut atk = Bitboard::EMPTY;
@@ -72,7 +72,7 @@ static KING_ATTACKS: LazyLock<Vec<Bitboard>> = LazyLock::new(|| {
             atk = atk | shift_east(b) | shift_se(b) | shift_ne(b);
         }
         atk = atk | shift_north(b) | shift_south(b);
-        attacks[sq_idx] = atk;
+        *attack = atk;
     }
     attacks
 });
@@ -80,14 +80,14 @@ static KING_ATTACKS: LazyLock<Vec<Bitboard>> = LazyLock::new(|| {
 static KNIGHT_ATTACKS: LazyLock<Vec<Bitboard>> = LazyLock::new(|| {
     let mut attacks = vec![Bitboard::EMPTY; SQUARE_NB];
     let knight_offsets: &[i8] = &[6, 10, 15, 17, -6, -10, -15, -17];
-    for sq_idx in 0..SQUARE_NB {
+    for (sq_idx, attack) in attacks.iter_mut().enumerate() {
         let sq = sq_idx as i8;
         let f = sq % 8;
         let r = sq / 8;
         let mut atk = 0u64;
         for &off in knight_offsets {
             let to = sq + off;
-            if to < 0 || to >= 64 {
+            if !(0..64).contains(&to) {
                 continue;
             }
             let tf = to % 8;
@@ -98,18 +98,18 @@ static KNIGHT_ATTACKS: LazyLock<Vec<Bitboard>> = LazyLock::new(|| {
                 atk |= 1u64 << to;
             }
         }
-        attacks[sq_idx] = Bitboard(atk);
+        *attack = Bitboard(atk);
     }
     attacks
 });
 
 static PAWN_ATTACKS: LazyLock<Vec<[Bitboard; 2]>> = LazyLock::new(|| {
     let mut attacks = vec![[Bitboard::EMPTY, Bitboard::EMPTY]; SQUARE_NB];
-    for sq_idx in 0..SQUARE_NB {
+    for (sq_idx, attack) in attacks.iter_mut().enumerate() {
         let sq = Square::from_u8(sq_idx as u8);
         let b = Bitboard::square_bb(sq);
-        attacks[sq_idx][Color::White as usize] = shift_nw(b) | shift_ne(b);
-        attacks[sq_idx][Color::Black as usize] = shift_sw(b) | shift_se(b);
+        attack[Color::White as usize] = shift_nw(b) | shift_ne(b);
+        attack[Color::Black as usize] = shift_sw(b) | shift_se(b);
     }
     attacks
 });

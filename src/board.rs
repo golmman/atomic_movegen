@@ -38,6 +38,12 @@ pub struct StateInfo {
     pub them_commoners_count: u32,
 }
 
+impl Default for StateInfo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StateInfo {
     pub fn new() -> Self {
         StateInfo {
@@ -72,6 +78,12 @@ pub(crate) const WK_CASTLE: u8 = 1;
 pub(crate) const WQ_CASTLE: u8 = 2;
 pub(crate) const BK_CASTLE: u8 = 4;
 pub(crate) const BQ_CASTLE: u8 = 8;
+
+impl Default for Board {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Board {
     pub fn new() -> Self {
@@ -502,28 +514,28 @@ impl Board {
         // Also handle blast-related rook removal
         if is_capture || m.move_type() == MoveType::EnPassant {
             // White king-side
-            if self.castling_rights & WK_CASTLE != 0 {
-                if self.squares[Square::H1 as usize] != make_piece(Color::White, PieceType::Rook) {
-                    self.castling_rights &= !WK_CASTLE;
-                }
+            if self.castling_rights & WK_CASTLE != 0
+                && self.squares[Square::H1 as usize] != make_piece(Color::White, PieceType::Rook)
+            {
+                self.castling_rights &= !WK_CASTLE;
             }
             // White queen-side
-            if self.castling_rights & WQ_CASTLE != 0 {
-                if self.squares[Square::A1 as usize] != make_piece(Color::White, PieceType::Rook) {
-                    self.castling_rights &= !WQ_CASTLE;
-                }
+            if self.castling_rights & WQ_CASTLE != 0
+                && self.squares[Square::A1 as usize] != make_piece(Color::White, PieceType::Rook)
+            {
+                self.castling_rights &= !WQ_CASTLE;
             }
             // Black king-side
-            if self.castling_rights & BK_CASTLE != 0 {
-                if self.squares[Square::H8 as usize] != make_piece(Color::Black, PieceType::Rook) {
-                    self.castling_rights &= !BK_CASTLE;
-                }
+            if self.castling_rights & BK_CASTLE != 0
+                && self.squares[Square::H8 as usize] != make_piece(Color::Black, PieceType::Rook)
+            {
+                self.castling_rights &= !BK_CASTLE;
             }
             // Black queen-side
-            if self.castling_rights & BQ_CASTLE != 0 {
-                if self.squares[Square::A8 as usize] != make_piece(Color::Black, PieceType::Rook) {
-                    self.castling_rights &= !BQ_CASTLE;
-                }
+            if self.castling_rights & BQ_CASTLE != 0
+                && self.squares[Square::A8 as usize] != make_piece(Color::Black, PieceType::Rook)
+            {
+                self.castling_rights &= !BQ_CASTLE;
             }
         }
 
@@ -927,7 +939,7 @@ fn parse_square(s: &str) -> Square {
     if s.len() < 2 {
         return Square::A1;
     }
-    let file = match s.chars().nth(0).unwrap() {
+    let file = match s.chars().next().unwrap() {
         'a' => 0,
         'b' => 1,
         'c' => 2,
@@ -1068,7 +1080,7 @@ impl Square {
             Square::G8,
             Square::H8,
         ];
-        if idx >= 0 && idx < 64 {
+        if (0..64).contains(&idx) {
             SQUARES[idx as usize]
         } else {
             Square::NONE

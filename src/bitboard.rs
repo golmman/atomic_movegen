@@ -10,7 +10,7 @@ pub const FILE_GBB: Bitboard = Bitboard(FILE_ABB.0 << 6);
 pub const FILE_HBB: Bitboard = Bitboard(FILE_ABB.0 << 7);
 
 pub const RANK_1BB: Bitboard = Bitboard(0xFF);
-pub const RANK_2BB: Bitboard = Bitboard(RANK_1BB.0 << (FILE_NB * 1));
+pub const RANK_2BB: Bitboard = Bitboard(RANK_1BB.0 << FILE_NB);
 pub const RANK_3BB: Bitboard = Bitboard(RANK_1BB.0 << (FILE_NB * 2));
 pub const RANK_4BB: Bitboard = Bitboard(RANK_1BB.0 << (FILE_NB * 3));
 pub const RANK_5BB: Bitboard = Bitboard(RANK_1BB.0 << (FILE_NB * 4));
@@ -163,7 +163,7 @@ pub fn line_bb(s1: Square, s2: Square) -> Bitboard {
     let mut b = Bitboard::EMPTY;
     let mut f = f1;
     let mut r = r1;
-    while f >= 0 && f < 8 && r >= 0 && r < 8 {
+    while (0..8).contains(&f) && (0..8).contains(&r) {
         let sq = make_square(
             match f {
                 0 => File::A,

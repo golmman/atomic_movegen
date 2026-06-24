@@ -912,7 +912,7 @@ impl ops::Add<Direction> for Square {
     type Output = Square;
     fn add(self, rhs: Direction) -> Square {
         let idx = (self as i16) + (rhs as i16);
-        if idx >= 0 && idx < 64 {
+        if (0..64).contains(&idx) {
             static SQUARES: [Square; 64] = [
                 Square::A1,
                 Square::B1,

@@ -126,7 +126,7 @@ fn generate_pawn_moves_for(
     // Captures - adjacent files only
     for df in &[-1i8, 1i8] {
         let target_f = from_file + df;
-        if target_f < 0 || target_f > 7 {
+        if !(0..=7).contains(&target_f) {
             continue;
         }
         let to_idx = from_idx + push_dir + df;

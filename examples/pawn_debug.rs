@@ -16,8 +16,8 @@ fn main() {
 
     // Manual check: iterate all pawns
     let us = board.side_to_move();
-    let them = us.flip();
-    let occupied = board.occupied();
+    let _them = us.flip();
+    let _occupied = board.occupied();
 
     let pawns = board.pieces_color_pt(us, PieceType::Pawn);
     println!("Pawns ({:?}): {}", us, pawns.count());
