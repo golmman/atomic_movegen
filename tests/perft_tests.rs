@@ -94,3 +94,34 @@ fn perft_starting_depth_3() {
     let mut board = Board::from_fen(POSITIONS[0].0).unwrap();
     assert_eq!(perft(&mut board, 3), POSITIONS[0].1[2]);
 }
+
+/// Debug depth-4 tests for every position, to identify which ones fail.
+#[test]
+fn perft_all_positions_depth_4() {
+    let mut any_fail = false;
+    for (i, (fen, expected)) in POSITIONS.iter().enumerate() {
+        if expected.len() < 4 {
+            continue;
+        }
+        let mut board = Board::from_fen(fen).unwrap();
+        let result = perft(&mut board, 4);
+        if result != expected[3] {
+            eprintln!(
+                "FAIL Position {} (depth 4): expected {}, got {} (diff {})",
+                i + 1,
+                expected[3],
+                result,
+                result as i64 - expected[3] as i64
+            );
+            any_fail = true;
+        } else {
+            eprintln!(
+                "OK   Position {} (depth 4): expected {}, got {}",
+                i + 1,
+                expected[3],
+                result
+            );
+        }
+    }
+    assert!(!any_fail, "Some depth-4 tests failed");
+}
