@@ -15,5 +15,5 @@ perf report --stdio
 
 ---
 
-Create a plan for the implementation for item 1 of `docs/plans/perf_analysis/analysis.md`.
+Create a plan for the implementation of item 1 of `docs/plans/perf_analysis/analysis.md`.
 Store the plan in `docs/plans/perf_analysis/plan1.md`
