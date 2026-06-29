@@ -10,6 +10,10 @@ the expensive pseudo-royal attack scan for trivially safe moves.
 **Total:** 42 lines added, 8 removed across 2 files (`src/board.rs`,
 `src/movegen.rs`).
 
+**Measured speedup:** 33.9 % reduction in `verify_perft` total wall-clock
+time (188.246 s → 124.380 s), exceeding the estimated 30–50 % range (lower
+bound). See [`docs/perf/m1/2026-06-30.txt`](../../perf/m1/2026-06-30.txt)
+
 ---
 
 ## Changes Implemented
@@ -147,13 +151,13 @@ All 46 tests pass:
 All 41 test positions pass at depths 1-6, producing exact counts matching
 `perft_values.md`.
 
-| Test | Result |
-|------|--------|
-| All 41 positions | **PASS** |
-| Fastest test | 0.002 s |
-| Slowest test | 19.443 s |
-| Average | 3.038 s |
-| Total time | 124.555 s |
+| Metric | Before | After | Change |
+|--------|--------|-------|--------|
+| Total time | 188.246 s | 124.380 s | **−33.9 %** |
+| Average per test | 4.591 s | 3.034 s | **−33.9 %** |
+| Fastest test | 0.002 s | 0.002 s | — |
+| Slowest test | 31.722 s | 19.419 s | **−38.8 %** |
+| All 41 positions | PASS | PASS | ✓ |
 
 ---
 
@@ -213,24 +217,67 @@ All 41 test positions pass at depths 1-6, producing exact counts matching
 
 | Risk | Outcome | Notes |
 |------|---------|-------|
-| `populate_state()` cost > savings | Not tested (deferred to perf measurement) | — |
-| Early-out fires incorrectly | Two bugs found and fixed | Both documented above |
-| Regressions in existing tests | None | All tests pass |
+| `populate_state()` cost > savings | **Mitigated** — 33.9 % net speedup | The early-out savings far outweigh the per-move cost of `populate_state()`. |
+| Early-out fires incorrectly | Two bugs found and fixed | Both documented above; all 41 perft positions verified at depths 1–6. |
+| Regressions in existing tests | None | All 46 tests pass. |
 
 ---
 
 ## Performance Measurement
 
-A formal performance comparison against the previous commit was not
-performed in this session. Use the following command post-merge to
-measure wall-clock improvement:
+Measured using `cargo run --release --example verify_perft 6` on Apple
+Firestorm (arm64). The `verify_perft` runner runs all 41 test positions
+at depths 1–6 and reports wall-clock time per test.
 
-```sh
-RUSTFLAGS="-C force-frame-pointers=yes" cargo build --profile profiling --example perft
-hyperfine 'target/profiling/examples/perft "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" 6'
+### Before (commit 9e9d1be)
+
+```
+--- Summary ---
+  Average:     4.591 s per test
+  Total time:  188.246 s
 ```
 
-Compare against the baseline before this change.
+### After (this implementation)
+
+```
+--- Summary ---
+  Average:     3.034 s per test
+  Total time:  124.380 s
+```
+
+### Speedup by test weight
+
+The heaviest tests (positions with many moves) showed the largest absolute
+gains:
+
+| Test | Before | After | Δ |
+|------|--------|-------|---|
+| #2  (depth-6 heavy) | 25.325 s | 16.177 s | −9.148 s |
+| #13 (depth-6 heavy) | 31.722 s | 19.419 s | −12.303 s |
+| #16 | 11.426 s | 6.874 s | −4.552 s |
+| #22 | 13.926 s | 8.639 s | −5.287 s |
+| #24 | 12.230 s | 8.503 s | −3.727 s |
+| #33 | 25.024 s | 16.969 s | −8.055 s |
+
+The speedup scales with position complexity (more nodes → more `legal()`
+calls → greater early-out benefit), matching expectations.
+
+### Interpretation
+
+The 33.9 % total reduction falls within the plan's estimated 30–50 %
+range. The lower end of the estimate was hit, likely because:
+
+1. **Two bugfixes added overhead:** The `compute_checkers()` pawn-attack
+   fix adds a bitboard operation per commoner, and the
+   `commoners_count > 0` check is a no-op branch.
+2. **`populate_state()` is called in `generate_legal()` too:** Every root
+   position now pays the cost of `compute_checkers` + `compute_pinned`,
+   which was not previously accounted for in the estimate.
+3. **Non-capture fraction varies:** Positions with many captures or king
+   moves get less early-out benefit.
+
+Full measurement data in
+[`docs/perf/m1/2026-06-30.txt`](../../perf/m1/2026-06-30.txt).
 
 ---
 
