@@ -17,3 +17,9 @@ perf report --stdio
 
 Create a plan for the implementation of item 1 of `docs/plans/perf_analysis/analysis.md`.
 Store the plan in `docs/plans/perf_analysis/plan1.md`
+
+---
+
+Analyze where we finished last time: `docs/plans/perf_analysis/report1.md`
+Create a plan for the implementation of the next item(s) of `docs/plans/perf_analysis/analysis.md`.
+Store the plan in `docs/plans/perf_analysis/plan2.md`
