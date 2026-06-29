@@ -12,7 +12,7 @@ perf report --stdio
 * Compare to the reference implementation in `Fairy-Stockfish/`
 * Compile a list of potential performance improvements
 * Sort the list by highest potential first
-* store your findings in `docs/plans/perf_analysis/analysis.md`
+* store your findings in `docs/plans/perf_analysis2/analysis.md`
 
 ---
 
