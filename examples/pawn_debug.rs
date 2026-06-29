@@ -34,14 +34,14 @@ fn main() {
     }
 
     // Check what generate_legal produces
-    let mut moves = Vec::with_capacity(256);
+    let mut moves = MoveList::new();
     movegen::generate_legal(&board, &mut moves);
 
     // Find all h3g2 moves
     let h3 = Square::from_index(23);
     let g2 = Square::from_index(14);
     println!("\nAll h3g2 moves:");
-    for (i, &m) in moves.iter().enumerate() {
+    for (i, &m) in moves.as_slice().iter().enumerate() {
         if m.from_sq() == h3 && m.to_sq() == g2 {
             println!(
                 "  Move #{}: from={} to={} type={:?}",
@@ -56,7 +56,7 @@ fn main() {
     // Also check how many times each move appears
     use std::collections::HashMap;
     let mut counts: HashMap<(u16, u16, u16), usize> = HashMap::new();
-    for &m in &moves {
+    for &m in moves.as_slice() {
         *counts
             .entry((m.from_sq() as u16, m.to_sq() as u16, m.move_type() as u16))
             .or_insert(0) += 1;

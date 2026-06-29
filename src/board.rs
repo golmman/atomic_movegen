@@ -1213,10 +1213,11 @@ mod tests {
         // makes a move illegal.
         let fen = "4k3/8/8/3R4/3p4/3C4/8/4K3 w - - 0 1";
         let board = Board::from_fen(fen).unwrap();
-        let mut moves = Vec::new();
+        let mut moves = MoveList::new();
         crate::movegen::generate_legal(&board, &mut moves);
         // The capture should be LEGAL because e1 survives and is not under attack.
         let has_rook_d4 = moves
+            .as_slice()
             .iter()
             .any(|&m| m.from_sq() == Square::D5 && m.to_sq() == Square::D4);
         assert!(
@@ -1232,9 +1233,9 @@ mod tests {
         // LAST (only) commoner → self-explosion, illegal.
         let fen = "4k3/8/8/3R4/3p4/3C4/8/8 w - - 0 1";
         let board = Board::from_fen(fen).unwrap();
-        let mut moves = Vec::new();
+        let mut moves = MoveList::new();
         crate::movegen::generate_legal(&board, &mut moves);
-        for &m in &moves {
+        for &m in moves.as_slice() {
             assert!(
                 m.from_sq() != Square::D5 || m.to_sq() != Square::D4,
                 "rook capture on d4 should be illegal (last commoner destroyed)"
@@ -1276,9 +1277,10 @@ mod tests {
         // rook on e5, so the pin is removed and the move is legal.
         let fen = "4k3/8/8/4r3/4p3/4R3/8/4K3 w - - 0 1";
         let board = Board::from_fen(fen).unwrap();
-        let mut moves = Vec::new();
+        let mut moves = MoveList::new();
         crate::movegen::generate_legal(&board, &mut moves);
         let has_rook_e4 = moves
+            .as_slice()
             .iter()
             .any(|&m| m.from_sq() == Square::E3 && m.to_sq() == Square::E4);
         assert!(

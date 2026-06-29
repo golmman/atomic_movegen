@@ -1,6 +1,7 @@
 use atomic_movegen::board::Board;
 use atomic_movegen::movegen;
 use atomic_movegen::perft;
+use atomic_movegen::types::MoveList;
 use std::env;
 
 fn main() {
@@ -14,12 +15,14 @@ fn main() {
 
     let mut board = Board::from_fen(fen).expect("Invalid FEN");
 
-    let mut moves = Vec::with_capacity(256);
+    let mut moves = MoveList::new();
     movegen::generate_legal(&board, &mut moves);
-    moves.sort_by_key(|m| (m.from_sq() as u16, m.to_sq() as u16));
+    moves
+        .as_mut_slice()
+        .sort_by_key(|m| (m.from_sq() as u16, m.to_sq() as u16));
 
     let mut total = 0u64;
-    for &m in &moves {
+    for &m in moves.as_slice() {
         let mut state = atomic_movegen::board::StateInfo::new();
         board.do_move(m, &mut state);
         let cnt = if depth <= 1 {

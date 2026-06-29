@@ -34,12 +34,14 @@ pub mod movegen;
 pub mod pext;
 pub mod types;
 
+use crate::types::MoveList;
+
 pub fn perft(board: &mut board::Board, depth: u32) -> u64 {
     if depth == 0 {
         return 1;
     }
 
-    let mut moves = Vec::with_capacity(256);
+    let mut moves = MoveList::new();
     movegen::generate_legal(board, &mut moves);
 
     if depth == 1 {
@@ -48,7 +50,7 @@ pub fn perft(board: &mut board::Board, depth: u32) -> u64 {
 
     let mut total = 0u64;
     let mut state = board::StateInfo::new();
-    for &m in &moves {
+    for &m in moves.as_slice() {
         board.do_move(m, &mut state);
         total += perft(board, depth - 1);
         board.undo_move(m, &state);

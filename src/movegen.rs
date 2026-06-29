@@ -2,8 +2,7 @@ use crate::attacks;
 use crate::board::{BK_CASTLE, BQ_CASTLE, Board, StateInfo, WK_CASTLE, WQ_CASTLE};
 use crate::types::*;
 
-pub fn generate_pseudo_legal(board: &Board, moves: &mut Vec<Move>) {
-    moves.clear();
+pub fn generate_pseudo_legal(board: &Board, moves: &mut MoveList) {
     let us = board.side_to_move();
     let them = us.flip();
     let occupied = board.occupied();
@@ -84,7 +83,7 @@ fn generate_pawn_moves_for(
     us: Color,
     them: Color,
     from: Square,
-    moves: &mut Vec<Move>,
+    moves: &mut MoveList,
 ) {
     let from_rank = rank_of(from);
     let from_file = file_of(from) as i8;
@@ -168,7 +167,7 @@ fn generate_pawn_moves_for(
     }
 }
 
-fn generate_castling(board: &Board, us: Color, moves: &mut Vec<Move>) {
+fn generate_castling(board: &Board, us: Color, moves: &mut MoveList) {
     let (
         king_side_right,
         queen_side_right,
@@ -227,11 +226,11 @@ fn generate_castling(board: &Board, us: Color, moves: &mut Vec<Move>) {
     }
 }
 
-pub fn generate_legal(board: &Board, moves: &mut Vec<Move>) {
+pub fn generate_legal(board: &Board, moves: &mut MoveList) {
     let mut state = StateInfo::new();
     board.populate_state(&mut state);
     generate_pseudo_legal(board, moves);
-    moves.retain(|&m| board.legal(m, &state));
+    moves.retain(|m| board.legal(m, &state));
 }
 
 #[cfg(test)]
@@ -239,14 +238,12 @@ mod tests {
     use super::*;
     use crate::board::Board;
 
-    const MAX_MOVES: usize = 256;
-
     #[test]
     fn test_starting_position_move_count() {
         let board = Board::new();
-        let mut moves = Vec::with_capacity(256);
+        let mut moves = MoveList::new();
         generate_pseudo_legal(&board, &mut moves);
-        let mut legal_moves = Vec::with_capacity(256);
+        let mut legal_moves = MoveList::new();
         generate_legal(&board, &mut legal_moves);
         // Standard starting position: 20 legal moves
         assert_eq!(legal_moves.len(), 20);
@@ -255,14 +252,16 @@ mod tests {
     #[test]
     fn test_knight_moves_start() {
         let board = Board::new();
-        let mut moves = Vec::with_capacity(MAX_MOVES);
+        let mut moves = MoveList::new();
         generate_pseudo_legal(&board, &mut moves);
-        let knight_moves: Vec<&Move> = moves
+        let knight_moves: Vec<Move> = moves
+            .as_slice()
             .iter()
-            .filter(|m| {
+            .filter(|&&m| {
                 let from = m.from_sq();
                 from == Square::B1 || from == Square::G1
             })
+            .copied()
             .collect();
         // Each knight has 2 moves from starting position
         assert_eq!(knight_moves.len(), 4);

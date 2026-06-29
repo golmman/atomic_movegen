@@ -17,21 +17,23 @@ fn main() {
     let from_sq = parse_sq(&movestr[0..2]);
     let to_sq = parse_sq(&movestr[2..4]);
 
-    let mut moves = Vec::with_capacity(256);
+    let mut moves = MoveList::new();
     movegen::generate_legal(&board, &mut moves);
 
-    for &m in &moves {
+    for &m in moves.as_slice() {
         if m.from_sq() == from_sq && m.to_sq() == to_sq {
             let mut state = atomic_movegen::board::StateInfo::new();
             board.do_move(m, &mut state);
             println!("{}", board.fen());
 
             // Now list legal moves for the other side
-            let mut moves2 = Vec::with_capacity(256);
+            let mut moves2 = MoveList::new();
             movegen::generate_legal(&board, &mut moves2);
-            moves2.sort_by_key(|m| (m.from_sq() as u16, m.to_sq() as u16));
+            moves2
+                .as_mut_slice()
+                .sort_by_key(|m| (m.from_sq() as u16, m.to_sq() as u16));
             println!("Legal moves ({} total):", moves2.len());
-            for &m2 in &moves2 {
+            for &m2 in moves2.as_slice() {
                 println!("  {}{}", sq_str(m2.from_sq()), sq_str(m2.to_sq()));
             }
             return;

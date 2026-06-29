@@ -1035,6 +1035,158 @@ impl ops::Add for Direction {
     }
 }
 
+// ---------------------------------------------------------------------------
+// MoveList — fixed-capacity, stack-allocated list of moves
+// ---------------------------------------------------------------------------
+
+/// Maximum number of moves that can be generated for any atomic chess position.
+///
+/// The absolute upper bound is well below 256:
+/// - At most 64 squares with attackers
+/// - Perft at depth 1 on the most complex legal positions yields < 150 moves
+/// - 256 provides a comfortable safety margin.
+pub const MAX_MOVES: usize = 256;
+
+/// A fixed-capacity, stack-allocated list of `Move` values.
+///
+/// This is a drop-in replacement for `Vec<Move>` in move-generation hot paths.
+/// It avoids heap allocation, eliminates dynamic capacity checks, and improves
+/// cache locality by keeping the entire move list on the stack.
+#[derive(Debug, Clone)]
+pub struct MoveList {
+    moves: [Move; MAX_MOVES],
+    len: usize,
+}
+
+impl MoveList {
+    /// Creates an empty `MoveList`.
+    #[inline]
+    pub fn new() -> Self {
+        MoveList {
+            moves: [Move::NONE; MAX_MOVES],
+            len: 0,
+        }
+    }
+
+    /// Returns the number of moves currently stored.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Returns `true` if the list contains zero moves.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Appends a move to the end of the list.
+    ///
+    /// # Panics
+    /// Panics in debug mode if the list is full (`len == MAX_MOVES`).
+    /// In release mode, exceeding the capacity silently overwrites (unreachable
+    /// in practice due to the move-count bound).
+    #[inline]
+    pub fn push(&mut self, m: Move) {
+        debug_assert!(self.len < MAX_MOVES, "MoveList overflow");
+        // Safe: unreachable in practice due to move-count bound.
+        if self.len < MAX_MOVES {
+            self.moves[self.len] = m;
+            self.len += 1;
+        }
+    }
+
+    /// Removes all moves from the list (retains the allocated array).
+    #[inline]
+    pub fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    /// Returns the stored moves as a slice.
+    #[inline]
+    pub fn as_slice(&self) -> &[Move] {
+        &self.moves[..self.len]
+    }
+
+    /// Returns the stored moves as a mutable slice (for sorting, etc.).
+    #[inline]
+    pub fn as_mut_slice(&mut self) -> &mut [Move] {
+        let len = self.len;
+        &mut self.moves[..len]
+    }
+
+    /// Retains only the moves satisfying the predicate, compacting in place.
+    pub fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(Move) -> bool,
+    {
+        let mut write_idx = 0;
+        for i in 0..self.len {
+            let m = self.moves[i];
+            if f(m) {
+                self.moves[write_idx] = m;
+                write_idx += 1;
+            }
+        }
+        self.len = write_idx;
+    }
+}
+
+impl Default for MoveList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Iteration over `&MoveList` yields `Move` by value (cheap copy).
+impl<'a> IntoIterator for &'a MoveList {
+    type Item = Move;
+    type IntoIter = MoveListIter<'a>;
+
+    fn into_iter(self) -> MoveListIter<'a> {
+        MoveListIter {
+            iter: self.as_slice().iter(),
+        }
+    }
+}
+
+/// An iterator over the moves in a `MoveList`.
+pub struct MoveListIter<'a> {
+    iter: std::slice::Iter<'a, Move>,
+}
+
+impl<'a> Iterator for MoveListIter<'a> {
+    type Item = Move;
+
+    #[inline]
+    fn next(&mut self) -> Option<Move> {
+        self.iter.next().copied()
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
+    }
+}
+
+impl<'a> ExactSizeIterator for MoveListIter<'a> {}
+
+impl ops::Index<usize> for MoveList {
+    type Output = Move;
+
+    #[inline]
+    fn index(&self, index: usize) -> &Move {
+        &self.moves[index]
+    }
+}
+
+impl ops::IndexMut<usize> for MoveList {
+    #[inline]
+    fn index_mut(&mut self, index: usize) -> &mut Move {
+        &mut self.moves[index]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -13,11 +13,11 @@ fn main() {
     let fen = &args[1];
     let board = Board::from_fen(fen).expect("Invalid FEN");
 
-    let mut pseudo = Vec::with_capacity(256);
+    let mut pseudo = MoveList::new();
     movegen::generate_pseudo_legal(&board, &mut pseudo);
 
     let mut pseudo_set = HashSet::new();
-    for &m in &pseudo {
+    for &m in pseudo.as_slice() {
         if !pseudo_set.insert((m.from_sq(), m.to_sq(), m.move_type())) {
             println!(
                 "DUPLICATE PSEUDO-LEGAL: {}{}",
@@ -27,11 +27,11 @@ fn main() {
         }
     }
 
-    let mut legal = Vec::with_capacity(256);
+    let mut legal = MoveList::new();
     movegen::generate_legal(&board, &mut legal);
 
     let mut legal_set = HashSet::new();
-    for &m in &legal {
+    for &m in legal.as_slice() {
         if !legal_set.insert((m.from_sq(), m.to_sq(), m.move_type())) {
             println!(
                 "DUPLICATE LEGAL: {}{}",
