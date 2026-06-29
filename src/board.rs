@@ -362,6 +362,9 @@ impl Board {
                     & self.pieces_color(them))
                 | (attacks::knight_attacks(ksq)
                     & self.by_type[PieceType::Knight as usize]
+                    & self.pieces_color(them))
+                | (attacks::pawn_attacks(us, ksq)
+                    & self.by_type[PieceType::Pawn as usize]
                     & self.pieces_color(them));
         }
 
@@ -417,6 +420,15 @@ impl Board {
 
     pub fn pinned(&self, c: Color) -> Bitboard {
         self.compute_pinned(c)
+    }
+
+    /// Fill cached state fields (checkers, pinned, commoner counts) for the
+    /// current position so that `legal()` can read them instead of recomputing.
+    pub fn populate_state(&self, state: &mut StateInfo) {
+        state.checkers = self.compute_checkers(self.side_to_move);
+        state.pinned = self.compute_pinned(self.side_to_move);
+        state.commoners_count = self.commoners(self.side_to_move).count();
+        state.them_commoners_count = self.commoners(self.side_to_move.flip()).count();
     }
 
     pub fn do_move(&mut self, m: Move, state: &mut StateInfo) {
@@ -558,6 +570,9 @@ impl Board {
 
         self.side_to_move = them;
         self.game_ply += 1;
+
+        // Populate cached state for the new position
+        self.populate_state(state);
     }
 
     pub fn undo_move(&mut self, m: Move, state: &StateInfo) {
@@ -661,15 +676,36 @@ impl Board {
         }
     }
 
-    pub fn legal(&self, m: Move, _state: &StateInfo) -> bool {
+    pub fn legal(&self, m: Move, state: &StateInfo) -> bool {
         let from = m.from_sq();
         let to = m.to_sq();
         let us = self.side_to_move;
         let them = us.flip();
 
         // Moving piece must exist
-        if self.piece_on(from) == NO_PIECE {
+        let piece = self.piece_on(from);
+        if piece == NO_PIECE {
             return false;
+        }
+        let pt = piece.type_of();
+
+        // Pre-compute is_capture (needed for both early-out and later logic)
+        let is_capture = m.move_type() != MoveType::Castling
+            && (m.move_type() == MoveType::EnPassant || self.piece_on(to) != NO_PIECE);
+
+        // Early-out for trivially safe moves:
+        // A non-capture, non-commoner, non-en-passant move by a non-blocker when
+        // there are no checkers cannot possibly expose a commoner to attack.
+        // We must also verify that we still have at least one commoner (the
+        // previous move may have destroyed our last commoner via blast).
+        if state.checkers.is_empty()
+            && !is_capture
+            && m.move_type() != MoveType::EnPassant
+            && pt != PieceType::Commoner
+            && (state.pinned & Bitboard::square_bb(from)).is_empty()
+            && state.commoners_count > 0
+        {
+            return true;
         }
 
         // Castling: check pass-through squares BEFORE the move
@@ -752,9 +788,6 @@ impl Board {
 
         // Apply blast on capture
         // Castling encodes the rook's square as `to`, not a capture target.
-        let is_capture = m.move_type() != MoveType::Castling
-            && (m.move_type() == MoveType::EnPassant || self.piece_on(to) != NO_PIECE);
-
         if is_capture {
             // Use PRE-MOVE board state for blast computation (matching reference).
             // Adjacent blast removes non-pawn pieces within king-attacks of kto.
@@ -800,8 +833,8 @@ impl Board {
         //   if (!(pseudoRoyalsTheirs & ~occupied)) // skip if enemy PR destroyed
         //       while (pseudoRoyals)              // for each own PR
         //           // check adjacency immunity + attackers
-        let our_pr_count = self.commoners(us).count();
-        let them_pr_count = self.commoners(them).count();
+        let our_pr_count = state.commoners_count as usize;
+        let them_pr_count = state.them_commoners_count as usize;
 
         // Only check attacks if we have ≤1 commoner (pseudo-royal threshold).
         if our_pr_count <= 1 {

@@ -228,7 +228,8 @@ fn generate_castling(board: &Board, us: Color, moves: &mut Vec<Move>) {
 }
 
 pub fn generate_legal(board: &Board, moves: &mut Vec<Move>) {
-    let state = StateInfo::new();
+    let mut state = StateInfo::new();
+    board.populate_state(&mut state);
     generate_pseudo_legal(board, moves);
     moves.retain(|&m| board.legal(m, &state));
 }
