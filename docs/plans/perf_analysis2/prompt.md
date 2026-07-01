@@ -24,4 +24,5 @@ Store the plan in `docs/plans/perf_analysis2/plan1.md`
 
 Analyze where we finished last time: `docs/plans/perf_analysis2/report1.md`
 Create a plan for the implementation of the next item(s) of `docs/plans/perf_analysis2/analysis.md`.
+Tests against the baseline should be done via `cargo run --release --example verify_perft`.
 Store the plan in `docs/plans/perf_analysis2/plan2.md`
