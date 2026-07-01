@@ -339,6 +339,73 @@ pub(crate) const ROOK_DIRS: [(i8, i8); 4] = [(0, 1), (0, -1), (1, 0), (-1, 0)];
 pub(crate) const BISHOP_DIRS: [(i8, i8); 4] = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
 
 // ---------------------------------------------------------------------------
+// MagicEntry — co-located per-square constants for magic bitboard lookup
+// ---------------------------------------------------------------------------
+
+/// Per-square constant data for a magic bitboard lookup.
+///
+/// Packed into 24 bytes (Bitboard + u64 + u32 + u32) to fit in one
+/// 64-byte cache line, with room for a second entry.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MagicEntry {
+    pub mask: Bitboard,
+    pub magic: u64,
+    /// `64 - index_bits` — the right-shift amount for the magic index.
+    pub shift: u32,
+    /// Offset into the flat attack table for this square.
+    pub offset: u32,
+}
+
+/// Compute `ROOK_ENTRIES` at compile time from the raw parallel arrays.
+const fn compute_rook_entries() -> [MagicEntry; 64] {
+    let mut entries = [MagicEntry {
+        mask: Bitboard(0),
+        magic: 0,
+        shift: 0,
+        offset: 0,
+    }; 64];
+    let mut total: u32 = 0;
+    let mut i = 0;
+    while i < 64 {
+        entries[i] = MagicEntry {
+            mask: ROOK_MASKS[i],
+            magic: ROOK_MAGICS[i],
+            shift: 64 - ROOK_INDEX_BITS[i],
+            offset: total,
+        };
+        total += 1u32 << ROOK_INDEX_BITS[i];
+        i += 1;
+    }
+    entries
+}
+
+/// Compute `BISHOP_ENTRIES` at compile time from the raw parallel arrays.
+const fn compute_bishop_entries() -> [MagicEntry; 64] {
+    let mut entries = [MagicEntry {
+        mask: Bitboard(0),
+        magic: 0,
+        shift: 0,
+        offset: 0,
+    }; 64];
+    let mut total: u32 = 0;
+    let mut i = 0;
+    while i < 64 {
+        entries[i] = MagicEntry {
+            mask: BISHOP_MASKS[i],
+            magic: BISHOP_MAGICS[i],
+            shift: 64 - BISHOP_INDEX_BITS[i],
+            offset: total,
+        };
+        total += 1u32 << BISHOP_INDEX_BITS[i];
+        i += 1;
+    }
+    entries
+}
+
+pub(crate) const ROOK_ENTRIES: [MagicEntry; 64] = compute_rook_entries();
+pub(crate) const BISHOP_ENTRIES: [MagicEntry; 64] = compute_bishop_entries();
+
+// ---------------------------------------------------------------------------
 // Reference sliding attack (loop-based, used only during table init)
 // ---------------------------------------------------------------------------
 
@@ -451,25 +518,17 @@ static BISHOP_TABLE: LazyLock<Box<[Bitboard]>> = LazyLock::new(|| {
 /// Return the attack set for a bishop on `sq` given the `occupied` board.
 #[inline(always)]
 pub fn bishop_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
-    let sq_idx = sq as usize;
-    let mask = BISHOP_MASKS[sq_idx];
-    let idx = ((occupied & mask).0.wrapping_mul(BISHOP_MAGICS[sq_idx]))
-        >> (64 - BISHOP_INDEX_BITS[sq_idx]);
-    let offset = BISHOP_OFFSETS[sq_idx];
-    // SAFETY: The table is initialized once; the index is always in bounds
-    // because the magic number guarantees a perfect hash within the table size.
-    BISHOP_TABLE[offset + idx as usize]
+    let e = &BISHOP_ENTRIES[sq as usize];
+    let idx = ((occupied & e.mask).0.wrapping_mul(e.magic)) >> e.shift;
+    BISHOP_TABLE[e.offset as usize + idx as usize]
 }
 
 /// Return the attack set for a rook on `sq` given the `occupied` board.
 #[inline(always)]
 pub fn rook_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
-    let sq_idx = sq as usize;
-    let mask = ROOK_MASKS[sq_idx];
-    let idx =
-        ((occupied & mask).0.wrapping_mul(ROOK_MAGICS[sq_idx])) >> (64 - ROOK_INDEX_BITS[sq_idx]);
-    let offset = ROOK_OFFSETS[sq_idx];
-    ROOK_TABLE[offset + idx as usize]
+    let e = &ROOK_ENTRIES[sq as usize];
+    let idx = ((occupied & e.mask).0.wrapping_mul(e.magic)) >> e.shift;
+    ROOK_TABLE[e.offset as usize + idx as usize]
 }
 
 /// Return the attack set for a queen (bishop + rook).

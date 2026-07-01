@@ -2,6 +2,7 @@ use std::fmt;
 use std::ops;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
 pub enum Square {
     A1,
     B1,
@@ -145,6 +146,7 @@ pub fn is_ok(s: Square) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
 pub enum File {
     A,
     B,
@@ -161,6 +163,7 @@ impl File {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
 pub enum Rank {
     R1,
     R2,
@@ -177,33 +180,15 @@ impl Rank {
 }
 
 pub fn file_of(s: Square) -> File {
-    let idx = s as usize;
-    let files = [
-        File::A,
-        File::B,
-        File::C,
-        File::D,
-        File::E,
-        File::F,
-        File::G,
-        File::H,
-    ];
-    files[idx % 8]
+    let idx = s as u8;
+    // SAFETY: idx & 7 produces a value in 0..7, all valid File discriminants.
+    unsafe { std::mem::transmute(idx & 7) }
 }
 
 pub fn rank_of(s: Square) -> Rank {
-    let idx = s as usize;
-    let ranks = [
-        Rank::R1,
-        Rank::R2,
-        Rank::R3,
-        Rank::R4,
-        Rank::R5,
-        Rank::R6,
-        Rank::R7,
-        Rank::R8,
-    ];
-    ranks[idx / 8]
+    let idx = s as u8;
+    // SAFETY: (idx >> 3) & 7 produces a value in 0..7, all valid Rank discriminants.
+    unsafe { std::mem::transmute((idx >> 3) & 7) }
 }
 
 pub fn make_square(f: File, r: Rank) -> Square {
@@ -324,146 +309,18 @@ impl Bitboard {
 
     pub fn lsb(self) -> Square {
         debug_assert!(!self.is_empty());
-        let idx = self.0.trailing_zeros() as usize;
-        static SQUARES: [Square; 64] = [
-            Square::A1,
-            Square::B1,
-            Square::C1,
-            Square::D1,
-            Square::E1,
-            Square::F1,
-            Square::G1,
-            Square::H1,
-            Square::A2,
-            Square::B2,
-            Square::C2,
-            Square::D2,
-            Square::E2,
-            Square::F2,
-            Square::G2,
-            Square::H2,
-            Square::A3,
-            Square::B3,
-            Square::C3,
-            Square::D3,
-            Square::E3,
-            Square::F3,
-            Square::G3,
-            Square::H3,
-            Square::A4,
-            Square::B4,
-            Square::C4,
-            Square::D4,
-            Square::E4,
-            Square::F4,
-            Square::G4,
-            Square::H4,
-            Square::A5,
-            Square::B5,
-            Square::C5,
-            Square::D5,
-            Square::E5,
-            Square::F5,
-            Square::G5,
-            Square::H5,
-            Square::A6,
-            Square::B6,
-            Square::C6,
-            Square::D6,
-            Square::E6,
-            Square::F6,
-            Square::G6,
-            Square::H6,
-            Square::A7,
-            Square::B7,
-            Square::C7,
-            Square::D7,
-            Square::E7,
-            Square::F7,
-            Square::G7,
-            Square::H7,
-            Square::A8,
-            Square::B8,
-            Square::C8,
-            Square::D8,
-            Square::E8,
-            Square::F8,
-            Square::G8,
-            Square::H8,
-        ];
-        SQUARES[idx]
+        let idx = self.0.trailing_zeros() as u8;
+        // SAFETY: trailing_zeros() returns 0..63 when self is non-empty.
+        // All discriminants 0..63 are valid Square values.
+        unsafe { std::mem::transmute(idx) }
     }
 
     pub fn msb(self) -> Square {
         debug_assert!(!self.is_empty());
-        let idx = 63 - self.0.leading_zeros() as usize;
-        static SQUARES: [Square; 64] = [
-            Square::A1,
-            Square::B1,
-            Square::C1,
-            Square::D1,
-            Square::E1,
-            Square::F1,
-            Square::G1,
-            Square::H1,
-            Square::A2,
-            Square::B2,
-            Square::C2,
-            Square::D2,
-            Square::E2,
-            Square::F2,
-            Square::G2,
-            Square::H2,
-            Square::A3,
-            Square::B3,
-            Square::C3,
-            Square::D3,
-            Square::E3,
-            Square::F3,
-            Square::G3,
-            Square::H3,
-            Square::A4,
-            Square::B4,
-            Square::C4,
-            Square::D4,
-            Square::E4,
-            Square::F4,
-            Square::G4,
-            Square::H4,
-            Square::A5,
-            Square::B5,
-            Square::C5,
-            Square::D5,
-            Square::E5,
-            Square::F5,
-            Square::G5,
-            Square::H5,
-            Square::A6,
-            Square::B6,
-            Square::C6,
-            Square::D6,
-            Square::E6,
-            Square::F6,
-            Square::G6,
-            Square::H6,
-            Square::A7,
-            Square::B7,
-            Square::C7,
-            Square::D7,
-            Square::E7,
-            Square::F7,
-            Square::G7,
-            Square::H7,
-            Square::A8,
-            Square::B8,
-            Square::C8,
-            Square::D8,
-            Square::E8,
-            Square::F8,
-            Square::G8,
-            Square::H8,
-        ];
-        SQUARES[idx]
+        let idx = (63 - self.0.leading_zeros()) as u8;
+        // SAFETY: leading_zeros() returns 0..63 on u64, so (63 - leading_zeros()) is 0..63.
+        // All discriminants 0..63 are valid Square values.
+        unsafe { std::mem::transmute(idx) }
     }
 
     pub fn pop_lsb(&mut self) -> Square {
@@ -597,6 +454,7 @@ impl ops::Not for Color {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
 pub enum PieceType {
     Pawn = 0,
     Knight = 1,
@@ -629,19 +487,14 @@ impl Piece {
 
     pub fn type_of(self) -> PieceType {
         let inner = (self.0 & 7).wrapping_sub(1);
-        static TYPES: [PieceType; 6] = [
-            PieceType::Pawn,
-            PieceType::Knight,
-            PieceType::Bishop,
-            PieceType::Rook,
-            PieceType::Queen,
-            PieceType::Commoner,
-        ];
-        if inner < 6 {
-            TYPES[inner as usize]
-        } else {
-            PieceType::Pawn
-        }
+        debug_assert!(
+            inner < 6,
+            "Piece::type_of called with invalid Piece encoding: inner={}",
+            inner
+        );
+        // SAFETY: For valid pieces, (self.0 & 7) is in 1..=6, so wrapping_sub(1) maps to 0..=5.
+        // All PieceType discriminants 0..=5 are valid.
+        unsafe { std::mem::transmute(inner) }
     }
 
     pub fn is_ok(self) -> bool {
@@ -712,145 +565,17 @@ impl Move {
     pub const NULL: Move = Move(1 + (1 << 6));
 
     pub fn from_sq(self) -> Square {
-        let idx = ((self.0 >> 6) & 0x3f) as usize;
-        static SQUARES: [Square; 64] = [
-            Square::A1,
-            Square::B1,
-            Square::C1,
-            Square::D1,
-            Square::E1,
-            Square::F1,
-            Square::G1,
-            Square::H1,
-            Square::A2,
-            Square::B2,
-            Square::C2,
-            Square::D2,
-            Square::E2,
-            Square::F2,
-            Square::G2,
-            Square::H2,
-            Square::A3,
-            Square::B3,
-            Square::C3,
-            Square::D3,
-            Square::E3,
-            Square::F3,
-            Square::G3,
-            Square::H3,
-            Square::A4,
-            Square::B4,
-            Square::C4,
-            Square::D4,
-            Square::E4,
-            Square::F4,
-            Square::G4,
-            Square::H4,
-            Square::A5,
-            Square::B5,
-            Square::C5,
-            Square::D5,
-            Square::E5,
-            Square::F5,
-            Square::G5,
-            Square::H5,
-            Square::A6,
-            Square::B6,
-            Square::C6,
-            Square::D6,
-            Square::E6,
-            Square::F6,
-            Square::G6,
-            Square::H6,
-            Square::A7,
-            Square::B7,
-            Square::C7,
-            Square::D7,
-            Square::E7,
-            Square::F7,
-            Square::G7,
-            Square::H7,
-            Square::A8,
-            Square::B8,
-            Square::C8,
-            Square::D8,
-            Square::E8,
-            Square::F8,
-            Square::G8,
-            Square::H8,
-        ];
-        SQUARES[idx]
+        let idx = ((self.0 >> 6) & 0x3f) as u8;
+        // SAFETY: (self.0 >> 6) & 0x3f extracts a 6-bit field (0..63).
+        // All discriminants 0..63 are valid Square values.
+        unsafe { std::mem::transmute(idx) }
     }
 
     pub fn to_sq(self) -> Square {
-        let idx = (self.0 & 0x3f) as usize;
-        static SQUARES: [Square; 64] = [
-            Square::A1,
-            Square::B1,
-            Square::C1,
-            Square::D1,
-            Square::E1,
-            Square::F1,
-            Square::G1,
-            Square::H1,
-            Square::A2,
-            Square::B2,
-            Square::C2,
-            Square::D2,
-            Square::E2,
-            Square::F2,
-            Square::G2,
-            Square::H2,
-            Square::A3,
-            Square::B3,
-            Square::C3,
-            Square::D3,
-            Square::E3,
-            Square::F3,
-            Square::G3,
-            Square::H3,
-            Square::A4,
-            Square::B4,
-            Square::C4,
-            Square::D4,
-            Square::E4,
-            Square::F4,
-            Square::G4,
-            Square::H4,
-            Square::A5,
-            Square::B5,
-            Square::C5,
-            Square::D5,
-            Square::E5,
-            Square::F5,
-            Square::G5,
-            Square::H5,
-            Square::A6,
-            Square::B6,
-            Square::C6,
-            Square::D6,
-            Square::E6,
-            Square::F6,
-            Square::G6,
-            Square::H6,
-            Square::A7,
-            Square::B7,
-            Square::C7,
-            Square::D7,
-            Square::E7,
-            Square::F7,
-            Square::G7,
-            Square::H7,
-            Square::A8,
-            Square::B8,
-            Square::C8,
-            Square::D8,
-            Square::E8,
-            Square::F8,
-            Square::G8,
-            Square::H8,
-        ];
-        SQUARES[idx]
+        let idx = (self.0 & 0x3f) as u8;
+        // SAFETY: self.0 & 0x3f extracts a 6-bit field (0..63).
+        // All discriminants 0..63 are valid Square values.
+        unsafe { std::mem::transmute(idx) }
     }
 
     pub fn move_type(self) -> MoveType {
