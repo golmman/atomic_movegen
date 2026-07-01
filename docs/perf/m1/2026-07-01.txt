@@ -1,0 +1,113 @@
+Before implementation of `docs/plans/perf_analysis2/plan2.md`:
+
+=== Perft verification ===
+  Source:     perft_values.md
+  Max depth:  6
+  Test cases: 41
+
+  Test #1    PASS (6 depths) [0.979 s]
+  Test #2    PASS (6 depths) [14.247 s]
+  Test #3    PASS (6 depths) [1.512 s]
+  Test #4    PASS (6 depths) [1.535 s]
+  Test #5    PASS (6 depths) [0.282 s]
+  Test #6    PASS (6 depths) [0.263 s]
+  Test #7    PASS (6 depths) [0.116 s]
+  Test #8    PASS (6 depths) [0.024 s]
+  Test #9    PASS (6 depths) [0.127 s]
+  Test #10   PASS (6 depths) [0.368 s]
+  Test #11   PASS (6 depths) [0.175 s]
+  Test #12   PASS (6 depths) [1.848 s]
+  Test #13   PASS (6 depths) [16.960 s]
+  Test #14   PASS (6 depths) [2.211 s]
+  Test #15   PASS (6 depths) [2.795 s]
+  Test #16   PASS (6 depths) [6.018 s]
+  Test #17   PASS (6 depths) [0.252 s]
+  Test #18   PASS (6 depths) [0.078 s]
+  Test #19   PASS (6 depths) [0.095 s]
+  Test #20   PASS (6 depths) [1.110 s]
+  Test #21   PASS (6 depths) [6.242 s]
+  Test #22   PASS (6 depths) [7.662 s]
+  Test #23   PASS (6 depths) [6.454 s]
+  Test #24   PASS (6 depths) [7.544 s]
+  Test #25   PASS (6 depths) [0.643 s]
+  Test #26   PASS (6 depths) [4.264 s]
+  Test #27   PASS (6 depths) [0.196 s]
+  Test #28   PASS (6 depths) [0.013 s]
+  Test #29   PASS (6 depths) [0.012 s]
+  Test #30   PASS (6 depths) [0.001 s]
+  Test #31   PASS (6 depths) [2.926 s]
+  Test #32   PASS (6 depths) [5.698 s]
+  Test #33   PASS (6 depths) [15.065 s]
+  Test #34   PASS (6 depths) [0.207 s]
+  Test #35   PASS (6 depths) [0.802 s]
+  Test #36   PASS (6 depths) [0.053 s]
+  Test #37   PASS (6 depths) [0.273 s]
+  Test #38   PASS (6 depths) [0.489 s]
+  Test #39   PASS (6 depths) [0.159 s]
+  Test #40   PASS (6 depths) [0.017 s]
+  Test #41   PASS (6 depths) [0.265 s]
+
+--- Summary ---
+  Fastest:     Test #30 (0.001 s)
+  Slowest:     Test #13 (16.960 s)
+  Average:     2.682 s per test
+  Total time:  109.980 s
+  Result:      41/41 passed, 0/41 failed
+
+----
+
+After implementation of `docs/plans/perf_analysis2/plan2.md`:
+
+=== Perft verification ===
+  Source:     perft_values.md
+  Max depth:  6
+  Test cases: 41
+
+  Test #1    PASS (6 depths) [0.860 s]
+  Test #2    PASS (6 depths) [13.337 s]
+  Test #3    PASS (6 depths) [1.505 s]
+  Test #4    PASS (6 depths) [1.560 s]
+  Test #5    PASS (6 depths) [0.283 s]
+  Test #6    PASS (6 depths) [0.258 s]
+  Test #7    PASS (6 depths) [0.115 s]
+  Test #8    PASS (6 depths) [0.025 s]
+  Test #9    PASS (6 depths) [0.147 s]
+  Test #10   PASS (6 depths) [0.449 s]
+  Test #11   PASS (6 depths) [0.195 s]
+  Test #12   PASS (6 depths) [2.255 s]
+  Test #13   PASS (6 depths) [16.001 s]
+  Test #14   PASS (6 depths) [2.125 s]
+  Test #15   PASS (6 depths) [2.641 s]
+  Test #16   PASS (6 depths) [5.770 s]
+  Test #17   PASS (6 depths) [0.240 s]
+  Test #18   PASS (6 depths) [0.075 s]
+  Test #19   PASS (6 depths) [0.092 s]
+  Test #20   PASS (6 depths) [1.163 s]
+  Test #21   PASS (6 depths) [5.849 s]
+  Test #22   PASS (6 depths) [7.311 s]
+  Test #23   PASS (6 depths) [6.264 s]
+  Test #24   PASS (6 depths) [7.341 s]
+  Test #25   PASS (6 depths) [0.613 s]
+  Test #26   PASS (6 depths) [4.159 s]
+  Test #27   PASS (6 depths) [0.199 s]
+  Test #28   PASS (6 depths) [0.014 s]
+  Test #29   PASS (6 depths) [0.012 s]
+  Test #30   PASS (6 depths) [0.002 s]
+  Test #31   PASS (6 depths) [2.954 s]
+  Test #32   PASS (6 depths) [5.679 s]
+  Test #33   PASS (6 depths) [15.047 s]
+  Test #34   PASS (6 depths) [0.195 s]
+  Test #35   PASS (6 depths) [0.826 s]
+  Test #36   PASS (6 depths) [0.053 s]
+  Test #37   PASS (6 depths) [0.286 s]
+  Test #38   PASS (6 depths) [0.502 s]
+  Test #39   PASS (6 depths) [0.167 s]
+  Test #40   PASS (6 depths) [0.018 s]
+  Test #41   PASS (6 depths) [0.291 s]
+
+--- Summary ---
+  Fastest:     Test #30 (0.002 s)
+  Slowest:     Test #13 (16.001 s)
+  Average:     2.607 s per test
+  Total time:  106.875 s
+  Result:      41/41 passed, 0/41 failed

@@ -687,24 +687,13 @@ impl Board {
         if piece == NO_PIECE {
             return false;
         }
-        let pt = piece.type_of();
 
-        // Pre-compute is_capture (needed for both early-out and later logic)
+        // Pre-compute is_capture (needed for early-out and later logic)
         let is_capture = m.move_type() != MoveType::Castling
             && (m.move_type() == MoveType::EnPassant || self.piece_on(to) != NO_PIECE);
 
-        // Early-out for trivially safe moves:
-        // A non-capture, non-commoner, non-en-passant move by a non-blocker when
-        // there are no checkers cannot possibly expose a commoner to attack.
-        // We must also verify that we still have at least one commoner (the
-        // previous move may have destroyed our last commoner via blast).
-        if state.checkers.is_empty()
-            && !is_capture
-            && m.move_type() != MoveType::EnPassant
-            && pt != PieceType::Commoner
-            && (state.pinned & Bitboard::square_bb(from)).is_empty()
-            && state.commoners_count > 0
-        {
+        // Fast-path: delegate to the trivially-legal check.
+        if is_move_trivially_legal(self, m, state) {
             return true;
         }
 
@@ -893,6 +882,52 @@ impl Board {
 
         true
     }
+}
+
+/// Returns `true` when `m` is trivially legal — i.e. not a capture, not a
+/// commoner move, not en-passant, the moving piece is unpinned, there are no
+/// checkers, and at least one own commoner still exists.
+///
+/// When this returns `true` the move is guaranteed legal without needing the
+/// full `legal()` check (blast, pseudo-royal, castling pass-through).
+#[inline(always)]
+pub(crate) fn is_move_trivially_legal(board: &Board, m: Move, state: &StateInfo) -> bool {
+    if !state.checkers.is_empty() {
+        return false;
+    }
+    if state.commoners_count == 0 {
+        return false;
+    }
+
+    let from = m.from_sq();
+    let pt = board.piece_on(from).type_of();
+    if pt == PieceType::Commoner {
+        return false;
+    }
+
+    let mt = m.move_type();
+    if mt == MoveType::EnPassant {
+        return false;
+    }
+
+    // A non-Castling move that captures a piece (EnPassant already handled above).
+    let is_capture = mt != MoveType::Castling && board.piece_on(m.to_sq()) != NO_PIECE;
+    if is_capture {
+        return false;
+    }
+
+    // Castling reaches here (not a capture, not en-passant, not a commoner move).
+    // Castling still needs the full pass-through check, so reject fast-path.
+    if mt == MoveType::Castling {
+        return false;
+    }
+
+    // Check pin: a pinned piece might expose a commoner.
+    if (state.pinned & Bitboard::square_bb(from)) != Bitboard::EMPTY {
+        return false;
+    }
+
+    true
 }
 
 impl fmt::Display for Board {

@@ -1102,6 +1102,14 @@ impl MoveList {
         self.len = 0;
     }
 
+    /// Sets the length directly (caller must ensure `len <= MAX_MOVES` and
+    /// that elements beyond `len` are unused).
+    #[inline]
+    pub(crate) fn set_len(&mut self, len: usize) {
+        debug_assert!(len <= MAX_MOVES, "MoveList::set_len overflow");
+        self.len = len;
+    }
+
     /// Returns the stored moves as a slice.
     #[inline]
     pub fn as_slice(&self) -> &[Move] {

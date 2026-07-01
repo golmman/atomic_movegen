@@ -1,5 +1,7 @@
 use crate::attacks;
-use crate::board::{BK_CASTLE, BQ_CASTLE, Board, StateInfo, WK_CASTLE, WQ_CASTLE};
+use crate::board::{
+    BK_CASTLE, BQ_CASTLE, Board, StateInfo, WK_CASTLE, WQ_CASTLE, is_move_trivially_legal,
+};
 use crate::types::*;
 
 pub fn generate_pseudo_legal(board: &Board, moves: &mut MoveList) {
@@ -230,7 +232,30 @@ pub fn generate_legal(board: &Board, moves: &mut MoveList) {
     let mut state = StateInfo::new();
     board.populate_state(&mut state);
     generate_pseudo_legal(board, moves);
-    moves.retain(|m| board.legal(m, &state));
+
+    // In-place compaction: fast-path accept without legal() call.
+    let orig_len = moves.len();
+    if orig_len == 0 {
+        return;
+    }
+
+    let new_len = {
+        let ms = moves.as_mut_slice();
+        let mut write_idx = 0;
+        for read_idx in 0..orig_len {
+            let m = ms[read_idx];
+            if is_move_trivially_legal(board, m, &state) || board.legal(m, &state) {
+                ms[write_idx] = m;
+                write_idx += 1;
+            }
+        }
+        write_idx
+    };
+    // SAFETY: new_len <= orig_len (we only copy, never create new entries).
+    // The unchecked set_len avoids redundant zeroing; values at indices
+    // >= new_len are stale but never accessed because as_slice()/len() use
+    // the updated length.
+    moves.set_len(new_len);
 }
 
 #[cfg(test)]
