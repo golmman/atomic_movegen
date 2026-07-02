@@ -46,34 +46,42 @@ pub fn adjacent_files_bb(f: File) -> Bitboard {
     b
 }
 
+#[inline(always)]
 pub fn shift_north(b: Bitboard) -> Bitboard {
     b << 8
 }
 
+#[inline(always)]
 pub fn shift_south(b: Bitboard) -> Bitboard {
     b >> 8
 }
 
+#[inline(always)]
 pub fn shift_east(b: Bitboard) -> Bitboard {
     (b & !FILE_HBB) << 1
 }
 
+#[inline(always)]
 pub fn shift_west(b: Bitboard) -> Bitboard {
     (b & !FILE_ABB) >> 1
 }
 
+#[inline(always)]
 pub fn shift_ne(b: Bitboard) -> Bitboard {
     (b & !FILE_HBB) << 9
 }
 
+#[inline(always)]
 pub fn shift_nw(b: Bitboard) -> Bitboard {
     (b & !FILE_ABB) << 7
 }
 
+#[inline(always)]
 pub fn shift_se(b: Bitboard) -> Bitboard {
     (b & !FILE_HBB) >> 7
 }
 
+#[inline(always)]
 pub fn shift_sw(b: Bitboard) -> Bitboard {
     (b & !FILE_ABB) >> 9
 }

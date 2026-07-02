@@ -25,6 +25,13 @@ fn char_to_piece(c: char) -> Option<Piece> {
 
 #[derive(Debug, Clone)]
 pub struct StateInfo {
+    // Hot fields (read in legal() and generate_legal())
+    pub checkers: Bitboard,
+    pub pinned: Bitboard,
+    pub commoners_count: u32,
+    pub them_commoners_count: u32,
+
+    // Cold fields (read in undo_move, write in do_move / populate_state)
     pub castling_rights: u8,
     pub ep_square: Option<Square>,
     pub rule50: u8,
@@ -32,10 +39,6 @@ pub struct StateInfo {
     pub captured: [(Square, Piece); 9],
     pub cap_sq: Option<Square>,
     pub cap_piece: Piece,
-    pub checkers: Bitboard,
-    pub pinned: Bitboard,
-    pub commoners_count: u32,
-    pub them_commoners_count: u32,
 }
 
 impl Default for StateInfo {
@@ -47,6 +50,10 @@ impl Default for StateInfo {
 impl StateInfo {
     pub fn new() -> Self {
         StateInfo {
+            checkers: Bitboard::EMPTY,
+            pinned: Bitboard::EMPTY,
+            commoners_count: 0,
+            them_commoners_count: 0,
             castling_rights: 0,
             ep_square: None,
             rule50: 0,
@@ -54,10 +61,6 @@ impl StateInfo {
             captured: [(Square::NONE, NO_PIECE); 9],
             cap_sq: None,
             cap_piece: NO_PIECE,
-            checkers: Bitboard::EMPTY,
-            pinned: Bitboard::EMPTY,
-            commoners_count: 0,
-            them_commoners_count: 0,
         }
     }
 }
@@ -257,6 +260,7 @@ impl Board {
         fen
     }
 
+    #[inline(always)]
     pub fn piece_on(&self, sq: Square) -> Piece {
         self.squares[sq as usize]
     }
@@ -269,14 +273,17 @@ impl Board {
         self.by_color[0] | self.by_color[1]
     }
 
+    #[inline(always)]
     pub fn pieces_color(&self, c: Color) -> Bitboard {
         self.by_color[c as usize]
     }
 
+    #[inline(always)]
     pub fn pieces_pt(&self, pt: PieceType) -> Bitboard {
         self.by_type[pt as usize]
     }
 
+    #[inline(always)]
     pub fn pieces_color_pt(&self, c: Color, pt: PieceType) -> Bitboard {
         self.by_color[c as usize] & self.by_type[pt as usize]
     }
@@ -293,10 +300,12 @@ impl Board {
         self.ep_square
     }
 
+    #[inline(always)]
     pub fn commoners(&self, c: Color) -> Bitboard {
         self.pieces_color_pt(c, PieceType::Commoner)
     }
 
+    #[inline(always)]
     pub fn occupied(&self) -> Bitboard {
         self.pieces()
     }
@@ -350,14 +359,17 @@ impl Board {
         let mut c = commoners;
         while !c.is_empty() {
             let ksq = c.pop_lsb();
+            let rook_atk = attacks::rook_attacks(ksq, occupied);
+            let bishop_atk = attacks::bishop_attacks(ksq, occupied);
+            let queen_atk = rook_atk | bishop_atk;
             checkers = checkers
-                | (attacks::rook_attacks(ksq, occupied)
+                | (rook_atk
                     & self.by_type[PieceType::Rook as usize]
                     & self.pieces_color(them))
-                | (attacks::bishop_attacks(ksq, occupied)
+                | (bishop_atk
                     & self.by_type[PieceType::Bishop as usize]
                     & self.pieces_color(them))
-                | (attacks::queen_attacks(ksq, occupied)
+                | (queen_atk
                     & self.by_type[PieceType::Queen as usize]
                     & self.pieces_color(them))
                 | (attacks::knight_attacks(ksq)
@@ -712,13 +724,16 @@ impl Board {
                 // commoner is adjacent (mutual destruction would protect it)
                 let adjacent_enemy_commoners = self.commoners(them) & attacks::king_attacks(sq);
                 if adjacent_enemy_commoners.is_empty() {
-                    let rook_attackers = attacks::rook_attacks(sq, occupied)
+                    let rook_atk = attacks::rook_attacks(sq, occupied);
+                    let bishop_atk = attacks::bishop_attacks(sq, occupied);
+                    let queen_atk = rook_atk | bishop_atk;
+                    let rook_attackers = rook_atk
                         & self.by_type[PieceType::Rook as usize]
                         & self.by_color[them as usize];
-                    let bishop_attackers = attacks::bishop_attacks(sq, occupied)
+                    let bishop_attackers = bishop_atk
                         & self.by_type[PieceType::Bishop as usize]
                         & self.by_color[them as usize];
-                    let queen_attackers = attacks::queen_attacks(sq, occupied)
+                    let queen_attackers = queen_atk
                         & self.by_type[PieceType::Queen as usize]
                         & self.by_color[them as usize];
                     let knight_attackers = attacks::knight_attacks(sq)
@@ -851,13 +866,16 @@ impl Board {
                         // No adjacent enemy commoner — check attackers normally.
                         // Use post-blast occupied for blocking and filter opponent
                         // pieces to those that survived the blast.
-                        let rook_attackers = attacks::rook_attacks(ksq, occupied)
+                        let rook_atk = attacks::rook_attacks(ksq, occupied);
+                        let bishop_atk = attacks::bishop_attacks(ksq, occupied);
+                        let queen_atk = rook_atk | bishop_atk;
+                        let rook_attackers = rook_atk
                             & self.by_type[PieceType::Rook as usize]
                             & enemy_survivors;
-                        let bishop_attackers = attacks::bishop_attacks(ksq, occupied)
+                        let bishop_attackers = bishop_atk
                             & self.by_type[PieceType::Bishop as usize]
                             & enemy_survivors;
-                        let queen_attackers = attacks::queen_attacks(ksq, occupied)
+                        let queen_attackers = queen_atk
                             & self.by_type[PieceType::Queen as usize]
                             & enemy_survivors;
                         let knight_attackers = attacks::knight_attacks(ksq)
