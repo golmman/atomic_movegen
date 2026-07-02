@@ -1,12 +1,10 @@
+**Generate new pert.data**
 RUSTFLAGS="-C force-frame-pointers=yes" cargo build --profile profiling --example perft
-
-perf record -F 999 -g --call-graph dwarf target/profiling/examples/perft 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1' 6
-
 perf record -F 999 -g --call-graph dwarf target/profiling/examples/perft 'r1b1Brk1/ppp5/6pp/3p4/5p2/P3PP2/1P4PP/R4RK1 b - - 1 15' 6
 
-perf report
-perf report --stdio
+**run first prompt**
 
+---
 
 * Analyze the generated `perf.data`
 * Find performance bottlenecks in this rust application
