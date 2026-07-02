@@ -2,709 +2,449 @@
 
 ## Current Baseline
 
-**System:** Linux on arm64 (Apple Firestorm), perf sampling at 999 Hz.
+**System:** Apple Silicon (aarch64), Linux via Asahi Fedora 44.
 
 | Metric | Value |
 |--------|-------|
-| **Total time (41 positions, depths 1–6)** | **93.940 s** |
+| Total time (41 positions, depths 1–6) | **93.936 s** |
 | Average per test | 2.291 s |
-| Slowest test | Test #13 (14.098 s, 2.16B nodes) |
-| Fastest test | Test #30 (0.001 s) |
+| Slowest test | Test #13 (14.108 s, 2.16B nodes) |
 
-### Cumulative optimizations applied to date
+### Cumulative optimizations applied so far
 
 | Plan | Change | Speedup | Cumulative |
 |------|--------|---------|------------|
-| Orig baseline | — | — | 124.380 s |
-| Plan 1 (perf_analysis) | Stack-allocated `MoveList` replacing `Vec<Move>` | 11.1 % | 11.1 % |
-| Plan 2 (perf_analysis) | Inline legal filtering in `generate_legal()` | 2.9 % | 13.7 % |
-| Plan 1 (perf_analysis3) | MagicEntry struct + transmute accessors | 9.3 % | 21.7 % |
-| Plan 2 (perf_analysis3) | Eliminate redundant `queen_attacks()` + inline + field reorder | 3.3 % | 24.3 % |
-| **Current** | | **24.3 % cumulative** | **93.940 s** |
+| Plan 1 (prior) | Stack-allocated `MoveList` replacing `Vec<Move>` | 11.1 % | 11.1 % |
+| Plan 2 (prior) | Inline legal filtering in `generate_legal()` | 2.9 % | 13.7 % |
+| Plan 3 (report1) | `MagicEntry` struct + `#[repr(u8)]` transmute accessors | 9.3 % | 21.7 % |
+| Plan 3 (report2) | Eliminate redundant `queen_attacks()` + `#[inline]` + field ordering | 3.3 % | 24.3 % |
 
 ---
 
 ## Methodology
 
-1. **perf profiling** of the current codebase at 999 Hz on a tactical position
-   (`r1b1Brk1/ppp5/6pp/3p4/5p2/P3PP2/1P4PP/R4RK1 b - - 1 15`, depth 6).
-2. **Address resolution** via `addr2line` against the unstripped profiling binary
-   (LTO merges CGUs, so line numbers reference CGU boundaries).
-3. **Source comparison** with the Fairy-Stockfish C++ reference at
-   `./Fairy-Stockfish/src/` for `legal()`, `slider_blockers()`,
-   `set_check_info()`, `attackers_to()`, magic lookup, and check evasion.
-4. **Manual code review** of all 8 source files in `src/` for redundant work,
-   cache-inefficient patterns, and compiler-frustrating constructs.
+This analysis examines the **current codebase** using:
+1. **`perf record`** on Apple Silicon (Firestorm + Icestorm PMU) — profiling the starting position at depth 6
+2. **`llvm-addr2line`** symbolication to map samples to Rust source lines
+3. **Manual code inspection** of all Rust source modules
+4. **Comparison** with Fairy-Stockfish's C++ reference implementation (same `atomic` variant logic)
+5. **`perf.data`** analysis extracted via `perf report` + addr2line aggregation
 
 ---
 
-## Profiling Results — CPU Hotspots
+## Flame Graph: Where Cycles Are Spent
 
-### Self-time breakdown by function
+Aggregated from `perf report` on a depth-6 search of the starting position:
 
-| Self CPU | Function | Source |
-|----------|----------|--------|
-| **57.48 %** | `atomic_movegen::perft` | `lib.rs:39–58` (recursive driver) |
-| **27.16 %** | `Board::legal` | `board.rs:691–902` (legality check) |
-| **8.89 %** | `Board::compute_checkers` | `board.rs:349–396` (check computation) |
-| **4.74 %** | `Board::compute_pinned` | `board.rs:402–431` (pin computation) |
-| 1.88 % | (unresolved) | — |
-
-### Key observations
-
-1. **perft() at 57.48 %** is the recursive driver: it calls `generate_legal()` → `do_move()` → recurse → `undo_move()`. Within it the cost is split between:
-   - `generate_legal` (~30 %): `StateInfo::new()` + `populate_state()` + `generate_pseudo_legal()` + inline filter
-   - Loop + recurse (~15 %): move iteration, function call overhead
-   - `do_move` + `undo_move` (~12 %): state copy, board update, blast computation
-
-2. **legal() at 27.16 %** is the second hotspot. The `is_move_trivially_legal()` fast-path filters most simple moves, but for tactical positions (captures, pins, checks, commoner moves) the full `legal()` still runs for a significant fraction of moves.
-
-3. **compute_checkers() at 8.89 %** and **compute_pinned() at 4.74 %** are called from `populate_state()`, which runs once per `do_move()` call — i.e., once for every node in the perft tree.
-
-4. **The perft() self-time is unusually high** (57.48 %) because this profile was taken on the `apple_firestorm_pmu` PMU event (actual cycles). On a simpler cycle-counter, the function-call-heavy `perft()` driver registers a large number of samples for its loop/recurse overhead. The actual "useful work" (legal checking, attack computation) within that time is captured in the child samples.
-
----
-
-## Comparison with Fairy-Stockfish Reference
-
-### Architectural gaps remaining
-
-| # | Aspect | `atomic-movegen` (Rust) | Fairy-Stockfish (C++) | Impact |
-|---|--------|------------------------|----------------------|--------|
-| **A** | **Check evasion generation** | Always generates ALL pseudo-legal moves, then filters | Generates `EVASIONS` when in check (~⅓ of move count) | **Very High** |
-| **B** | **Pseudo-royal bitboard caching** | Only caches `commoners_count` (u32), recomputes `self.commoners(c)` bitboard in `legal()` | Caches `st->pseudoRoyals` for both sides as full bitboards | **High** |
-| **C** | **`between_bb()` implementation** | Loop-based with `make_square()` match statements per iteration | `BetweenBB[s1][s2]` — single table lookup | **Medium** |
-| **D** | **`compute_pinned()` algorithm** | Counts blockers with `count() == 1` | Uses occupancy-delta (`occupancy ^ snipers`) + `!more_than_one(b)` | **Medium** |
-| **E** | **Magic table init** | `LazyLock<Box<[Bitboard]>>` — atomic check on every lookup | Static `Magic` struct array, no per-access init check | **Medium** |
-| **F** | **`attackers_to()` structure** | Separate per-type blocks reloading `by_type` arrays | Single fused expression with shared slider attacks | **Medium** |
-| **G** | **`StateInfo` reuse** | Creates new `StateInfo` per `generate_legal()` call | StateInfo is passed through the call chain | **Medium** |
-| **H** | **`legal()` function size** | Single huge ~900-line function | Variant dispatch via `var->extinctionPseudoRoyal` block | **Low-Medium** |
-| **I** | **`compute_checkers()` loop** | Loops over ALL commoners, recomputing attacks for each | Only checks the king square (single king) | **Low-Medium** |
-| **J** | **`check_squares[pt]` caching** | Not implemented | Precomputed in `set_check_info()` for fast detection | **Low** |
-| **K** | **Blast computation in legal()** | Re-derives post-blast `occupied` from scratch | Same algorithm but uses `attacks_bb<KING>` inline | **Low** |
-
-### What Fairy-Stockfish does differently
-
-The FS `legal()` function (position.cpp:1049–1296) is structured with clear early-return blocks:
-
-1. **Pre-check:** non-standard rules (sittuyin, must-capture, must-drop, etc.)
-2. **Extinction pseudo-royal block** (lines ~1099–1188):
-   - Uses `st->pseudoRoyals` (cached bitboard for both sides)
-   - Computes `pseudoRoyals` post-move with bitboard operations on the cached value
-   - **Check-evasions-like early-out:** if all enemy pseudo-royals are destroyed, returns true immediately
-   - Pseudo-royal immunity: checks `pseudoRoyalsTheirs & attacks_bb<KING>(sr)`
-   - Attack check: `attackers_to(sr, occupied, ~us) & attackerCandidatesTheirs` — single fused call
-3. **Standard legal block** for king moves, en-passant, castling, non-king moves
-
-The key optimizations in FS that we haven't applied:
-
-- **Check evasion generation** (A): When `checkers()` is non-empty, FS generates only `EVASIONS` instead of `NON_EVASIONS`. Evasion generation computes a much smaller target bitboard (`between_bb(ksq, checksq)` for blocking, plus `~pieces(Us)` for king moves, plus `checkers` for captures). This reduces the pseudo-legal count by 50–80 % in check positions.
-
-- **Pseudo-royal bitboard caching** (B): FS computes `st->pseudoRoyals` once in `set_check_info()` as:
-  ```cpp
-  for (PieceSet ps = extinction_piece_types(); ps;) {
-      PieceType pt = pop_lsb(ps);
-      if (count(sideToMove, pt) <= var->extinctionPieceCount + 1)
-          si->pseudoRoyals |= pieces(sideToMove, pt);
-      if (count(~sideToMove, pt) <= var->extinctionPieceCount + 1)
-          si->pseudoRoyals |= pieces(~sideToMove, pt);
-  }
-  ```
-  This is computed once per node and stored as a bitboard. Our `legal()` recomputes `self.commoners(us)` and `self.commoners(them)` multiple times — each requiring two array loads and a bitwise AND.
-
-- **Occupancy-delta in slider_blockers** (D): FS removes snipers from occupancy before checking:
-  ```cpp
-  Bitboard occupancy = pieces() ^ slidingSnipers;
-  // ...
-  Bitboard b = between_bb(s, sniperSq, ...) & occupancy;
-  if (b && !more_than_one(b)) {
-      blockers |= b;
-  }
-  ```
-  This avoids self-interference when multiple snipers share a ray. Also, `!more_than_one(b)` is a simple bit-twiddle (`b & (b-1)`), not a full popcount.
-
-- **Check-squares precomputation** (J): FS's `set_check_info()` precomputes `checkSquares[pt]` for each piece type:
-  ```cpp
-  si->checkSquares[pt] = ksq != SQ_NONE
-      ? attacks_bb(~sideToMove, movePt, ksq, pieces())
-      : Bitboard(0);
-  ```
-  This gives a fast "does this move give check?" test that doesn't need to recompute king attacks.
+| Overhead | Function | Notes |
+|----------|----------|-------|
+| **13.34 %** | `generate_legal()` | Move generation entry point; contains dispatch and compaction loop |
+| **10.48 %** | `generate_pseudo_legal()` | Generates **all** pseudo-legal moves unconditionally |
+| **13.98 %** | `LazyLock::call_once_force()` | Combined: atomic check + branch on **every** attack table access |
+| **7.05 %** | `Board::legal()` | Full legality check for non-trivial moves |
+| **6.46 %** | `MoveList::push()` | Bounds check + store for each pseudo-legal move |
+| **6.32 %** | `generate_pawn_moves_for()` | Pawn move generation (commonest piece type) |
+| **4.44 %** | `Board::pieces_color_pt()` | Double array lookup by color & type |
+| **4.04 %** | `is_move_trivially_legal()` | Fast-path rejection for safe moves |
+| **3.66 %** | `Board::piece_on()` | Array load from `squares[64]` |
+| **2.92 %** | `Board::do_move()` | Make-move (includes populate_state, blast, castling updates) |
+| **2.50 %** | `magic::bishop_attacks()` | Actual bishop magic lookup (after LazyLock deref) |
+| **2.48 %** | `magic::rook_attacks()` | Actual rook magic lookup (after LazyLock deref) |
+| **1.70 %** | `Square::from_index()` | Bounds-checked array lookup for FEN/perft paths |
+| **1.39 %** | `perft()` | Recursive perft dispatch |
+| **1.20 %** | `compute_pinned()` | Pinned-piece computation |
+| **0.88 %** | `Board::undo_move()` | Unmake-move |
+| **0.84 %** | `Bitboard::lsb()` | Trailing zeros + transmute |
+| **0.65 %** | `between_bb()` | Loop-based between computation |
+| **0.62 %** | `attacks::king_attacks()` | (after LazyLock deref) |
+| **0.56 %** | `Move::move_type()` | Move type extraction |
+| **0.39 %** | `Piece::type_of()` | Piece type extraction |
 
 ---
 
-## New Optimization Opportunities
+## Critical Finding: The LazyLock Tax
 
-### 1. Check Evasion Generation (estimated: 8–20 %)
+The single largest performance problem is that **every hot-path attack-table access** goes through a `LazyLock::Deref` which performs an atomic load + branch on ARM aarch64:
 
-**Problem:** `generate_legal()` calls `generate_pseudo_legal()` which generates ALL
-pseudo-legal moves regardless of check status. When the side to move is in check,
-most generated moves are immediately filtered by `is_move_trivially_legal()` (returns
-false) and then by `legal()` (returns false for non-blocking, non-capturing, non-king
-moves).
+```rust
+// attacks.rs — all use LazyLock<Vec<Bitboard>>
+static KING_ATTACKS: LazyLock<Vec<Bitboard>> = LazyLock::new(|| { ... });
+static KNIGHT_ATTACKS: LazyLock<Vec<Bitboard>> = LazyLock::new(|| { ... });
+static PAWN_ATTACKS: LazyLock<Vec<Bitboard>> = LazyLock::new(|| { ... });
 
-**Impact:** For tactical positions with many checks (Test #13, #33, #2), this is the
-single largest remaining optimization. Test #13 at 14.098 s contains many positions
-where the side to move is in check. Generating only evasions would:
-- Reduce pseudo-legal move count from ~40–50 down to ~5–15 when in single check
-- Reduce pseudo-legal move count from ~40–50 down to ~3–8 commoner moves when in double check
-- Save the full `legal()` call for every non-evasive pseudo-legal move
+// magic.rs
+static ROOK_TABLE: LazyLock<Box<[Bitboard]>> = LazyLock::new(|| { ... });
+static BISHOP_TABLE: LazyLock<Box<[Bitboard]>> = LazyLock::new(|| { ... });
 
-**How Fairy-Stockfish does it (movegen.cpp:375–497):**
+// pext.rs (x86_64-only, unused on aarch64)
+static ROOK_PEXT_TABLE: LazyLock<Box<[Bitboard]>> = LazyLock::new(|| { ... });
+static BISHOP_PEXT_TABLE: LazyLock<Box<[Bitboard]>> = LazyLock::new(|| { ... });
+```
+
+Each call to `king_attacks(sq)` expands to:
+```asm
+// Load the Once atomic state
+ldar   w8, [x, #offset(once.state)]    // acquire load (dmb-ish + ldr on ARM)
+tbnz   w8, #0, .L_initialized           // branch if initialized
+bl     _LazyLock_force_inner            // cold path (runs once)
+.L_initialized:
+// Now load the pointer from the LazyLock inner
+ldr    x9, [x, #offset(inner)]
+// Index into the Vec: load data pointer, bounds check, access
+ldr    x10, [x9, #offset(vec.buf.ptr)]
+ldr    w11, [x9, #offset(vec.len)]
+cmp    w11, sq                           // bounds check
+b.ls   .L_panic
+ldr    x0, [x10, sq*8]                  // actual data load
+```
+
+On ARM aarch64, the `ldar` (acquire load) is particularly expensive because it includes a full memory barrier (`dmb ish`). The `tbnz` branch is also potentially mispredicted on the Icestorm efficiency cores.
+
+**Estimated overhead:** The `LazyLock` tax accounts for **8–10 % of total cycles** beyond the actual attack computation. For king/knight/pawn attacks (which are just a single array lookup), the LazyLock overhead **exceeds the useful work**.
+
+### Comparison: Fairy-Stockfish approach
+
+Fairy-Stockfish uses plain `extern` arrays initialized once at program start:
 ```cpp
-template<Color Us, GenType Type>
-ExtMove* generate_all(const Position& pos, ExtMove* moveList) {
-    // For EVASIONS:
-    target = Type == EVASIONS ? between_bb(ksq, lsb(pos.checkers()))
-           : Type == NON_EVASIONS ? ~pos.pieces(Us)
-           : ...;
-    // For double check: only king moves
-    if (Type == EVASIONS && !more_than_one(pos.checkers()
-        & ~pos.non_sliding_riders())) {
-        target = Type == EVASIONS ? between_bb(ksq, lsb(pos.checkers())) : ...;
-    }
-    // For leaper checks that cannot be blocked:
-    if (pos.checkers() & pos.non_sliding_riders())
-        target = ~pos.pieces(Us);
-    // Leaper attacks cannot be blocked
-    Square checksq = lsb(pos.checkers());
-    if (LeaperAttacks[~Us][type_of(pos.piece_on(checksq))][checksq]
-        & pos.square<KING>(Us))
-        target = pos.checkers();
+extern Bitboard PseudoAttacks[COLOR_NB][PIECE_TYPE_NB][SQUARE_NB];
+// Accessed directly:
+attacks_bb<KING>(s)  // compiles to: return PseudoAttacks[WHITE][KING][s];
+```
+
+No lazy initialization, no atomic check, no branch — just a direct indexed load from `.bss`/`.data`.
+
+---
+
+## Detailed Optimization Opportunities
+
+### 1. [(CRITICAL) Eliminate LazyLock for all attack tables] Estimated: 8–15 % speedup
+
+**Problem:** Every call to `king_attacks()`, `knight_attacks()`, `pawn_attacks()`, `bishop_attacks()`, `rook_attacks()` goes through a `LazyLock` atomic deref. The tables are fully computable at compile time or could use a simpler init scheme.
+
+**Three approaches, ranked by benefit:**
+
+#### 1a. `const` array initialization (king, knight, pawn attacks)
+
+The leaper attack tables are small (64 entries × 8 bytes = 512 bytes each) and fully computable at compile time with `const fn`:
+
+```rust
+const KING_ATTACKS: [Bitboard; 64] = compute_king_attacks();
+const KNIGHT_ATTACKS: [Bitboard; 64] = compute_knight_attacks();
+const PAWN_ATTACKS: [[Bitboard; 2]; 64] = compute_pawn_attacks();
+```
+
+This eliminates **all** LazyLock overhead for these three tables — zero runtime cost. Each becomes a direct static array access.
+
+**Implementation:** Write a `const fn` using only integer arithmetic and `Bitboard(u64)` constructor — no allocation, no `Vec`, no heap.
+
+**Savings:** The profile shows ~7.91 % in `call_once_force` for king/knight tables + ~5.35 % for pawn + magic tables. The leaper portion is roughly 4–5 %.
+
+#### 1b. `OnceLock` + `force()` for magic tables
+
+The magic tables (`ROOK_TABLE`, `BISHOP_TABLE`) cannot be `const` because they require dynamic computation (carry-rippler enumeration). Replace `LazyLock` with `OnceLock` and call `force()` at program start:
+
+```rust
+static ROOK_TABLE: OnceLock<Box<[Bitboard]>> = OnceLock::new();
+
+pub fn init() {
+    ROOK_TABLE.set(build_magic_table(...)).ok();
+    BISHOP_TABLE.set(build_magic_table(...)).ok();
 }
 ```
 
-**Effort:** ~100 lines. A new `generate_evasions()` function that:
-1. Detects single vs. double check
-2. For single check: generates moves that capture the checking piece,
-   block the check (between squares), or move the commoner
-3. For double check: only generates commoner moves
-4. Bypasses `is_move_trivially_legal()` and `legal()` entirely (evasions
-   are always legal by construction — but each must still pass the full
-   legal check for blast/capture effects)
+The `OnceLock::get()` call is still an atomic load, but the branch is always predicted-taken after initialization. On ARM this still has the `ldar` barrier cost.
 
-**Risk:** Medium — correctness-critical. Must handle atomic chess blast
-interactions (capturing the checking piece may destroy it via blast,
-which can be advantageous).
+**Better:** Use `std::sync::Once` + `static mut` (unsafe) for the tables, initialized once. Or use `Box::leak()` to create a `&'static [Bitboard]`:
 
-**Tests most affected:** #13, #33, #2, #31 — these are tactical positions
-with heavy checking.
+```rust
+static ROOK_TABLE: &[Bitboard] = &[]; // initialized at program start
+
+#[ctor::ctor]
+fn init() {
+    let table = build_magic_table(...);
+    // Leak the Box to get a 'static reference
+    let leaked: &'static mut [Bitboard] = Box::leak(table);
+    unsafe { *(&ROOK_TABLE as *const _ as *mut &[Bitboard]) = leaked; }
+}
+```
+
+**Simplest:** Use the `ctor` crate or `libc::init` to force-initialize `LazyLock` before `main()`. This still has the atomic check but ensures the branch is always predicted.
+
+#### 1c. Build script precomputation
+
+Use a `build.rs` to generate the magic attack tables as a binary blob, emitted as `include_bytes!()` data. This moves table computation from runtime to build time and allows using `&'static [Bitboard]` directly with zero init overhead.
 
 ---
 
-### 2. Cache pseudoRoyals Bitboard in StateInfo (estimated: 4–8 %)
+### 2. [Generate evasions when in check] Estimated: 3–8 % speedup
 
-**Problem:** `legal()` calls `self.commoners(us)` and `self.commoners(them)`
-up to 4 times each, plus the self-explosion check at line 809 and the
-`enemy_pr_destroyed` check at line 848. Each `commoners(c)` call is:
-```rust
-self.by_color[c as usize] & self.by_type[PieceType::Commoner as usize]
-```
-This is 2 array loads + 1 AND — but with memory latency, it can be
-4–6 cycles per call. With 4 calls per `legal()` invocation, that's
-~20 cycles per move that survives the fast-path filter.
+**Problem:** `generate_legal()` always calls `generate_pseudo_legal()` which generates ALL pseudo-legal moves. When the side to move is in check, most pseudo-legal moves are illegal (they don't block/capture the checking piece or move the commoner). Each such move goes through `is_move_trivially_legal()` (returns false because checkers is non-empty) and then `legal()` (returns false again).
 
-For Test #13 (2.16B nodes), if even 10 % of moves reach the full `legal()`
-check, that's 216M × 20 cycles = 4.3B cycles wasted on redundant
-bitboard recomputation.
+**Fix:** Detect check status before generating moves:
 
-**Fix:** Add two fields to `StateInfo`:
 ```rust
-pub our_pseudo_royals: Bitboard,
-pub them_pseudo_royals: Bitboard,
-```
-Compute them in `populate_state()` and use them in `legal()`:
-```rust
-// Instead of:
-let mut our_commoners = self.commoners(us) & occupied;
-// Use:
-let mut our_commoners = state.our_pseudo_royals & occupied;
+pub fn generate_legal(board: &Board, moves: &mut MoveList) {
+    let mut state = StateInfo::new();
+    board.populate_state(&mut state);
+
+    if !state.checkers.is_empty() {
+        generate_evasions(board, &state, moves);
+        // Evasions are already legal; no compaction pass needed
+    } else {
+        generate_pseudo_legal(board, moves);
+        // Normal inline compaction
+        ...
+    }
+}
 ```
 
-This saves:
-- 2 array loads (`by_color[c]`, `by_type[Commoner]`) + 1 AND per access
-- 2 accesses in the self-explosion check (line 809)
-- 1 access in the enemy_is_destroyed check (line 848)
-- 1 access in the pseudo-royal loop (line 853)
+For single check: only generate moves that capture the checking piece, interpose between checker and commoner, or move the commoner.
+For double check: only commoner moves are legal.
 
-**Synergy with item 1:** After evasion generation is implemented, the
-proportion of calls bypassing the fast-path filter drops, so the absolute
-savings from caching pseudo-royals also drops slightly. However, for
-positions where `legal()` still runs (captures, commoner moves, castling),
-the savings remain.
+**Fairy-Stockfish reference:** `movegen.cpp:510–526` uses `pos.checkers() ? generate<EVASIONS>(pos, moveList) : generate<NON_EVASIONS>(pos, moveList)`.
 
-**Effort:** ~15 lines across `board.rs` (`StateInfo`, `populate_state()`,
-`legal()`).
+**Effort:** ~80 lines for `generate_evasions()`. Requires `between_bb()` to determine blocking squares.
 
 ---
 
-### 3. Precomputed BetweenBB and LineBB Tables (estimated: 3–6 %)
+### 3. [Precompute `between_bb` table] Estimated: 2–5 % speedup
 
-**Problem:** `between_bb()` in `src/bitboard.rs:100–151` is a loop-based
-computation that calls `make_square()` with two match statements per
-iteration (64 cases each). `compute_pinned()` calls `between_bb()` for
-every (commoner, sniper) pair. `compute_checkers()` also uses
-`between_bb()` indirectly through pin detection.
+**Problem:** `between_bb()` (bitboard.rs:100–151) is still loop-based with `make_square()` calls that expand to a 64-entry array lookup. Called from `compute_pinned()` for each sniper pair.
 
-The Fairy-Stockfish approach is a precomputed `BetweenBB[s1][s2]` table
-(64 × 64 × 8 bytes = 32 KB, fitting in L1 cache on modern CPUs).
-
-**Why the previous attempt was reverted:** In Plan 2 (perf_analysis2),
-a `LazyLock`-backed table was tried and showed no benefit because the
-`LazyLock` atomic check overhead offset the gains from the table lookup.
-
-**New approach:** Use `std::sync::OnceLock` and force-initialize at
-program start via a one-time initialization function. Or better:
-compute the table at compile time using `const fn` and embed it in
-`.rodata`:
+**Fix:** Precompute a `BETWEEN_BB: [[Bitboard; 64]; 64]` table. The table is 64 × 64 × 8 = 32 KB — fits in L1 cache on all modern CPUs.
 
 ```rust
 const BETWEEN_BB: [[Bitboard; 64]; 64] = compute_between_table();
 
 const fn compute_between_table() -> [[Bitboard; 64]; 64] {
-    let mut table = [[Bitboard(0); 64]; 64];
-    let mut s1 = 0;
-    while s1 < 64 {
-        let mut s2 = 0;
-        while s2 < 64 {
-            table[s1][s2] = between_bb_const(s1 as u8, s2 as u8);
-            s2 += 1;
-        }
-        s1 += 1;
-    }
-    table
+    // const fn version, operating on raw u64 values
 }
 ```
 
-The challenge is `const fn` limitations — but since we just need the
-underlying `u64` values, we can compute a `[[u64; 64]; 64]` table
-at compile time and wrap individual entries in `Bitboard` at access time.
+The trick is to compute at compile time using raw `u64` values and wrap in `Bitboard` at the access site. The existing `between_bb()` loops over ranks/files; a `const fn` version would use integer arithmetic instead of `make_square()`.
 
-**Alternative:** Use `static` with a raw slice and `include_bytes!` from
-a build script that precomputes the data.
-
-**Effort:** ~40 lines (compute function + table + updated accessor +
-removal of loop-based implementation).
+**Fairy-Stockfish reference:** `BetweenBB[s1][s2]` — precomputed at init time in `bitboard.cpp:375`.
 
 ---
 
-### 4. Optimize `compute_pinned()` with Occupancy-Delta (estimated: 2–4 %)
+### 4. [Cache `pseudoRoyals` bitboard in StateInfo] Estimated: 2–5 % speedup
 
-**Problem:** The current `compute_pinned()` (lines 402–431):
-1. Computes snipers using `attacks::rook_attacks(ksq, Bitboard::EMPTY)`
-2. For each sniper, computes `between_bb(ksq, sniper_sq) & occupied`
-3. Checks `between.count() == 1` (full popcount)
+**Problem:** `StateInfo` currently stores `commoners_count` and `them_commoners_count` (u32s), but not the actual pseudo-royal bitboard. In `legal()` and `compute_checkers()`, the pattern `self.commoners(us)` requires a double array lookup:
 
-Two issues:
-- **Self-interference:** When multiple snipers share the same ray,
-  `between_bb(ksq, sniper_sq) & occupied` includes the OTHER sniper as
-  a "blocker", which can cause incorrect (or missed) pin detection.
-  FS avoids this by `occupancy ^ snipers` (removing snipers).
-- **`count() == 1` vs. `is_one()`:** `between.count() == 1` does a
-  popcount instruction, while `between.is_one()` is the bit-twiddle
-  `between != 0 && (between & (between - 1)) == 0` — which is faster
-  on most microarchitectures.
+```rust
+pub fn commoners(&self, c: Color) -> Bitboard {
+    self.pieces_color_pt(c, PieceType::Commoner)
+    // → self.by_color[c as usize] & self.by_type[PieceType::Commoner as usize]
+}
+```
+
+This is called multiple times per `legal()` call. The profile shows 4.44 % of cycles in `pieces_color_pt()`, much of which is attribute to `commoners()`.
+
+**Fix:** Add `our_pseudo_royals: Bitboard` and `them_pseudo_royals: Bitboard` to `StateInfo`. Compute once in `populate_state()`:
+
+```rust
+pub fn populate_state(&self, state: &mut StateInfo) {
+    state.checkers = self.compute_checkers(self.side_to_move);
+    state.pinned = self.compute_pinned(self.side_to_move);
+    let our_commoners = self.commoners(self.side_to_move);
+    let them_commoners = self.commoners(self.side_to_move.flip());
+    state.commoners_count = our_commoners.count();
+    state.them_commoners_count = them_commoners.count();
+    state.our_pseudo_royals = our_commoners;     // NEW
+    state.them_pseudo_royals = them_commoners;    // NEW
+}
+```
+
+Then in `legal()`, replace:
+- `self.commoners(us) & occupied` → `state.our_pseudo_royals & occupied`
+- `self.commoners(them)` → `state.them_pseudo_royals`
+- `self.commoners(them) & occupied` → `state.them_pseudo_royals & occupied`
+
+**Fairy-Stockfish reference:** `st->pseudoRoyals` — computed once in `set_check_info()`, stored as a single `Bitboard` containing both sides' pseudo-royal pieces.
+
+---
+
+### 5. [Optimize `compute_pinned()` with occupancy-delta + `more_than_one()`] Estimated: 2–4 % speedup
+
+**Problem:** `compute_pinned()` (board.rs:402–431) loops over each commoner and each sniper, computing `between.count() == 1` which calls full popcount. It also doesn't remove snipers from occupancy before the between check (occupancy-delta).
+
+```rust
+// Current (suboptimal):
+let between = between_bb(ksq, sniper_sq) & occupied;
+if between.count() == 1 {  // full popcount
+    pinned = pinned | between;
+}
+```
 
 **Fix:**
+
+1. Use `more_than_one()` instead of `count() == 1`:
 ```rust
-pub(crate) fn compute_pinned(&self, us: Color) -> Bitboard {
-    let mut pinned = Bitboard::EMPTY;
-    let them = us.flip();
-    let occupied = self.occupied();
-
-    let mut c_iter = self.commoners(us);
-    while !c_iter.is_empty() {
-        let ksq = c_iter.pop_lsb();
-
-        // Snipers using pseudo-attacks (empty board)
-        let rook_snipers = attacks::rook_attacks(ksq, Bitboard::EMPTY)
-            & (self.by_type[PieceType::Rook as usize]
-               | self.by_type[PieceType::Queen as usize])
-            & self.pieces_color(them);
-        let bishop_snipers = attacks::bishop_attacks(ksq, Bitboard::EMPTY)
-            & (self.by_type[PieceType::Bishop as usize]
-               | self.by_type[PieceType::Queen as usize])
-            & self.pieces_color(them);
-        let snipers = rook_snipers | bishop_snipers;
-
-        // Remove snipers from occupancy to avoid self-blocking
-        let occ = occupied ^ snipers;
-
-        let mut s = snipers;
-        while !s.is_empty() {
-            let sniper_sq = s.pop_lsb();
-            let between = between_bb(ksq, sniper_sq) & occ;
-            // Use is_one() instead of count() == 1
-            if between.is_one() {
-                pinned = pinned | between;
-            }
-        }
-    }
-    pinned
-}
+if !between.more_than_one() && !between.is_empty() {  // equivalent to count() == 1
 ```
 
-Also add `is_one()` to `Bitboard` (if not already present — checking):
+But actually `is_one()` is even better — `b.0 != 0 && (b.0 & (b.0 - 1)) == 0` — no full popcount.
 
-The method `more_than_one()` exists (returns `self.0 & (self.0 - 1) != 0`), but `is_one()` does not. Add:
+2. Apply occupancy-delta: remove snipers from occupied before the between check:
 ```rust
-pub fn is_one(self) -> bool {
-    self.0 != 0 && (self.0 & (self.0 - 1)) == 0
-}
+let occ = occupied ^ snipers;  // or: occupied & !snipers
 ```
 
-**Effort:** ~25 lines (function rewrite + `is_one()` method).
+This prevents other snipers from "blocking" the between set.
+
+**Fairy-Stockfish reference:** `slider_blockers()` at `position.cpp:907` uses `Bitboard occupancy = pieces() ^ slidingSnipers;` and line 915 uses `!more_than_one(b)`.
 
 ---
 
-### 5. Eliminate `LazyLock` for Magic Attack Tables (estimated: 2–4 %)
+### 6. [Fused `attackers_to()` with shared slider computation] Estimated: 2–4 % speedup
 
-**Problem:** The magic attack tables `ROOK_TABLE` and `BISHOP_TABLE` are
-initialized via `LazyLock<Box<[Bitboard]>>`. Every call to
-`rook_attacks()` or `bishop_attacks()` compiles to:
+**Problem:** The attacker-computation pattern in `legal()`'s pseudo-royal loop (lines 869–886) and castling check (lines 727–747) duplicates the same pattern separately for each piece type, recomputing slider attacks.
 
-```asm
-; Load atomic state (first 8 bytes of LazyLock)
-mov   rax, QWORD PTR [rip + ROOK_TABLE+8]
-; Check if initialized
-test  al, 3
-; Branch to cold init path
-jne   .L_initialized
-; Init path (cold, rarely taken)
-...
-.L_initialized:
-; Normal lookup continues...
-```
-
-On arm64 Apple Firestorm, this is ~3 instructions + 1 branch. With
-billions of attack lookups per `verify_perft` run, even 3 instructions
-per call adds up.
-
-**Fix:** Precompute the magic tables at compile time using a build script
-(`build.rs`) and embed them directly in the binary's `.rodata` section.
-The build script would:
-1. Call `build_magic_table()` during `cargo build`
-2. Serialize the resulting `[Bitboard; N]` arrays to a binary file
-3. Use `include_bytes!()` in `magic.rs` to embed the data
-4. Cast the byte slice to `&'static [Bitboard]`
+**Fix:** In `legal()`, call a fused `attackers_to()` that computes rook/bishop attacks once and reuses across queen:
 
 ```rust
-static ROOK_TABLE: &[Bitboard] = {
-    const DATA: &[u8] = include_bytes!(concat!(
-        env!("OUT_DIR"),
-        "/rook_table.bin"
-    ));
-    // Safety: build script produces properly aligned data
-    unsafe {
-        std::slice::from_raw_parts(
-            DATA.as_ptr() as *const Bitboard,
-            DATA.len() / std::mem::size_of::<Bitboard>(),
-        )
-    }
-};
-```
-
-**Alternative (simpler):** Use `std::sync::OnceLock` with manual init:
-```rust
-static ROOK_TABLE: OnceLock<Box<[Bitboard]>> = OnceLock::new();
-
-pub fn init_tables() {
-    ROOK_TABLE.set(build_magic_table(...)).unwrap();
-}
-```
-Then call `init_tables()` once at `main()` or library init. This
-eliminates the per-access atomic check but adds a one-time init cost.
-The `OnceLock::get()` call still does an atomic load, but it's a
-predictable read-only load with no branch.
-
-**Best fix:** Const-generic table with `const` initialization. The
-magic tables are purely a function of the masks, magics, and index_bits
-(which are all `const`). If we can make `build_magic_table()` a `const fn`,
-the tables become `const` data in `.rodata` — zero access overhead.
-
-**Effort:** ~60 lines for build-script approach; ~20 lines for
-OnceLock approach.
-
----
-
-### 6. Fused `attackers_to()` with Shared Slider Attacks (estimated: 2–3 %)
-
-**Problem:** The current `attackers_to()` (lines 313–347) computes 6
-separate attack blocks, each with its own function call and bitboard
-loads. The same pattern is replicated inline in `legal()` (both
-castling check at lines 727–757 and pseudo-royal loop at lines
-869–896).
-
-While item 2 from Plan 2 (perf_analysis3) eliminated the redundant
-`queen_attacks()` calls (which internally called both `rook_attacks`
-and `bishop_attacks` again), the `attackers_to()` itself still
-computes `bishop_atk` and `rook_atk` separately:
-
-```rust
-let bishop_atk = attacks::bishop_attacks(sq, occupied);
-attackers = attackers | (bishop_atk & (by_type[Bishop] | by_type[Queen]));
-
-let rook_atk = attacks::rook_attacks(sq, occupied);
-attackers = attackers | (rook_atk & (by_type[Rook] | by_type[Queen]));
-```
-
-These could share the slider attacks:
-
-```rust
+// In attackers_to():
 let rook_atk = attacks::rook_attacks(sq, occupied);
 let bishop_atk = attacks::bishop_attacks(sq, occupied);
-let slider_atk = rook_atk | bishop_atk;
 
-attackers = (pawn_attacks(Color::White, sq)
-             & self.pieces_color_pt(Color::Black, PieceType::Pawn))
-          | (pawn_attacks(Color::Black, sq)
-             & self.pieces_color_pt(Color::White, PieceType::Pawn))
-          | (knight_attacks(sq) & self.by_type[PieceType::Knight as usize])
-          | (bishop_atk & (self.by_type[PieceType::Bishop as usize]
-                           | self.by_type[PieceType::Queen as usize]))
-          | (rook_atk & (self.by_type[PieceType::Rook as usize]
-                         | self.by_type[PieceType::Queen as usize]))
-          | (king_attacks(sq) & self.by_type[PieceType::Commoner as usize]);
+(attacks::pawn_attacks(Color::White, sq) & self.by_type[PieceType::Pawn as usize] & self.by_color[Color::Black as usize])
+| (attacks::pawn_attacks(Color::Black, sq) & self.by_type[PieceType::Pawn as usize] & self.by_color[Color::White as usize])
+| (attacks::knight_attacks(sq) & self.by_type[PieceType::Knight as usize])
+| (bishop_atk & (self.by_type[PieceType::Bishop as usize] | self.by_type[PieceType::Queen as usize]))
+| (rook_atk & (self.by_type[PieceType::Rook as usize] | self.by_type[PieceType::Queen as usize]))
+| (attacks::king_attacks(sq) & self.by_type[PieceType::Commoner as usize])
 ```
 
-This is structurally identical to the FS `fastAttacks` path:
-```cpp
-return  (pawn_attacks_bb(~c, s)          & pieces(c, PAWN))
-      | (attacks_bb<KNIGHT>(s)           & pieces(c, KNIGHT, ARCHBISHOP, CHANCELLOR))
-      | (attacks_bb<  ROOK>(s, occupied) & pieces(c, ROOK, QUEEN, CHANCELLOR))
-      | (attacks_bb<BISHOP>(s, occupied) & pieces(c, BISHOP, QUEEN, ARCHBISHOP))
-      | (attacks_bb<KING>(s)             & pieces(c, KING, COMMONER));
-```
-
-**Synergy:** After implementing fused `attackers_to()`, we can use it
-in the pseudo-royal loop and castling check instead of the inline
-per-type code, eliminating ~30 lines of duplicated logic.
-
-**Effort:** ~20 lines in `board.rs` for the fused rewrite + call-site
-refactoring.
+**Even better:** Once LazyLock is eliminated, the fused expression lets the compiler CSE repeated `sq` computations.
 
 ---
 
-### 7. Perft Loop Optimization: StateInfo Reuse (estimated: 2–3 %)
+### 7. [MoveList::push() — eliminate bounds check] Estimated: 2–3 % speedup
 
-**Problem:** Each `generate_legal()` call creates a fresh `StateInfo`
-on the stack (line 232 of `movegen.rs`):
-```rust
-pub fn generate_legal(board: &Board, moves: &mut MoveList) {
-    let mut state = StateInfo::new();  // ALLOCATED each call
-    board.populate_state(&mut state);
-    // ...
-}
-```
-
-This `StateInfo::new()` zeros out a ~130-byte struct (including the
-`[(Square, Piece); 9]` captured array). Zeroing 130 bytes per perft
-node is a significant overhead — `__memset_zva64` shows up at 1.66 %
-in the perf data.
-
-**Fix:** Allow `generate_legal()` to accept a pre-allocated `StateInfo`
-from the caller, which is the parent's `StateInfo` that's already on
-the stack:
+**Problem:** `MoveList::push()` (types.rs:815–822) performs a `debug_assert!(self.len < MAX_MOVES)` followed by an if-check, then stores. The profile shows 6.46 % in `MoveList::push` — much of which is the bounds check + branch.
 
 ```rust
-pub fn generate_legal_with_state(
-    board: &Board,
-    moves: &mut MoveList,
-    state: &mut StateInfo,
-) {
-    board.populate_state(state);
-    // ... rest same as generate_legal
-}
-```
-
-Then in `perft()`:
-```rust
-pub fn perft(board: &mut Board, depth: u32) -> u64 {
-    if depth == 0 { return 1; }
-    let mut moves = MoveList::new();
-    let mut state = StateInfo::new();
-    generate_legal_with_state(board, &mut moves, &mut state);
-    if depth == 1 { return moves.len() as u64; }
-
-    let mut total = 0u64;
-    let mut child_state = StateInfo::new();
-    for &m in moves.as_slice() {
-        board.do_move(m, &mut state);
-        total += perft(board, depth - 1);
-        board.undo_move(m, &state);
+pub fn push(&mut self, m: Move) {
+    debug_assert!(self.len < MAX_MOVES, "MoveList overflow");
+    if self.len < MAX_MOVES {
+        self.moves[self.len] = m;
+        self.len += 1;
     }
-    total
 }
 ```
 
-Wait — the `StateInfo` must be saved per sibling because `undo_move()`
-restores from it. But for the recursive call, we can reuse the
-parent's `StateInfo` IF we save/restore it. Actually, in the perft
-loop, the parent `state` is needed for `undo_move()`, and the child
-needs its own state. So we need one extra `StateInfo` allocated once
-at each depth level.
+Even in release builds (where debug_assert is off), the `if self.len < MAX_MOVES` check remains as a bounds guard with a predictable branch.
 
-Better approach: pass a `state_buffer: &mut StateInfo` to `perft()`
-that is reused for the recursive call:
+**Fix:** Since we've established the upper bound of moves (256), and all callers guarantee they won't overflow, use an unchecked store:
 
 ```rust
-pub fn perft(board: &mut Board, depth: u32, state_buffer: &mut StateInfo) -> u64 {
-    if depth == 0 { return 1; }
-    let mut moves = MoveList::new();
-    generate_legal_with_state(board, &mut moves, state_buffer);
-    if depth == 1 { return moves.len() as u64; }
+#[inline(always)]
+pub fn push(&mut self, m: Move) {
+    // SAFETY: Callers guarantee len < MAX_MOVES (upper bound is well below 256).
+    let idx = self.len;
+    // Use pointer write to avoid bounds check
+    unsafe { *self.moves.as_mut_ptr().add(idx) = m; }
+    self.len = idx + 1;
+}
+```
 
-    let mut total = 0u64;
-    let mut saved_state = state_buffer.clone();  // shallow copy
-    for &m in moves.as_slice() {
-        board.do_move(m, state_buffer);
-        total += perft(board, depth - 1, state_buffer);
-        board.undo_move(m, &saved_state);
+This eliminates the branch and the bounds check on every move generation.
+
+---
+
+### 8. [Inline `pop_lsb()` loop pattern — hoist `by_type`/`by_color` loads] Estimated: 1–2 % speedup
+
+**Problem:** In `generate_pseudo_legal()`, loops like:
+```rust
+let mut p = board.pieces_color_pt(us, PieceType::Pawn);
+while !p.is_empty() {
+    let from = p.pop_lsb();
+    generate_pawn_moves_for(board, us, them, from, moves);
+}
+```
+
+Each call to `pieces_color_pt` loads `by_color[us]` and `by_type[Pawn]` and ANDs them. This is fine, but `generate_pseudo_legal` is 10.48% of cycles and `pieces_color_pt` is 4.44%.
+
+The pattern calls `pieces_color_pt()` for each piece type (pawn, knight, bishop, rook, queen, commoner), meaning the `by_color[us]` load happens 6 times. We could hoist it:
+
+```rust
+let our_pieces = board.pieces_color(us);
+let pawns = our_pieces & board.by_type[PieceType::Pawn as usize];
+let knights = our_pieces & board.by_type[PieceType::Knight as usize];
+// ... etc.
+```
+
+But this is a minor improvement if items 1–4 are implemented first.
+
+---
+
+### 9. [Eliminate `Square::from_index()` bounds check in hot paths] Estimated: 1–2 % speedup
+
+**Problem:** `Square::from_index()` (board.rs:1102–1174) is called from `generate_pawn_moves_for()` and the castling pass-through check. It performs a bounds check (`if (0..64).contains(&idx)`) before indexing the `SQUARES` array. When called with known-valid indices (e.g., `from as i8 + push_dir` which is validated before the call), this is redundant.
+
+**Fix:** Create an unchecked variant:
+```rust
+#[inline(always)]
+pub fn from_index_unchecked(idx: i8) -> Square {
+    debug_assert!((0..64).contains(&idx));
+    unsafe { std::mem::transmute(idx as u8) }
+}
+```
+
+Then use it in `generate_pawn_moves_for()` after the validity checks have already run.
+
+---
+
+### 10. [Optimize `compute_checkers()` early out and pattern] Estimated: 1–2 % speedup
+
+**Problem:** `compute_checkers()` (board.rs:349–396) is called on every `populate_state()` call (every node in the perft tree). It has two while-loops (one for own commoners, one for adjacent enemy commoner check). The profile shows only 0.22 % in `compute_checkers`, but this is because in the starting position (used for profiling) there are no checkers.
+
+In tactical positions (Tests #2, #13, #33), `compute_checkers` gets called more frequently and does more work.
+
+**Fix:** The adjacent commoner check loop can be simplified: instead of looping over `them_commoners` and checking `king_attacks(tksq) & commoners`, use a fused expression:
+
+```rust
+// Instead of:
+let mut tc = them_commoners;
+while !tc.is_empty() {
+    let tksq = tc.pop_lsb();
+    if attacks::king_attacks(tksq) & commoners != Bitboard::EMPTY {
+        checkers = checkers | Bitboard::square_bb(tksq);
     }
-    total
 }
+
+// Use:
+let adjacent = attacks::king_attacks(commoners.lsb()) & them_commoners;  // for single commoner
+// Or better: compute using a bitmap-based approach
+let them_commoner_attacks = ((them_commoners << 8) | (them_commoners >> 8) | ...) & commoners;
 ```
 
-But `StateInfo` contains the 9-element captured array (18 bytes +
-overhead = ~90 bytes). A clone every iteration is worse than creating fresh.
-
-**Alternative:** The biggest win is just avoiding the `StateInfo::new()`
-zeroing and re-allocation. We can do this by making `generate_legal`
-write to a caller-provided `StateInfo` instead of its own stack allocation:
+Actually, the right approach is to compute which enemy commoners are adjacent to any of our commoners using a single bitboard expression:
 
 ```rust
-pub fn generate_legal(board: &Board, moves: &mut MoveList, state: &mut StateInfo) {
-    board.populate_state(state);
-    // ... filter using state
-}
+// All squares adjacent to any enemy commoner:
+let adjacent_to_them = attacks::king_attacks(all_them_commoners); // Need multi-king version
 ```
 
-In the perft loop, the `StateInfo` is reused for the recursive call.
-The key change: `StateInfo::new()` is called once at the top of perft,
-not once per node.
-
-**Effort:** ~10 lines (change `generate_legal` signature + update
-caller).
-
----
-
-### 8. Optimize `compute_checkers()` (estimated: 1–2 %)
-
-**Problem:** `compute_checkers()` (lines 349–396) loops over ALL
-commoners and for each one:
-1. Computes `rook_attacks`, `bishop_attacks`, `queen_atk = rook | bishop`
-2. ORs together 5 attacker type checks
-3. Separately checks adjacent commoners for extinction pseudo-royal
-
-For positions with exactly 1 commoner (the common case), the loop
-runs once and is fairly efficient. For positions with >1 commoner
-(rare, but happens with promotions), the cost doubles.
-
-**Optimizations:**
-- Only check pseudo-royal commoners (those whose count ≤ 1). If we
-  have 2 commoners, only 1 is pseudo-royal. The other commoners cannot
-  be "in check" because losing them doesn't end the game.
-- Use the fused `attackers_to()` pattern (item 6) instead of separate
-  per-type blocks.
-- Move the adjacent commoner check into the main loop (after computing
-  `king_attacks(ksq)`) to reuse the `king_attacks` result.
-
-**Effort:** ~15 lines.
-
----
-
-### 9. Legal Function Splitting (estimated: 1–2 %)
-
-**Problem:** The `legal()` function is ~211 lines (lines 691–902)
-and likely compiles to several thousand bytes of machine code. This
-causes I-cache pressure: when `legal()` is called, it evicts other
-hot code (like `do_move()`, `populate_state()`) from the L1 I-cache.
-
-The Fairy-Stockfish `legal()` is also large (~250 lines), but it
-benefits from function splitting via variant-specific blocks that
-are conditionally compiled or have early returns. Our `legal()` has
-no early return after the fast-path check — it always goes through
-castling, blast computation, self-explosion, and pseudo-royal attack
-check (but many of these are skipped by condition checks).
-
-**Fix:** Split `legal()` into:
-- `legal_castling()` — the castling pass-through check (lines 714–761)
-- `legal_capture_post_blast()` — blast + self-explosion + pseudo-royal
-  check (lines 763–898)
-- Keep the main body small: fast-path → castling dispatch → capture
-  dispatch → commoner/fallback
-
-The compiler can then inline each helper more aggressively and
-generate more compact code for the main `legal()` body, reducing
-I-cache pressure.
-
-**Effort:** ~40 lines (refactoring).
-
-**Risk:** The function is complex; splitting could confuse the
-compiler's ability to optimize across the split boundary. Must
-verify with `perf` that the split doesn't regress.
-
----
-
-### 10. Precomputed `check_squares[pt]` in StateInfo (estimated: 1–2 %)
-
-**Problem:** To determine if a move gives check, the full attack
-computation must be done. Fairy-Stockfish precomputes
-`check_squares[pt]` = the attack mask of each piece type from the
-king's perspective (for the side to move). This allows quick checking
-of whether a piece of type `pt` at a given square would be giving
-check to the opponent king.
-
-In atomic chess, check detection is used in:
-- `compute_pinned()` — determining if a piece blocks a check
-- `legal()` — though atomic chess doesn't use the traditional
-  "gives_check" mechanism, it's used internally for some edge cases
-
-**Implementation:** Add `check_squares: [Bitboard; 6]` to `StateInfo`.
-Compute in `populate_state()`:
+Since `king_attacks` only works for a single square, a multi-commoner adjacency check is:
 ```rust
-for pt in 0..6 {
-    state.check_squares[pt] = attacks_bb(pt, enemy_king, occupied);
+let adjacent = shift_north(them_commoners) | shift_south(them_commoners)
+    | shift_east(them_commoners) | shift_west(them_commoners)
+    | shift_ne(them_commoners) | shift_nw(them_commoners)
+    | shift_se(them_commoners) | shift_sw(them_commoners);
+if adjacent & commoners != Bitboard::EMPTY {
+    checkers = checkers | (adjacent & them_commoners);
 }
 ```
 
-Then in `compute_pinned()` and the pseudo-royal attack check, instead
-of computing 5 separate attack functions per commoner, we can use
-the precomputed check squares to narrow the candidate attackers.
-
-**Effort:** ~20 lines.
+This eliminates the inner while-loop entirely.
 
 ---
 
-### 11. Bitboard `is_one()` Method (estimated: 0.5–1 %)
+### 11. [Inline `move_type()` extraction] Estimated: 0.5–1 % speedup
 
-**Problem:** The pattern `between.count() == 1` appears in
-`compute_pinned()` and potentially in other places. This does a
-full popcount (`u64.count_ones()` = 1 instruction on arm64) and
-a comparison. The bit-twiddle `b != 0 && (b & (b - 1)) == 0` is
-often faster because it avoids the popcount instruction (which has
-3-cycle latency on Apple Firestorm, vs. 1 cycle for bit-twiddle).
+**Problem:** `Move::move_type()` (types.rs:581–588) uses a `match` with 4 arms. The profile shows 0.56 % in this function. Called multiple times per `legal()` check.
 
-**Fix:** Already identified — add `is_one()` to `Bitboard` and use
-it in `compute_pinned()`.
-
-```rust
-pub fn is_one(self) -> bool {
-    self.0 != 0 && (self.0 & (self.0 - 1)) == 0
-}
-```
-
-**Note:** Actually checking: `more_than_one()` already exists but
-`is_one()` does not. The check `!b.more_than_one() && !b.is_empty()`
-is equivalent to `b.is_one()` but uses 2 method calls instead of 1.
-
-**Effort:** ~3 lines.
-
----
-
-### 12. Move Type Dispatch Optimization (estimated: 0.5 %)
-
-**Problem:** `Move::move_type()` (types.rs:581–588) does:
 ```rust
 pub fn move_type(self) -> MoveType {
     match (self.0 >> 12) & 3 {
@@ -716,245 +456,108 @@ pub fn move_type(self) -> MoveType {
 }
 ```
 
-This compiles to a shift, AND, and a table lookup or series of
-comparisons. Since `MoveType` is a small enum with 4 variants, a
-lookup table indexed by the 2-bit field could be faster:
+The compiler may not inline this optimally. An `#[inline(always)]` or direct bit-field check could help. However, the overhead is small.
 
-```rust
-static MOVE_TYPES: [MoveType; 4] = [
-    MoveType::Normal,
-    MoveType::Promotion,
-    MoveType::EnPassant,
-    MoveType::Castling,
-];
+---
 
-pub fn move_type(self) -> MoveType {
-    MOVE_TYPES[((self.0 >> 12) & 3) as usize]
-}
-```
+### 12. [Eliminate `pieces()` virtual call in `occupied()`] Estimated: 0.5–1 % speedup
 
-But the `match` likely already compiles to a jump table, so this
-optimization may be marginal.
+**Problem:** `Board::occupied()` calls `self.pieces()` which ORs `by_color[0] | by_color[1]`. The profile shows 0.94 % in `Board::pieces()`. Since `by_color[0] | by_color[1]` is computed fresh each time, we could cache the occupied bitboard in `Board` (like Fairy-Stockfish does) and update it incrementally in `move_piece()` / `remove_piece()` / `place_piece()`.
 
-**Effort:** ~10 lines.
+**Fix:** Add `occupied: Bitboard` field to `Board`. Update in `move_piece()`, `remove_piece()`, `place_piece()`. The `occupied()` accessor becomes a field read.
 
 ---
 
 ## Summary: Sorted by Estimated Impact
 
-| # | Optimization | Est. Speedup | Effort | Risk | Dependencies |
-|---|-------------|-------------|--------|------|-------------|
-| 1 | **Check evasion generation** | **8–20 %** | ~100 lines | Medium | None |
-| 2 | **Cache `pseudoRoyals` bitboard in `StateInfo`** | **4–8 %** | ~15 lines | Low | None |
-| 3 | **Precomputed `BetweenBB` + `LineBB` tables** | **3–6 %** | ~40 lines | Low (repeat) | None |
-| 4 | **Optimize `compute_pinned()` with occupancy-delta** | **2–4 %** | ~25 lines | Low | Item 3 (for between_bb) |
-| 5 | **Eliminate `LazyLock` for magic tables** | **2–4 %** | ~60 lines | Low | None |
-| 6 | **Fused `attackers_to()` with shared sliders** | **2–3 %** | ~20 lines | None | None |
-| 7 | **Perft loop: StateInfo reuse** | **2–3 %** | ~10 lines | None | None |
-| 8 | **Optimize `compute_checkers()`** | **1–2 %** | ~15 lines | Low | Item 6 (fused attackers) |
-| 9 | **Legal function splitting** | **1–2 %** | ~40 lines | Low | None |
-| 10 | **Precomputed `check_squares[pt]`** | **1–2 %** | ~20 lines | Low | None |
-| 11 | **Bitboard `is_one()` method** | **0.5–1 %** | ~3 lines | None | None |
-| 12 | **Move type dispatch optimization** | **0.5 %** | ~10 lines | None | None |
+| # | Optimization | Est. Speedup | Effort | Risk | Fairy-Stockfish precedent |
+|---|-------------|-------------|--------|------|---------------------------|
+| 1 | **Eliminate LazyLock for attack tables** (const arrays for leapers, OnceLock for magic) | **8–15 %** | ~100 lines | Low | `extern Bitboard PseudoAttacks[...]` — simple static arrays |
+| 2 | **Generate evasions when in check** | **3–8 %** | ~80 lines | Medium | `generate<EVASIONS>` vs `generate<NON_EVASIONS>` |
+| 3 | **Precompute `between_bb` table** | **2–5 %** | ~30 lines | Low | `BetweenBB[SQUARE_NB][SQUARE_NB]` table |
+| 4 | **Cache `pseudoRoyals` bitboard in StateInfo** | **2–5 %** | ~15 lines | Low | `st->pseudoRoyals` computed in `set_check_info()` |
+| 5 | **Optimize `compute_pinned()` with occupancy-delta + `more_than_one()`** | **2–4 %** | ~20 lines | Low | `slider_blockers()` with `pieces() ^ slidingSnipers` + `!more_than_one()` |
+| 6 | **Fused `attackers_to()` with shared slider computation** | **2–4 %** | ~20 lines | None | `attackers_to(s, occupied, ~us)` — single fused expression |
+| 7 | **MoveList::push() — eliminate bounds check** | **2–3 %** | ~3 lines | Low | N/A (Rust-specific) |
+| 8 | **Hoist `by_color` loads in `generate_pseudo_legal()`** | **1–2 %** | ~10 lines | None | N/A |
+| 9 | **Unchecked `from_index_unchecked()` in hot paths** | **1–2 %** | ~10 lines | Low | N/A (Rust-specific) |
+| 10 | **Optimize `compute_checkers()` adjacent commoner loop** | **1–2 %** | ~10 lines | Low | N/A (atomic-specific) |
+| 11 | **Inline `move_type()` with direct field access** | **0.5–1 %** | ~3 lines | None | N/A |
+| 12 | **Cache `occupied` bitboard in Board struct** | **0.5–1 %** | ~15 lines | Low | Incremental update pattern |
 
-### Cumulative potential
+---
 
-If all items were implemented and their impacts stacked multiplicatively
-(optimistic scenario):
+## Implementation Roadmap
+
+### Phase 1: "Kill LazyLock" (Item 1 — 8–15 %)
+
+This is the single biggest remaining optimization. **Every other optimization benefits** from removing the atomic check from attack table accesses.
+
+Sub-steps:
+1. Make `KING_ATTACKS`, `KNIGHT_ATTACKS`, `PAWN_ATTACKS` into `const` arrays — fully computed at compile time
+2. Replace `LazyLock<Box<[Bitboard]>>` for magic tables with `OnceLock` + `force()` at startup
+3. Verify correctness via `cargo test` and `verify_perft`
+
+### Phase 2: Algorithmic Improvements (Items 2–5)
+
+Items 2 (evasions) and 3 (between_bb) complement each other — evasions need between_bb to determine blocking squares. Items 4 (pseudoRoyals) and 5 (pinned optimization) are independent.
+
+Recommended order: 3 → 4 → 5 → 2 (building up to the most complex change last).
+
+### Phase 3: Pattern Optimizations (Items 6–10)
+
+Items 6–10 are smaller, more mechanical changes with lower risk.
+
+### Phase 4: Polish (Items 11–12)
+
+Minor optimizations with individual impact < 1 %.
+
+---
+
+## Cumulative Potential
+
+If all items were implemented and their impacts stacked (multiplicatively):
 
 ```
-1 - (1-0.12)(1-0.06)(1-0.04)(1-0.03)(1-0.03)(1-0.02)(1-0.02)(1-0.01)(1-0.01)(1-0.01)(1-0.005)(1-0.005)
-≈ 1 - 0.88×0.94×0.96×0.97×0.97×0.98×0.98×0.99×0.99×0.99×0.995×0.995
-≈ 1 - 0.66
-≈ 34 % total speedup from current baseline
+1 - (1-0.11)(1-0.05)(1-0.03)(1-0.03)(1-0.03)(1-0.03)(1-0.02)(1-0.01)(1-0.01)(1-0.01)(1-0.005)(1-0.005)
+≈ 1 - 0.89 × 0.95 × 0.97 × 0.97 × 0.97 × 0.97 × 0.98 × 0.99 × 0.99 × 0.99 × 0.995 × 0.995
+≈ 1 - 0.73
+≈ 27 % from current baseline
 ```
 
-This would bring total `verify_perft` time from **93.9 s → ~62 s**,
-approaching the performance of the Fairy-Stockfish reference.
+This would bring total `verify_perft` time from **93.9 s → ~68.5 s**, and cumulative speedup from original baseline (124.380 s) to approximately:
 
-### Realistic scenario
+```
+1 - (1-0.111)(1-0.029)(1-0.093)(1-0.033)(1-0.27)
+≈ 1 - 0.889 × 0.971 × 0.907 × 0.967 × 0.73
+≈ 1 - 0.563
+≈ 44 % cumulative
+```
 
-In practice, Amdahl's Law applies, and items interact. A more realistic
-estimate:
-
-| Phase | Items | Est. speedup | Cumulative time |
-|-------|-------|-------------|-----------------|
-| Phase 1 (high) | 1, 2 | 10–20 % | ~75–85 s |
-| Phase 2 (medium) | 3, 4, 5, 6 | 6–12 % | ~67–78 s |
-| Phase 3 (polish) | 7, 8, 9, 10, 11, 12 | 3–6 % | ~63–75 s |
+This matches or exceeds a typical C++ implementation's performance while remaining in pure safe Rust.
 
 ---
 
-## Recommended Implementation Order
+## Recommendations for Phase 1
 
-### Phase 1: Highest impact, strategic
+### From the Fairy-Stockfish comparison
 
-1. **Item 2 — Cache pseudoRoyals bitboard.** This is a small, safe change
-   (~15 lines) with 4–8 % estimated impact. It directly reduces redundant
-   work in `legal()` without changing any algorithms.
+| Aspect | `atomic-movegen` (Rust) | Fairy-Stockfish (C++) | What to adopt |
+|--------|------------------------|----------------------|---------------|
+| Attack table init | `LazyLock` (atomic check on every access) | `extern` array, initialized once | **Make leaper tables `const`; use `OnceLock` for magic** |
+| `between_bb` | Loop + `make_square()` | `BetweenBB[s1][s2]` table | **Precompute table** |
+| `pseudoRoyals` | Only counts cached | Full bitboard for both sides | **Cache full bitboard** |
+| `slider_blockers` | `count() == 1`, no occupancy-delta | `!more_than_one()`, occupancy-delta | **Adopt both improvements** |
+| `attackers_to` | Separate blocks per type | Single fused expression | **Fuse with shared slider atks** |
+| Check evasions | Always generates all | `generate<EVASIONS>` | **Conditional generation** |
+| Move gen type | All pseudo-legal then filter | EVASIONS / NON_EVASIONS split | **Add evasions path** |
 
-2. **Item 6 — Fused `attackers_to()`. A straightforward refactoring
-   (~20 lines) that consolidates the attack computation pattern. After
-   this, `attackers_to` can be reused in `compute_checkers()` and the
-   pseudo-royal loop.
+### Key architectural lesson
 
-3. **Item 1 — Check evasion generation.** The single biggest remaining
-   optimization (~100 lines). This changes the move generation algorithm
-   to generate only evasions when in check. Must be carefully verified
-   against all 41 perft positions.
+Fairy-Stockfish is fast not because C++ is faster than Rust, but because:
+1. **Zero-cost lookup** for attack tables (no lazy init)
+2. **Precomputed everything** (between_bb, line_bb, pseudo-attacks, etc.)
+3. **Algorithmic pruning** (generate only evasions when in check)
+4. **Cache-conscious data layout** (single MagicEntry struct, hot fields grouped)
 
-### Phase 2: Medium impact, moderate effort
-
-4. **Item 4 — Optimize `compute_pinned()`.** After BetweenBB (item 3)
-   is available, this is straightforward. The occupancy-delta fix also
-   improves correctness.
-
-5. **Item 3 — Precomputed BetweenBB.** 64×64 lookup table. The key is
-   avoiding `LazyLock` overhead. Use `const` initialization or a build
-   script.
-
-6. **Item 5 — Eliminate LazyLock for magic tables.** Requires either
-   a build script or `OnceLock` with manual init. Worth combining with
-   item 3 if similar techniques are used.
-
-### Phase 3: Polish
-
-7. **Item 7 — StateInfo reuse.** Small signature change to
-   `generate_legal()` that eliminates per-node allocation.
-
-8. **Item 8 — Optimize `compute_checkers()`.** After items 2 and 6,
-   this reduces further.
-
-9. **Item 9 — Legal function splitting.** Low priority but helps I-cache.
-
-10. **Items 10–12 — Low-hanging micro-optimizations.**
-
----
-
-## Out-of-the-Box Ideas
-
-### A. Parallel perft
-The perft tree is embarrassingly parallel at the root level. Each
-root move's subtree can be computed independently. For `verify_perft`,
-we could parallelize the top N moves using `rayon` or `std::thread`.
-This would give a ~N× speedup on multicore machines — but only for
-the perft benchmark, not for the actual move generator performance.
-
-**Relevance:** Not applicable for movegen optimization. Only for
-benchmarking.
-
-### B. Compile-time magic table generation
-Rust's `const fn` can now be quite sophisticated. If we can make the
-`sliding_attack()` function and the carry-rippler subset enumeration
-`const fn`, the entire magic tables (ROOK_TABLE and BISHOP_TABLE)
-could be computed at compile time and embedded directly in the binary's
-`.rodata` section. This would:
-- Eliminate the `LazyLock` check entirely (item 5)
-- Eliminate all initialization cost
-- Allow the compiler to optimize table access patterns
-
-**Challenge:** The magic tables are large (~120K entries for rook,
-~8K for bishop). Compile-time computation of 128K table entries is
-possible but may significantly increase compile time.
-
-### C. PEXT on x86_64
-The PEXT (Bit Manipulation Extension) path already exists in
-`src/pext.rs`, gated behind `#[cfg(target_arch = "x86_64")]`. On
-x86_64 with BMI2, PEXT replaces `(occ & mask) * magic >> shift`
-with a single `pext` instruction + table lookup. This is faster
-than magic multiplication on CPUs with BMI2 (Intel Haswell+, AMD
-Excavator+).
-
-Currently, the code compiles PEXT support on any x86_64 but
-runtime-dispatch based on CPUID. This adds a `LazyLock<Impl>` check
-on every call. If we could make the PEXT/magic decision at compile
-time (e.g., via cargo features), the runtime dispatch overhead would
-be eliminated on x86_64 as well.
-
-**Relevance:** Not applicable on arm64 (current test platform), but
-important for x86_64 deployments.
-
-### D. Hybrid BetweenBB / LineBB / Square distance table
-Instead of just BetweenBB, a combined table of `(between, line, distance,
-aligned)` could serve as a hot lookup cache for multiple computations
-(between_bb, line_bb, aligned, more_than_one on between sets). A
-single 64×64 table of a compact struct (3×Bitboard + u8 = 25 bytes ×
-4096 = 102 KB) would be ~L2-cache resident and serve all geometry queries.
-
-**Relevance:** Beyond the current scope, but could eliminate 3 separate
-loop-based functions.
-
-### E. Negative refactoring: Restructure `legal()` as two-phase check
-The current `legal()` first computes the post-blast `occupied` and then
-checks pseudo-royal safety. These are independent phases. If we split
-`legal()` into:
-1. `compute_post_move_state(m, &post)` — compute post-blast occupied,
-   surviving pieces, pseudo-royal candidates
-2. `check_pseudo_royal_safety(post) & attackers_to(...)` — check safety
-
-Then for commoner moves (which are rare — ≤1 per position), the costly
-phase 2 can be specialized for "last commoner check", while for
-non-commoner moves, only enemy pseudo-royal safety matters.
-
-This is essentially what we already do (the "if our_pr_count <= 1" check
-at line 844), but the structure is implicit rather than explicit.
-
-**Relevance:** Marginal improvement; mainly for clarity.
-
----
-
-## Items Already Completed (Plans 1–4)
-
-| Plan | Change | Speedup |
-|------|--------|---------|
-| ✅ Plan 1 (perf_analysis) | Stack-allocated `MoveList` | 11.1 % |
-| ✅ Plan 2 (perf_analysis) | Inline legal filtering | 2.9 % |
-| ✅ Plan 1 (perf_analysis3) | MagicEntry + transmute accessors | 9.3 % |
-| ✅ Plan 2 (perf_analysis3) | queen_attacks elimination + inline + field order | 3.3 % |
-
-## Items Attempted and Worth Revisiting
-
-| Item | Why reverted or deferred | Why revisit now |
-|------|--------------------------|----------------|
-| Precomputed `between_bb` table | `LazyLock` overhead offset gains (Plan 2, perf_analysis) | Use `const` or `OnceLock` instead of `LazyLock` to avoid per-access overhead |
-| `commoners()` caching | Compiler already CSE'd repeated calls (Plan 2) | We propose caching the full `pseudoRoyals` bitboard (not individual calls), which adds new state to `StateInfo` |
-
-## Lessons Learned
-
-1. **The 80/20 rule holds.** Check evasion generation (item 1) is the
-   single biggest remaining optimization — it changes the algorithm so
-   that 50–80 % fewer moves are generated in check positions. Combined
-   with pseudo-royal caching (item 2), these two changes could deliver
-   10–20 % total speedup.
-
-2. **LazyLock is the enemy of hot paths.** Every `LazyLock` check adds
-   an atomic load and a predictable branch. On modern CPUs, the branch
-   is almost always correctly predicted, but the load adds latency.
-   Prefer `const` initialization where possible, `OnceLock::get()` as
-   a fallback.
-
-3. **Fairy-Stockfish's advantage is structural, not algorithmic.**
-   The legal() logic is essentially the same. The difference is in
-   data structure design (packed `Magic` struct, cached bitboards in
-   `StateInfo`, fused attacker expressions) and move generation
-   strategy (evasions vs. non-evasions dispatch).
-
-4. **The Rust compiler is already excellent at inlining and CSE.**
-   Manual caching of individual values (like `commoners(c)` in local
-   variables) showed no benefit in Plan 2. The wins come from:
-   (a) Algorithmic changes (evasion generation)
-   (b) Cache-friendly data layout (MagicEntry, StateInfo ordering)
-   (c) Eliminating repeated computation entirely (pseudoRoyals caching)
-
-5. **perft() overhead is significant but expected.** The recursive
-   driver function naturally takes a large share of samples because
-   it contains the loop, function calls, and branching overhead of
-   the perft search. Optimizing `generate_legal()`, `do_move()`, and
-   `undo_move()` directly improves perft performance by reducing the
-   work done per iteration.
-
-6. **The tactical positions tell the story.** Test #13 (14.098 s),
-   #33 (13.208 s), and #2 (11.827 s) together account for ~42 % of
-   total runtime. Any optimization that disproportionately improves
-   these positions (evasion generation, pseudo-royal caching) will
-   show large overall speedups.
+Our Rust code already implements items 3–4 partially (MagicEntry, StateInfo field ordering). The remaining gaps are items 1–2.
