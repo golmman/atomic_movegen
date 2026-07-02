@@ -19,7 +19,7 @@
 
 use crate::magic::{self, BISHOP_DIRS, BISHOP_MASKS, ROOK_DIRS, ROOK_MASKS};
 use crate::types::*;
-use std::sync::LazyLock;
+use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
 // CPU feature detection
@@ -135,26 +135,27 @@ fn build_pext_table(
 }
 
 // ---------------------------------------------------------------------------
-// Lazy-initialized PEXT tables
+// OnceLock-initialized PEXT tables
 // ---------------------------------------------------------------------------
 
-static ROOK_PEXT_TABLE: LazyLock<Box<[Bitboard]>> = LazyLock::new(|| {
-    build_pext_table(
+static ROOK_PEXT_TABLE: OnceLock<&[Bitboard]> = OnceLock::new();
+static BISHOP_PEXT_TABLE: OnceLock<&[Bitboard]> = OnceLock::new();
+
+/// Initialize the PEXT attack tables. Must be called before any lookup.
+pub(crate) fn init() {
+    _ = ROOK_PEXT_TABLE.set(Box::leak(build_pext_table(
         &ROOK_DIRS,
         &ROOK_MASKS,
         &ROOK_LAYOUT.offsets,
         ROOK_LAYOUT.total,
-    )
-});
-
-static BISHOP_PEXT_TABLE: LazyLock<Box<[Bitboard]>> = LazyLock::new(|| {
-    build_pext_table(
+    )));
+    _ = BISHOP_PEXT_TABLE.set(Box::leak(build_pext_table(
         &BISHOP_DIRS,
         &BISHOP_MASKS,
         &BISHOP_LAYOUT.offsets,
         BISHOP_LAYOUT.total,
-    )
-});
+    )));
+}
 
 // ---------------------------------------------------------------------------
 // Hot-path lookup functions (require BMI2)
@@ -163,21 +164,27 @@ static BISHOP_PEXT_TABLE: LazyLock<Box<[Bitboard]>> = LazyLock::new(|| {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "bmi2")]
 unsafe fn bishop_attacks_pext_impl(sq: Square, occupied: Bitboard) -> Bitboard {
+    let table = BISHOP_PEXT_TABLE
+        .get()
+        .expect("PEXT tables not initialized — call attacks::init()");
     let sq_idx = sq as usize;
     let mask = BISHOP_MASKS[sq_idx];
     let occ = occupied & mask;
     let idx = core::arch::x86_64::_pext_u64(occ.0, mask.0) as usize;
-    BISHOP_PEXT_TABLE[BISHOP_LAYOUT.offsets[sq_idx] + idx]
+    table[BISHOP_LAYOUT.offsets[sq_idx] + idx]
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "bmi2")]
 unsafe fn rook_attacks_pext_impl(sq: Square, occupied: Bitboard) -> Bitboard {
+    let table = ROOK_PEXT_TABLE
+        .get()
+        .expect("PEXT tables not initialized — call attacks::init()");
     let sq_idx = sq as usize;
     let mask = ROOK_MASKS[sq_idx];
     let occ = occupied & mask;
     let idx = core::arch::x86_64::_pext_u64(occ.0, mask.0) as usize;
-    ROOK_PEXT_TABLE[ROOK_LAYOUT.offsets[sq_idx] + idx]
+    table[ROOK_LAYOUT.offsets[sq_idx] + idx]
 }
 
 // Non-x86_64 stubs that should never be called (has_bmi2() returns false).
@@ -254,8 +261,11 @@ mod tests {
     /// loop-based reference for every square and every occupancy.
     #[test]
     fn test_pext_vs_loop_bishop() {
-        // Force table initialization.
-        LazyLock::force(&BISHOP_PEXT_TABLE);
+        // Initialize tables.
+        super::init();
+        let table = BISHOP_PEXT_TABLE
+            .get()
+            .expect("PEXT tables not initialized");
         for sq_idx in 0..64 {
             let sq = Square::from_u8(sq_idx as u8);
             let mask = BISHOP_MASKS[sq_idx].0;
@@ -266,7 +276,7 @@ mod tests {
                 let occ = Bitboard(subset);
                 // Compute using PEXT table (software index)
                 let pext_idx = BISHOP_LAYOUT.offsets[sq_idx] + pext_soft(subset, mask) as usize;
-                let pext_atk = BISHOP_PEXT_TABLE[pext_idx];
+                let pext_atk = table[pext_idx];
                 let loop_atk = magic::sliding_attack(&BISHOP_DIRS, sq, occ);
                 assert_eq!(
                     pext_atk, loop_atk,
@@ -285,7 +295,8 @@ mod tests {
 
     #[test]
     fn test_pext_vs_loop_rook() {
-        LazyLock::force(&ROOK_PEXT_TABLE);
+        super::init();
+        let table = ROOK_PEXT_TABLE.get().expect("PEXT tables not initialized");
         for sq_idx in 0..64 {
             let sq = Square::from_u8(sq_idx as u8);
             let mask = ROOK_MASKS[sq_idx].0;
@@ -295,7 +306,7 @@ mod tests {
             loop {
                 let occ = Bitboard(subset);
                 let pext_idx = ROOK_LAYOUT.offsets[sq_idx] + pext_soft(subset, mask) as usize;
-                let pext_atk = ROOK_PEXT_TABLE[pext_idx];
+                let pext_atk = table[pext_idx];
                 let loop_atk = magic::sliding_attack(&ROOK_DIRS, sq, occ);
                 assert_eq!(
                     pext_atk, loop_atk,
@@ -319,9 +330,8 @@ mod tests {
         if !has_bmi2() {
             return;
         }
-        // Force table initialization.
-        LazyLock::force(&BISHOP_PEXT_TABLE);
-        LazyLock::force(&ROOK_PEXT_TABLE);
+        // Initialize tables.
+        crate::attacks::init();
 
         // Test a representative set of squares and occupancies.
         for sq_idx in [0, 7, 9, 27, 36, 56, 63] {

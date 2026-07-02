@@ -36,7 +36,10 @@ pub mod types;
 
 use crate::types::MoveList;
 
+static PERFT_INIT: std::sync::Once = std::sync::Once::new();
+
 pub fn perft(board: &mut board::Board, depth: u32) -> u64 {
+    PERFT_INIT.call_once(attacks::init);
     if depth == 0 {
         return 1;
     }

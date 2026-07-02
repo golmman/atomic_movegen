@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::env;
 
 fn main() {
+    atomic_movegen::attacks::init();
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: debug_moves <fen>");

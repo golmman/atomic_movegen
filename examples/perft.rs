@@ -1,6 +1,7 @@
 use std::env;
 
 fn main() {
+    atomic_movegen::attacks::init();
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
         eprintln!("Usage: perft <fen> <depth>");

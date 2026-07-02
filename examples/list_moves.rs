@@ -4,6 +4,7 @@ use atomic_movegen::types::MoveList;
 use std::env;
 
 fn main() {
+    atomic_movegen::attacks::init();
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: list_moves <fen>");

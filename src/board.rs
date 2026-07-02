@@ -363,15 +363,9 @@ impl Board {
             let bishop_atk = attacks::bishop_attacks(ksq, occupied);
             let queen_atk = rook_atk | bishop_atk;
             checkers = checkers
-                | (rook_atk
-                    & self.by_type[PieceType::Rook as usize]
-                    & self.pieces_color(them))
-                | (bishop_atk
-                    & self.by_type[PieceType::Bishop as usize]
-                    & self.pieces_color(them))
-                | (queen_atk
-                    & self.by_type[PieceType::Queen as usize]
-                    & self.pieces_color(them))
+                | (rook_atk & self.by_type[PieceType::Rook as usize] & self.pieces_color(them))
+                | (bishop_atk & self.by_type[PieceType::Bishop as usize] & self.pieces_color(them))
+                | (queen_atk & self.by_type[PieceType::Queen as usize] & self.pieces_color(them))
                 | (attacks::knight_attacks(ksq)
                     & self.by_type[PieceType::Knight as usize]
                     & self.pieces_color(them))
@@ -869,15 +863,12 @@ impl Board {
                         let rook_atk = attacks::rook_attacks(ksq, occupied);
                         let bishop_atk = attacks::bishop_attacks(ksq, occupied);
                         let queen_atk = rook_atk | bishop_atk;
-                        let rook_attackers = rook_atk
-                            & self.by_type[PieceType::Rook as usize]
-                            & enemy_survivors;
-                        let bishop_attackers = bishop_atk
-                            & self.by_type[PieceType::Bishop as usize]
-                            & enemy_survivors;
-                        let queen_attackers = queen_atk
-                            & self.by_type[PieceType::Queen as usize]
-                            & enemy_survivors;
+                        let rook_attackers =
+                            rook_atk & self.by_type[PieceType::Rook as usize] & enemy_survivors;
+                        let bishop_attackers =
+                            bishop_atk & self.by_type[PieceType::Bishop as usize] & enemy_survivors;
+                        let queen_attackers =
+                            queen_atk & self.by_type[PieceType::Queen as usize] & enemy_survivors;
                         let knight_attackers = attacks::knight_attacks(ksq)
                             & self.by_type[PieceType::Knight as usize]
                             & enemy_survivors;

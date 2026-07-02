@@ -7,7 +7,7 @@
 //! magic numbers, and index bits are `const` arrays (zero indirection).
 
 use crate::types::*;
-use std::sync::LazyLock;
+use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
 // Magic numbers (from the well-known shallow-blue set)
@@ -486,30 +486,31 @@ fn build_magic_table(
 }
 
 // ---------------------------------------------------------------------------
-// Lazy-initialized tables (use Box<[Bitboard]> to avoid Vec indirection)
+// OnceLock-initialized tables (relaxed atomic load, no acquire barrier)
 // ---------------------------------------------------------------------------
 
-static ROOK_TABLE: LazyLock<Box<[Bitboard]>> = LazyLock::new(|| {
-    build_magic_table(
+static ROOK_TABLE: OnceLock<&[Bitboard]> = OnceLock::new();
+static BISHOP_TABLE: OnceLock<&[Bitboard]> = OnceLock::new();
+
+/// Initialize the magic attack tables. Must be called before any lookup.
+pub(crate) fn init() {
+    _ = ROOK_TABLE.set(Box::leak(build_magic_table(
         &ROOK_DIRS,
         &ROOK_MASKS,
         &ROOK_MAGICS,
         &ROOK_INDEX_BITS,
         &ROOK_OFFSETS,
         ROOK_TABLE_SIZE,
-    )
-});
-
-static BISHOP_TABLE: LazyLock<Box<[Bitboard]>> = LazyLock::new(|| {
-    build_magic_table(
+    )));
+    _ = BISHOP_TABLE.set(Box::leak(build_magic_table(
         &BISHOP_DIRS,
         &BISHOP_MASKS,
         &BISHOP_MAGICS,
         &BISHOP_INDEX_BITS,
         &BISHOP_OFFSETS,
         BISHOP_TABLE_SIZE,
-    )
-});
+    )));
+}
 
 // ---------------------------------------------------------------------------
 // Public lookup functions
@@ -518,17 +519,23 @@ static BISHOP_TABLE: LazyLock<Box<[Bitboard]>> = LazyLock::new(|| {
 /// Return the attack set for a bishop on `sq` given the `occupied` board.
 #[inline(always)]
 pub fn bishop_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
+    let table = BISHOP_TABLE
+        .get()
+        .expect("magic tables not initialized — call attacks::init()");
     let e = &BISHOP_ENTRIES[sq as usize];
     let idx = ((occupied & e.mask).0.wrapping_mul(e.magic)) >> e.shift;
-    BISHOP_TABLE[e.offset as usize + idx as usize]
+    table[e.offset as usize + idx as usize]
 }
 
 /// Return the attack set for a rook on `sq` given the `occupied` board.
 #[inline(always)]
 pub fn rook_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
+    let table = ROOK_TABLE
+        .get()
+        .expect("magic tables not initialized — call attacks::init()");
     let e = &ROOK_ENTRIES[sq as usize];
     let idx = ((occupied & e.mask).0.wrapping_mul(e.magic)) >> e.shift;
-    ROOK_TABLE[e.offset as usize + idx as usize]
+    table[e.offset as usize + idx as usize]
 }
 
 /// Return the attack set for a queen (bishop + rook).
@@ -563,6 +570,7 @@ mod tests {
     /// square and every possible occupancy pattern.
     #[test]
     fn test_magic_vs_loop_bishop() {
+        super::init();
         for sq_idx in 0..64 {
             let sq = Square::from_u8(sq_idx as u8);
             let mask = BISHOP_MASKS[sq_idx];
@@ -590,6 +598,7 @@ mod tests {
 
     #[test]
     fn test_magic_vs_loop_rook() {
+        super::init();
         for sq_idx in 0..64 {
             let sq = Square::from_u8(sq_idx as u8);
             let mask = ROOK_MASKS[sq_idx];
