@@ -1,4 +1,4 @@
-package name with "-" ?
+package name with "-" ? -> rust convention
 deployment to crates.io
 code audit, review, cleanup
 readme: update, document examples
