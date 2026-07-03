@@ -13,6 +13,7 @@ perf record -F 999 -g --call-graph dwarf target/profiling/examples/perft 'r1b1Br
 * Analyze the reports of previous attempts in `docs/plans/perf_analysis3`
 * Compare to the reference implementation in `Fairy-Stockfish/`
 * Think out of the box to find new ways for performance improvements
+* If you could add one unrequested, industry-leading feature, what would it be?
 * Compile a list of potential performance improvements
 * Sort the list by highest potential first
 * Store your findings in `docs/plans/perf_analysis4/analysis.md`
