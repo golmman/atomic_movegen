@@ -1,3 +1,4 @@
+use crate::attacks::{BETWEEN_BB, LINE_BB};
 use crate::types::*;
 
 pub const FILE_ABB: Bitboard = Bitboard(0x0101010101010101);
@@ -97,110 +98,14 @@ pub fn pawn_attacks_from(c: Color, sq: Square) -> Bitboard {
     pawn_attacks_bb(c, square_bb(sq))
 }
 
+#[inline(always)]
 pub fn between_bb(s1: Square, s2: Square) -> Bitboard {
-    let mut b = Bitboard::EMPTY;
-    let f1 = s1 as i8 % 8;
-    let r1 = s1 as i8 / 8;
-    let f2 = s2 as i8 % 8;
-    let r2 = s2 as i8 / 8;
-    let df = f2 - f1;
-    let dr = r2 - r1;
-
-    if df == 0 && dr == 0 {
-        return b;
-    }
-
-    if df != 0 && dr != 0 && df.abs() != dr.abs() {
-        return Bitboard::EMPTY;
-    }
-
-    let f_step = df.signum();
-    let r_step = dr.signum();
-    let mut f = f1 + f_step;
-    let mut r = r1 + r_step;
-    while f != f2 || r != r2 {
-        let sq = make_square(
-            match f {
-                0 => File::A,
-                1 => File::B,
-                2 => File::C,
-                3 => File::D,
-                4 => File::E,
-                5 => File::F,
-                6 => File::G,
-                7 => File::H,
-                _ => unreachable!(),
-            },
-            match r {
-                0 => Rank::R1,
-                1 => Rank::R2,
-                2 => Rank::R3,
-                3 => Rank::R4,
-                4 => Rank::R5,
-                5 => Rank::R6,
-                6 => Rank::R7,
-                7 => Rank::R8,
-                _ => unreachable!(),
-            },
-        );
-        b = b | square_bb(sq);
-        f += f_step;
-        r += r_step;
-    }
-    b
+    BETWEEN_BB[s1 as usize][s2 as usize]
 }
 
+#[inline(always)]
 pub fn line_bb(s1: Square, s2: Square) -> Bitboard {
-    let f1 = s1 as i8 % 8;
-    let r1 = s1 as i8 / 8;
-    let f2 = s2 as i8 % 8;
-    let r2 = s2 as i8 / 8;
-    let df = f2 - f1;
-    let dr = r2 - r1;
-
-    if df != 0 && dr != 0 && df.abs() != dr.abs() {
-        return Bitboard::EMPTY;
-    }
-    if df == 0 && dr == 0 {
-        return Bitboard::EMPTY;
-    }
-
-    let f_step = if df == 0 { 0 } else { df.signum() };
-    let r_step = if dr == 0 { 0 } else { dr.signum() };
-
-    let mut b = Bitboard::EMPTY;
-    let mut f = f1;
-    let mut r = r1;
-    while (0..8).contains(&f) && (0..8).contains(&r) {
-        let sq = make_square(
-            match f {
-                0 => File::A,
-                1 => File::B,
-                2 => File::C,
-                3 => File::D,
-                4 => File::E,
-                5 => File::F,
-                6 => File::G,
-                7 => File::H,
-                _ => unreachable!(),
-            },
-            match r {
-                0 => Rank::R1,
-                1 => Rank::R2,
-                2 => Rank::R3,
-                3 => Rank::R4,
-                4 => Rank::R5,
-                5 => Rank::R6,
-                6 => Rank::R7,
-                7 => Rank::R8,
-                _ => unreachable!(),
-            },
-        );
-        b = b | square_bb(sq);
-        f += f_step;
-        r += r_step;
-    }
-    b
+    LINE_BB[s1 as usize][s2 as usize]
 }
 
 pub fn aligned(s1: Square, s2: Square, s3: Square) -> bool {
@@ -251,6 +156,10 @@ mod tests {
         let between = between_bb(Square::C1, Square::F4);
         assert!(between & square_bb(Square::D2) != Bitboard::EMPTY);
         assert!(between & square_bb(Square::E3) != Bitboard::EMPTY);
+        // Non-aligned squares return empty
+        assert!((between_bb(Square::A1, Square::B3)).is_empty());
+        // Same-square returns empty
+        assert!((between_bb(Square::D4, Square::D4)).is_empty());
     }
 
     #[test]
@@ -258,6 +167,9 @@ mod tests {
         let line = line_bb(Square::A1, Square::H8);
         assert!(line & square_bb(Square::B2) != Bitboard::EMPTY);
         assert!(line & square_bb(Square::C3) != Bitboard::EMPTY);
+        // Line includes both endpoints
+        assert!(line & square_bb(Square::A1) != Bitboard::EMPTY);
+        assert!(line & square_bb(Square::H8) != Bitboard::EMPTY);
     }
 
     #[test]

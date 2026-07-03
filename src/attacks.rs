@@ -187,6 +187,89 @@ const KNIGHT_ATTACKS: [Bitboard; 64] = compute_knight_attacks();
 /// Precomputed pawn attacks for all 64 squares (compile-time constant).
 const PAWN_ATTACKS: [[Bitboard; 2]; 64] = compute_pawn_attacks();
 
+/// Compute between-squares table for all 64×64 square pairs at compile time.
+const fn compute_between_bb() -> [[Bitboard; 64]; 64] {
+    let mut table = [[Bitboard(0); 64]; 64];
+    let mut s1: u8 = 0;
+    while s1 < 64 {
+        let mut s2: u8 = 0;
+        while s2 < 64 {
+            let f1 = s1 % 8;
+            let r1 = s1 / 8;
+            let f2 = s2 % 8;
+            let r2 = s2 / 8;
+
+            if s1 != s2
+                && (f1 == f2
+                    || r1 == r2
+                    || (f1 as i8 - f2 as i8).abs() == (r1 as i8 - r2 as i8).abs())
+            {
+                let mut b = 0u64;
+                let df = (f2 as i8 - f1 as i8).signum();
+                let dr = (r2 as i8 - r1 as i8).signum();
+                let mut f = f1 as i8 + df;
+                let mut r = r1 as i8 + dr;
+                while f != f2 as i8 || r != r2 as i8 {
+                    b |= 1u64 << ((r as u8) * 8 + (f as u8));
+                    f += df;
+                    r += dr;
+                }
+                table[s1 as usize][s2 as usize] = Bitboard(b);
+            }
+            s2 += 1;
+        }
+        s1 += 1;
+    }
+    table
+}
+
+/// Compute line-squares table for all 64×64 square pairs at compile time.
+const fn compute_line_bb() -> [[Bitboard; 64]; 64] {
+    let mut table = [[Bitboard(0); 64]; 64];
+    let mut s1: u8 = 0;
+    while s1 < 64 {
+        let mut s2: u8 = 0;
+        while s2 < 64 {
+            let f1 = s1 % 8;
+            let r1 = s1 / 8;
+            let f2 = s2 % 8;
+            let r2 = s2 / 8;
+
+            if s1 != s2
+                && (f1 == f2
+                    || r1 == r2
+                    || (f1 as i8 - f2 as i8).abs() == (r1 as i8 - r2 as i8).abs())
+            {
+                let mut b = 0u64;
+                let df = (f2 as i8 - f1 as i8).signum();
+                let dr = (r2 as i8 - r1 as i8).signum();
+                let mut f = f1 as i8;
+                let mut r = r1 as i8;
+                while f >= 0 && f < 8 && r >= 0 && r < 8 {
+                    b |= 1u64 << ((r as u8) * 8 + (f as u8));
+                    f += df;
+                    r += dr;
+                }
+                table[s1 as usize][s2 as usize] = Bitboard(b);
+            }
+            s2 += 1;
+        }
+        s1 += 1;
+    }
+    table
+}
+
+/// Precomputed between-squares table: `BETWEEN_BB[s1][s2]` gives the
+/// bitboard of squares strictly between `s1` and `s2`, or `Bitboard::EMPTY`
+/// when `s1` and `s2` are not on the same rank, file, or diagonal.
+pub(crate) static BETWEEN_BB: [[Bitboard; 64]; 64] = compute_between_bb();
+
+/// Precomputed line-squares table: `LINE_BB[s1][s2]` gives the bitboard
+/// of all squares on the same rank, file, or diagonal as `s1` and `s2`
+/// (including `s1` and `s2` themselves), or `Bitboard::EMPTY` when the
+/// two squares are not aligned.
+pub(crate) static LINE_BB: [[Bitboard; 64]; 64] = compute_line_bb();
+
 /// Return the attack bitboard for a king on the given square.
 #[inline(always)]
 pub fn king_attacks(sq: Square) -> Bitboard {
