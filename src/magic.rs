@@ -9,10 +9,6 @@
 use crate::types::*;
 use std::sync::OnceLock;
 
-// ---------------------------------------------------------------------------
-// Magic numbers (from the well-known shallow-blue set)
-// ---------------------------------------------------------------------------
-
 const ROOK_MAGICS: [u64; 64] = [
     0xa8002c000108020,
     0x6c00049b0002001,
@@ -147,10 +143,6 @@ const BISHOP_MAGICS: [u64; 64] = [
     0x40102000a0a60140,
 ];
 
-// ---------------------------------------------------------------------------
-// Index bits per square (64 - shift)
-// ---------------------------------------------------------------------------
-
 const ROOK_INDEX_BITS: [u32; 64] = [
     12, 11, 11, 11, 11, 11, 11, 12, 11, 10, 10, 10, 10, 10, 10, 11, 11, 10, 10, 10, 10, 10, 10, 11,
     11, 10, 10, 10, 10, 10, 10, 11, 11, 10, 10, 10, 10, 10, 10, 11, 11, 10, 10, 10, 10, 10, 10, 11,
@@ -161,10 +153,6 @@ const BISHOP_INDEX_BITS: [u32; 64] = [
     6, 5, 5, 5, 5, 5, 5, 6, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 7, 7, 7, 7, 5, 5, 5, 5, 7, 9, 9, 7, 5, 5,
     5, 5, 7, 9, 9, 7, 5, 5, 5, 5, 7, 7, 7, 7, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 6, 5, 5, 5, 5, 5, 5, 6,
 ];
-
-// ---------------------------------------------------------------------------
-// Precomputed occupancy masks (no edges) — computed offline, embedded as const.
-// ---------------------------------------------------------------------------
 
 pub(crate) const ROOK_MASKS: [Bitboard; 64] = [
     Bitboard(0x000101010101017e),
@@ -300,10 +288,6 @@ pub(crate) const BISHOP_MASKS: [Bitboard; 64] = [
     Bitboard(0x0040201008040200),
 ];
 
-// ---------------------------------------------------------------------------
-// Offsets into the flat attack tables (computed at compile time)
-// ---------------------------------------------------------------------------
-
 const fn compute_offsets(index_bits: &[u32; 64]) -> [usize; 64] {
     let mut offsets = [0usize; 64];
     let mut total = 0usize;
@@ -331,16 +315,8 @@ const BISHOP_OFFSETS: [usize; 64] = compute_offsets(&BISHOP_INDEX_BITS);
 const ROOK_TABLE_SIZE: usize = total_table_size(&ROOK_INDEX_BITS);
 const BISHOP_TABLE_SIZE: usize = total_table_size(&BISHOP_INDEX_BITS);
 
-// ---------------------------------------------------------------------------
-// Direction constants for the reference sliding-attack computation
-// ---------------------------------------------------------------------------
-
 pub(crate) const ROOK_DIRS: [(i8, i8); 4] = [(0, 1), (0, -1), (1, 0), (-1, 0)];
 pub(crate) const BISHOP_DIRS: [(i8, i8); 4] = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
-
-// ---------------------------------------------------------------------------
-// MagicEntry — co-located per-square constants for magic bitboard lookup
-// ---------------------------------------------------------------------------
 
 /// Per-square constant data for a magic bitboard lookup.
 ///
@@ -405,10 +381,6 @@ const fn compute_bishop_entries() -> [MagicEntry; 64] {
 pub(crate) const ROOK_ENTRIES: [MagicEntry; 64] = compute_rook_entries();
 pub(crate) const BISHOP_ENTRIES: [MagicEntry; 64] = compute_bishop_entries();
 
-// ---------------------------------------------------------------------------
-// Reference sliding attack (loop-based, used only during table init)
-// ---------------------------------------------------------------------------
-
 pub(crate) fn sliding_attack(directions: &[(i8, i8)], sq: Square, occupied: Bitboard) -> Bitboard {
     let mut result = 0u64;
     let s_idx = sq as i8;
@@ -430,10 +402,6 @@ pub(crate) fn sliding_attack(directions: &[(i8, i8)], sq: Square, occupied: Bitb
     }
     Bitboard(result)
 }
-
-// ---------------------------------------------------------------------------
-// Build attack table for a given piece type (carry-rippler enumeration)
-// ---------------------------------------------------------------------------
 
 fn build_magic_table(
     directions: &[(i8, i8)],
@@ -485,10 +453,6 @@ fn build_magic_table(
     table
 }
 
-// ---------------------------------------------------------------------------
-// OnceLock-initialized tables (relaxed atomic load, no acquire barrier)
-// ---------------------------------------------------------------------------
-
 static ROOK_TABLE: OnceLock<&[Bitboard]> = OnceLock::new();
 static BISHOP_TABLE: OnceLock<&[Bitboard]> = OnceLock::new();
 
@@ -511,10 +475,6 @@ pub(crate) fn init() {
         BISHOP_TABLE_SIZE,
     )));
 }
-
-// ---------------------------------------------------------------------------
-// Public lookup functions
-// ---------------------------------------------------------------------------
 
 /// Return the attack set for a bishop on `sq` given the `occupied` board.
 #[inline(always)]
@@ -544,10 +504,6 @@ pub fn queen_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
     bishop_attacks(sq, occupied) | rook_attacks(sq, occupied)
 }
 
-// ---------------------------------------------------------------------------
-// For testing: expose the loop-based reference
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 pub fn bishop_attacks_loop(sq: Square, occupied: Bitboard) -> Bitboard {
     sliding_attack(&BISHOP_DIRS, sq, occupied)
@@ -557,10 +513,6 @@ pub fn bishop_attacks_loop(sq: Square, occupied: Bitboard) -> Bitboard {
 pub fn rook_attacks_loop(sq: Square, occupied: Bitboard) -> Bitboard {
     sliding_attack(&ROOK_DIRS, sq, occupied)
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

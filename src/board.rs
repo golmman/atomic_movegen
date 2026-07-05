@@ -23,6 +23,10 @@ fn char_to_piece(c: char) -> Option<Piece> {
     }
 }
 
+/// Cached state for a position, used during move generation and legality checks.
+///
+/// Fields are populated by [`Board::populate_state`] and consumed by
+/// [`Board::legal`] and [`generate_legal`](crate::movegen::generate_legal).
 #[derive(Debug, Clone, Copy)]
 pub struct StateInfo {
     // Hot fields (read in legal() and generate_legal())
@@ -48,6 +52,7 @@ impl Default for StateInfo {
 }
 
 impl StateInfo {
+    /// Create a new `StateInfo` with all fields zeroed/empty.
     pub fn new() -> Self {
         StateInfo {
             checkers: Bitboard::EMPTY,
@@ -65,6 +70,11 @@ impl StateInfo {
     }
 }
 
+/// A chessboard with atomic chess rules.
+///
+/// Maintains piece placement, side-to-move, castling rights, en-passant
+/// square, and the half-move clock. Supports FEN serialization/deserialization,
+/// making and unmaking moves, and legality checking.
 #[derive(Debug, Clone)]
 pub struct Board {
     squares: [Piece; 64],
@@ -89,11 +99,17 @@ impl Default for Board {
 }
 
 impl Board {
+    /// Create a board in the standard starting position.
     pub fn new() -> Self {
         let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
         Board::from_fen(fen).expect("Failed to create starting position")
     }
 
+    /// Parse a board from a FEN string.
+    ///
+    /// Accepts standard FEN with 4–6 space-separated fields. The piece
+    /// character set includes standard chess pieces plus `C`/`c` and `K`/`k`
+    /// for commoners (king-like pseudo-royal pieces).
     pub fn from_fen(fen: &str) -> Result<Self, String> {
         let parts: Vec<&str> = fen.split_whitespace().collect();
         if parts.len() < 4 {
@@ -181,6 +197,7 @@ impl Board {
         })
     }
 
+    /// Serialize the board to a FEN string.
     pub fn fen(&self) -> String {
         let mut fen = String::new();
         for rank in (0..8).rev() {
@@ -247,52 +264,66 @@ impl Board {
         fen
     }
 
+    /// Return the piece on a square (or [`NO_PIECE`] if empty).
     #[inline(always)]
     pub fn piece_on(&self, sq: Square) -> Piece {
         self.squares[sq as usize]
     }
 
+    /// Return `true` if the given square is empty.
     pub fn empty(&self, sq: Square) -> bool {
         self.squares[sq as usize] == NO_PIECE
     }
 
+    /// Return the bitboard of all occupied squares.
     #[inline(always)]
     pub fn occupied(&self) -> Bitboard {
         self.by_color[0] | self.by_color[1]
     }
 
+    /// Return all pieces of a given color.
     #[inline(always)]
     pub fn pieces_color(&self, c: Color) -> Bitboard {
         self.by_color[c as usize]
     }
 
+    /// Return all pieces of a given type.
     #[inline(always)]
     pub fn pieces_pt(&self, pt: PieceType) -> Bitboard {
         self.by_type[pt as usize]
     }
 
+    /// Return all pieces of a given color and type.
     #[inline(always)]
     pub fn pieces_color_pt(&self, c: Color, pt: PieceType) -> Bitboard {
         self.by_color[c as usize] & self.by_type[pt as usize]
     }
 
+    /// Return the side to move.
     pub fn side_to_move(&self) -> Color {
         self.side_to_move
     }
 
+    /// Return the castling rights bitmask.
     pub fn castling_rights(&self) -> u8 {
         self.castling_rights
     }
 
+    /// Return the en-passant target square, if any.
     pub fn ep_square(&self) -> Option<Square> {
         self.ep_square
     }
 
+    /// Return the bitboard of commoners (king-like pseudo-royal pieces) for a color.
     #[inline(always)]
     pub fn commoners(&self, c: Color) -> Bitboard {
         self.pieces_color_pt(c, PieceType::Commoner)
     }
 
+    /// Return all pieces that attack `sq` on the given occupancy.
+    ///
+    /// Includes pawns, knights, bishops, rooks, queens, and commoners of either
+    /// color that attack `sq`.
     pub fn attackers_to(&self, sq: Square, occupied: Bitboard) -> Bitboard {
         let mut attackers = Bitboard::EMPTY;
 
@@ -373,6 +404,7 @@ impl Board {
         checkers
     }
 
+    /// Return the bitboard of enemy pieces checking the side to move.
     pub fn checkers(&self) -> Bitboard {
         self.compute_checkers(self.side_to_move)
     }
@@ -408,6 +440,8 @@ impl Board {
         pinned
     }
 
+    /// Return the bitboard of pieces of the given color that are pinned
+    /// (cannot move without exposing a commoner to capture).
     pub fn pinned(&self, c: Color) -> Bitboard {
         self.compute_pinned(c)
     }
@@ -421,6 +455,10 @@ impl Board {
         state.them_commoners_count = self.commoners(self.side_to_move.flip()).count();
     }
 
+    /// Make `m` on the board, storing undo information in `state`.
+    ///
+    /// Handles all move types (normal, promotion, en-passant, castling) as well
+    /// as atomic-blast removal on captures.
     pub fn do_move(&mut self, m: Move, state: &mut StateInfo) {
         state.castling_rights = self.castling_rights;
         state.ep_square = self.ep_square;
@@ -452,7 +490,6 @@ impl Board {
             return;
         }
 
-        // Handle en passant
         if m.move_type() == MoveType::EnPassant {
             let ep_cap = match us {
                 Color::White => Square::from_index(to as i8 - 8),
@@ -463,14 +500,12 @@ impl Board {
             state.captured_count += 1;
             self.remove_piece(ep_cap);
         } else if is_capture {
-            // Record the captured piece and remove it
             let cap_piece = self.squares[to as usize];
             state.cap_sq = Some(to);
             state.cap_piece = cap_piece;
             self.remove_piece(to);
         }
 
-        // Move the piece
         if m.move_type() == MoveType::Promotion {
             let prom_pt = m.promotion_type();
             let prom_piece = make_piece(us, prom_pt);
@@ -504,10 +539,8 @@ impl Board {
             }
         }
 
-        // Update castling rights (handles rook movement AND blast removal)
         self.update_castling_rights(from, to, us);
 
-        // Also handle blast-related rook removal
         if is_capture || m.move_type() == MoveType::EnPassant {
             // White king-side
             if self.castling_rights & WK_CASTLE != 0
@@ -535,7 +568,6 @@ impl Board {
             }
         }
 
-        // Update en passant square
         if pt == PieceType::Pawn && (to as i8 - from as i8).abs() == 16 {
             self.ep_square = Some(match us {
                 Color::White => Square::from_index(from as i8 + 8),
@@ -545,7 +577,6 @@ impl Board {
             self.ep_square = None;
         }
 
-        // Update rule50
         if pt == PieceType::Pawn || is_capture {
             self.rule50 = 0;
         } else {
@@ -555,10 +586,12 @@ impl Board {
         self.side_to_move = them;
         self.game_ply += 1;
 
-        // Populate cached state for the new position
         self.populate_state(state);
     }
 
+    /// Unmake `m`, restoring the board to its state before [`do_move`](Self::do_move).
+    ///
+    /// `state` must be the same [`StateInfo`] that was passed to `do_move`.
     pub fn undo_move(&mut self, m: Move, state: &StateInfo) {
         self.castling_rights = state.castling_rights;
         self.ep_square = state.ep_square;
@@ -569,7 +602,6 @@ impl Board {
         let from = m.from_sq();
         let to = m.to_sq();
 
-        // Handle castling
         if m.move_type() == MoveType::Castling {
             let (kfrom, kto, rfrom, rto) = castling_squares(us, to > from);
             self.move_piece(kto, kfrom);
@@ -578,7 +610,6 @@ impl Board {
             return;
         }
 
-        // Restore blast victims (includes capturer if non-pawn) in reverse order
         let mut i = state.captured_count;
         while i > 0 {
             i -= 1;
@@ -586,9 +617,6 @@ impl Board {
             self.place_piece(piece, sq);
         }
 
-        // Move the piece back from `to` to `from`
-        // For non-pawn captures: the piece was blasted and just restored via captured_pieces
-        // For pawn captures: the piece survived at `to`
         if m.move_type() == MoveType::Promotion {
             let pawn = make_piece(us, PieceType::Pawn);
             self.remove_piece(to);
@@ -597,7 +625,6 @@ impl Board {
             self.move_piece(to, from);
         }
 
-        // Restore the original captured piece from regular capture
         if let Some(sq) = state.cap_sq {
             self.place_piece(state.cap_piece, sq);
         }
@@ -655,6 +682,12 @@ impl Board {
         }
     }
 
+    /// Check whether `m` is legal under atomic chess rules.
+    ///
+    /// Considers blast-zone effects (self-explosion), castling pass-through
+    /// safety, pseudo-royal adjacency, and commoner extinction.
+    ///
+    /// `state` must contain up-to-date cached fields for the current position.
     pub fn legal(&self, m: Move, state: &StateInfo) -> bool {
         let from = m.from_sq();
         let to = m.to_sq();
@@ -883,6 +916,8 @@ impl fmt::Display for Board {
 }
 
 impl Square {
+    /// Construct a [`Square`] from its 0–63 index. Returns [`Square::NONE`]
+    /// for out-of-range values.
     pub fn from_index(idx: i8) -> Square {
         if (0..64).contains(&idx) {
             crate::types::SQUARES[idx as usize]
@@ -891,6 +926,7 @@ impl Square {
         }
     }
 
+    /// Construct a [`Square`] from its 0–63 index as a `u8`.
     pub fn from_u8(idx: u8) -> Square {
         Square::from_index(idx as i8)
     }

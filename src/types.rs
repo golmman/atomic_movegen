@@ -1,6 +1,9 @@
 use std::fmt;
 use std::ops;
 
+/// A square on a chessboard indexed `A1` (0) through `H8` (63), plus `NONE`.
+///
+/// Layout: `A1` = 0, `B1` = 1, …, `H1` = 7, `A2` = 8, …, `H8` = 63.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 pub enum Square {
@@ -135,8 +138,11 @@ pub const SQ_E8: Square = Square::E8;
 pub const SQ_F8: Square = Square::F8;
 pub const SQ_G8: Square = Square::G8;
 pub const SQ_H8: Square = Square::H8;
+/// Number of squares on a chessboard.
 pub const SQUARE_NB: usize = 64;
+/// Number of files on a chessboard.
 pub const FILE_NB: usize = 8;
+/// Number of ranks on a chessboard.
 pub const RANK_NB: usize = 8;
 
 // Consolidation point for Square-by-index lookup.
@@ -207,6 +213,7 @@ pub(crate) const SQUARES: [Square; 64] = [
     Square::H8,
 ];
 
+/// A file (column) on a chessboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum File {
@@ -224,6 +231,7 @@ impl File {
     pub const NB: usize = 8;
 }
 
+/// A rank (row) on a chessboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum Rank {
@@ -241,6 +249,7 @@ impl Rank {
     pub const NB: usize = 8;
 }
 
+/// Return the file of a square.
 pub fn file_of(s: Square) -> File {
     static FILES: [File; 8] = [
         File::A,
@@ -255,6 +264,7 @@ pub fn file_of(s: Square) -> File {
     FILES[(s as u8 & 7) as usize]
 }
 
+/// Return the rank of a square.
 pub fn rank_of(s: Square) -> Rank {
     static RANKS: [Rank; 8] = [
         Rank::R1,
@@ -269,24 +279,38 @@ pub fn rank_of(s: Square) -> Rank {
     RANKS[((s as u8 >> 3) & 7) as usize]
 }
 
+/// Construct a square from a file and rank.
 pub fn make_square(f: File, r: Rank) -> Square {
     let idx = (r as usize) * 8 + (f as usize);
     SQUARES[idx]
 }
 
+/// A set of squares represented as a 64-bit bitboard.
+///
+/// Bit `n` corresponds to [`Square`] with discriminant `n`. Supports standard
+/// bitwise operators (`&`, `|`, `^`, `!`, `<<`, `>>`) as well as set-wise
+/// operations with [`Square`] values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bitboard(pub u64);
 
 impl Bitboard {
+    /// The empty bitboard (no squares set).
     pub const EMPTY: Bitboard = Bitboard(0);
+
+    /// Returns `true` if no squares are set.
     pub fn is_empty(self) -> bool {
         self.0 == 0
     }
 
+    /// Return the number of squares set in the bitboard.
     pub fn count(self) -> u32 {
         self.0.count_ones()
     }
 
+    /// Return the least-significant (lowest-index) set square.
+    ///
+    /// # Panics
+    /// Panics in debug mode if the bitboard is empty.
     pub fn lsb(self) -> Square {
         debug_assert!(!self.is_empty());
         let idx = self.0.trailing_zeros() as u8;
@@ -295,16 +319,20 @@ impl Bitboard {
         unsafe { std::mem::transmute(idx) }
     }
 
+    /// Extract and remove the least-significant set square.
     pub fn pop_lsb(&mut self) -> Square {
         let sq = self.lsb();
         self.0 &= self.0 - 1;
         sq
     }
 
+    /// Returns `true` if more than one square is set.
     pub fn more_than_one(self) -> bool {
         self.0 & (self.0 - 1) != 0
     }
 
+    /// Return a bitboard with only the given square set.
+    /// Returns [`EMPTY`](Self::EMPTY) for [`Square::NONE`].
     pub fn square_bb(sq: Square) -> Bitboard {
         if sq == Square::NONE {
             return Bitboard::EMPTY;
@@ -397,6 +425,7 @@ impl ops::BitOr<Square> for Square {
     }
 }
 
+/// A side in a chess game.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Color {
     White = 0,
@@ -406,6 +435,7 @@ pub enum Color {
 impl Color {
     pub const NB: usize = 2;
 
+    /// Return the opposite color.
     pub fn flip(self) -> Color {
         match self {
             Color::White => Color::Black,
@@ -414,6 +444,10 @@ impl Color {
     }
 }
 
+/// A piece type (pawn, knight, bishop, rook, queen, or commoner).
+///
+/// In atomic chess, a *commoner* moves like a king and is pseudo-royal:
+/// losing all commoners loses the game.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum PieceType {
@@ -429,6 +463,10 @@ impl PieceType {
     pub const NB: usize = 6;
 }
 
+/// A colored piece, packed into a single byte.
+///
+/// Encoding: `(color << 3) | (type + 1)` so that `0` can represent
+/// [`NO_PIECE`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Piece(u8);
 
@@ -438,6 +476,7 @@ impl Piece {
         Piece(((color as u8) << 3) | ((pt as u8) + 1))
     }
 
+    /// Return the color of this piece.
     pub fn color(self) -> Color {
         if self.0 & 8 == 0 {
             Color::White
@@ -446,6 +485,7 @@ impl Piece {
         }
     }
 
+    /// Return the piece type.
     pub fn type_of(self) -> PieceType {
         let inner = (self.0 & 7) - 1;
         debug_assert!(
@@ -456,6 +496,9 @@ impl Piece {
         unsafe { std::mem::transmute(inner) }
     }
 
+    /// Return the ASCII character for this piece.
+    ///
+    /// Upper-case for white (`P`, `N`, `B`, `R`, `Q`, `C`), lower-case for black.
     pub fn ascii_char(self) -> char {
         let t = match self.type_of() {
             PieceType::Pawn => 'P',
@@ -499,10 +542,12 @@ pub const B_ROOK: Piece = Piece::from_parts(Color::Black, PieceType::Rook);
 pub const B_QUEEN: Piece = Piece::from_parts(Color::Black, PieceType::Queen);
 pub const B_COMMONER: Piece = Piece::from_parts(Color::Black, PieceType::Commoner);
 
+/// Construct a [`Piece`] from a color and piece type.
 pub fn make_piece(color: Color, pt: PieceType) -> Piece {
     Piece::from_parts(color, pt)
 }
 
+/// The type of a chess move (normal, promotion, en-passant, castling).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MoveType {
     Normal = 0,
@@ -511,13 +556,20 @@ pub enum MoveType {
     Castling = 3,
 }
 
+/// A chess move packed into a 16-bit integer.
+///
+/// Bit layout (0-indexed LSB): `to_sq:6 | from_sq:6 | type:2 | promotion_type:2`.
+/// - `promotion_type` is valid only when `type == Promotion`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Move(u16);
 
 impl Move {
+    /// A sentinel value representing "no move".
     pub const NONE: Move = Move(0);
+    /// A sentinel null move (from_sq=1, to_sq=1).
     pub const NULL: Move = Move(1 + (1 << 6));
 
+    /// Return the origin square of this move.
     pub fn from_sq(self) -> Square {
         let idx = ((self.0 >> 6) & 0x3f) as u8;
         // SAFETY: (self.0 >> 6) & 0x3f extracts a 6-bit field (0..63).
@@ -525,6 +577,7 @@ impl Move {
         unsafe { std::mem::transmute(idx) }
     }
 
+    /// Return the destination square of this move.
     pub fn to_sq(self) -> Square {
         let idx = (self.0 & 0x3f) as u8;
         // SAFETY: self.0 & 0x3f extracts a 6-bit field (0..63).
@@ -532,6 +585,7 @@ impl Move {
         unsafe { std::mem::transmute(idx) }
     }
 
+    /// Return the move type (normal, promotion, en-passant, castling).
     pub fn move_type(self) -> MoveType {
         match (self.0 >> 12) & 3 {
             0 => MoveType::Normal,
@@ -541,6 +595,7 @@ impl Move {
         }
     }
 
+    /// Return the promotion piece type (valid only for promotion moves).
     pub fn promotion_type(self) -> PieceType {
         static TYPES: [PieceType; 4] = [
             PieceType::Knight,
@@ -551,10 +606,12 @@ impl Move {
         TYPES[((self.0 >> 14) & 3) as usize]
     }
 
+    /// Construct a normal (non-promotion) move.
     pub fn make_move(from: Square, to: Square) -> Move {
         Move(((from as u16) << 6) | (to as u16))
     }
 
+    /// Construct a promotion move. `pt` should be a non-pawn piece type.
     pub fn make_promotion(from: Square, to: Square, pt: PieceType) -> Move {
         let pt_bits = match pt {
             PieceType::Knight => 0u16,
@@ -566,15 +623,18 @@ impl Move {
         Move((pt_bits << 14) | (1 << 12) | ((from as u16) << 6) | (to as u16))
     }
 
+    /// Construct an en-passant capture move.
     pub fn make_enpassant(from: Square, to: Square) -> Move {
         Move((2 << 12) | ((from as u16) << 6) | (to as u16))
     }
 
+    /// Construct a castling move.
     pub fn make_castling(from: Square, to: Square) -> Move {
         Move((3 << 12) | ((from as u16) << 6) | (to as u16))
     }
 }
 
+/// A direction on the chessboard (used for stepping computations).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     North = 8,
@@ -610,10 +670,6 @@ impl ops::Sub<Direction> for Square {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// MoveList — fixed-capacity, stack-allocated list of moves
-// ---------------------------------------------------------------------------
 
 /// Maximum number of moves that can be generated for any atomic chess position.
 ///
@@ -762,7 +818,9 @@ impl<'a> IntoIterator for &'a MoveList {
     }
 }
 
-/// An iterator over the moves in a `MoveList`.
+/// An iterator over the moves in a [`MoveList`].
+///
+/// Obtained via [`IntoIterator`] on `&MoveList`. Yields [`Move`] by value.
 pub struct MoveListIter<'a> {
     iter: std::slice::Iter<'a, Move>,
 }

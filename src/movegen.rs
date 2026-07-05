@@ -11,6 +11,12 @@ const PROMOTION_PIECES: [PieceType; 4] = [
     PieceType::Knight,
 ];
 
+/// Generate all pseudo-legal moves for the side to move.
+///
+/// Pseudo-legal means every move that is legal *except* moves that would
+/// result in self-explosion (losing the last commoner), castling through
+/// check, or leaving a commoner under attack. Use [`generate_legal`] for
+/// fully legal moves.
 pub fn generate_pseudo_legal(board: &Board, moves: &mut MoveList) {
     let us = board.side_to_move();
     let them = us.flip();
@@ -220,6 +226,10 @@ fn generate_castling(board: &Board, us: Color, moves: &mut MoveList) {
     }
 }
 
+/// Generate all fully legal moves for the side to move.
+///
+/// Wraps [`generate_pseudo_legal`] and filters out illegal moves using
+/// [`Board::legal`] and a fast-path trivial-legality check.
 pub fn generate_legal(board: &Board, moves: &mut MoveList) {
     let mut state = StateInfo::new();
     board.populate_state(&mut state);

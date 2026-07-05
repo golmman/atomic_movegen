@@ -1,6 +1,7 @@
 use crate::attacks::{BETWEEN_BB, LINE_BB};
 use crate::types::*;
 
+/// Bitboard with all squares on file A set.
 pub const FILE_ABB: Bitboard = Bitboard(0x0101010101010101);
 pub const FILE_BBB: Bitboard = Bitboard(FILE_ABB.0 << 1);
 pub const FILE_CBB: Bitboard = Bitboard(FILE_ABB.0 << 2);
@@ -19,13 +20,22 @@ pub const RANK_6BB: Bitboard = Bitboard(RANK_1BB.0 << (FILE_NB * 5));
 pub const RANK_7BB: Bitboard = Bitboard(RANK_1BB.0 << (FILE_NB * 6));
 pub const RANK_8BB: Bitboard = Bitboard(RANK_1BB.0 << (FILE_NB * 7));
 
+/// Bitboard with all 64 squares set.
 pub const ALL_SQUARES: Bitboard = Bitboard(!0u64);
 
+/// Return the bitboard of squares strictly between `s1` and `s2`.
+///
+/// Returns [`Bitboard::EMPTY`] if the squares are not on the same rank,
+/// file, or diagonal.
 #[inline(always)]
 pub fn between_bb(s1: Square, s2: Square) -> Bitboard {
     BETWEEN_BB[s1 as usize][s2 as usize]
 }
 
+/// Return the bitboard of all squares on the same rank, file, or diagonal
+/// as `s1` and `s2` (including both endpoints).
+///
+/// Returns [`Bitboard::EMPTY`] if the squares are not aligned.
 #[inline(always)]
 pub fn line_bb(s1: Square, s2: Square) -> Bitboard {
     LINE_BB[s1 as usize][s2 as usize]

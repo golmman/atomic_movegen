@@ -14,9 +14,7 @@ use crate::magic::{self, BISHOP_DIRS, BISHOP_MASKS, ROOK_DIRS, ROOK_MASKS};
 use crate::types::*;
 use std::sync::OnceLock;
 
-// ---------------------------------------------------------------------------
-// CPU feature detection
-// ---------------------------------------------------------------------------
+
 
 /// Returns `true` if the CPU supports the BMI2 instruction set (PEXT).
 ///
@@ -32,9 +30,7 @@ pub fn has_bmi2() -> bool {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Software PEXT (for table generation without BMI2)
-// ---------------------------------------------------------------------------
+
 
 /// Software emulation of the `pext` instruction.
 ///
@@ -57,9 +53,7 @@ fn pext_soft(val: u64, mask: u64) -> u64 {
     result
 }
 
-// ---------------------------------------------------------------------------
-// Compile-time layout computation (popcounts, offsets, total size)
-// ---------------------------------------------------------------------------
+
 
 /// Compiled-time layout for a PEXT-indexed table.
 struct PextLayout {
@@ -91,9 +85,7 @@ const fn compute_pext_layout(masks: &[Bitboard; 64]) -> PextLayout {
 const ROOK_LAYOUT: PextLayout = compute_pext_layout(&ROOK_MASKS);
 const BISHOP_LAYOUT: PextLayout = compute_pext_layout(&BISHOP_MASKS);
 
-// ---------------------------------------------------------------------------
-// Build PEXT-indexed attack tables
-// ---------------------------------------------------------------------------
+
 
 /// Build a PEXT-indexed attack table for a given piece type.
 fn build_pext_table(
@@ -127,9 +119,7 @@ fn build_pext_table(
     table
 }
 
-// ---------------------------------------------------------------------------
-// OnceLock-initialized PEXT tables
-// ---------------------------------------------------------------------------
+
 
 static ROOK_PEXT_TABLE: OnceLock<&[Bitboard]> = OnceLock::new();
 static BISHOP_PEXT_TABLE: OnceLock<&[Bitboard]> = OnceLock::new();
@@ -150,9 +140,7 @@ pub(crate) fn init() {
     )));
 }
 
-// ---------------------------------------------------------------------------
-// Hot-path lookup functions (require BMI2)
-// ---------------------------------------------------------------------------
+
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "bmi2")]
@@ -216,10 +204,6 @@ pub unsafe fn rook_attacks_pext(sq: Square, occupied: Bitboard) -> Bitboard {
     // SAFETY: The caller has verified BMI2 support via has_bmi2().
     unsafe { rook_attacks_pext_impl(sq, occupied) }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

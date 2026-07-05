@@ -1,12 +1,7 @@
 use crate::types::*;
 
-// ---------------------------------------------------------------------------
-// Sliding-attack dispatch
-//
 // On x86_64: runtime dispatch between PEXT (BMI2) and magic-multiply.
-// On other architectures (ARM etc.): direct re-export of the magic fallback
-// — zero overhead, since BMI2 is never available.
-// ---------------------------------------------------------------------------
+// On other architectures: direct re-export of the magic fallback.
 
 #[cfg(target_arch = "x86_64")]
 mod sliding_dispatch {
@@ -55,9 +50,7 @@ use sliding_dispatch::{bishop_attacks, queen_attacks, rook_attacks};
 #[cfg(not(target_arch = "x86_64"))]
 pub use crate::magic::{bishop_attacks, queen_attacks, rook_attacks};
 
-// ---------------------------------------------------------------------------
-// Leaper attack tables computed at compile time (no lazy init, no overhead)
-// ---------------------------------------------------------------------------
+// Leaper attack tables computed at compile time (no lazy init).
 
 /// Compute king attacks for all 64 squares at compile time.
 const fn compute_king_attacks() -> [Bitboard; 64] {
@@ -287,9 +280,7 @@ pub fn pawn_attacks(c: Color, sq: Square) -> Bitboard {
     PAWN_ATTACKS[sq as usize][c as usize]
 }
 
-// ---------------------------------------------------------------------------
-// Initialization — must be called before any sliding-attack lookups
-// ---------------------------------------------------------------------------
+
 
 /// Initialize all attack tables (magic and PEXT).
 ///

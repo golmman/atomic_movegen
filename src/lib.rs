@@ -36,6 +36,10 @@ pub mod types;
 
 use crate::types::MoveList;
 
+/// Count the number of legal moves at each node to the given depth (perft).
+///
+/// This is the standard perft (performance test) function used to verify
+/// move-generator correctness against a reference engine.
 pub fn perft(board: &mut board::Board, depth: u32) -> u64 {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(attacks::init);
