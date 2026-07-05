@@ -14,8 +14,6 @@ use crate::magic::{self, BISHOP_DIRS, BISHOP_MASKS, ROOK_DIRS, ROOK_MASKS};
 use crate::types::*;
 use std::sync::OnceLock;
 
-
-
 /// Returns `true` if the CPU supports the BMI2 instruction set (PEXT).
 ///
 /// On non-x86_64 architectures this always returns `false`.
@@ -29,8 +27,6 @@ pub fn has_bmi2() -> bool {
         false
     }
 }
-
-
 
 /// Software emulation of the `pext` instruction.
 ///
@@ -52,8 +48,6 @@ fn pext_soft(val: u64, mask: u64) -> u64 {
     }
     result
 }
-
-
 
 /// Compiled-time layout for a PEXT-indexed table.
 struct PextLayout {
@@ -84,8 +78,6 @@ const fn compute_pext_layout(masks: &[Bitboard; 64]) -> PextLayout {
 
 const ROOK_LAYOUT: PextLayout = compute_pext_layout(&ROOK_MASKS);
 const BISHOP_LAYOUT: PextLayout = compute_pext_layout(&BISHOP_MASKS);
-
-
 
 /// Build a PEXT-indexed attack table for a given piece type.
 fn build_pext_table(
@@ -119,8 +111,6 @@ fn build_pext_table(
     table
 }
 
-
-
 static ROOK_PEXT_TABLE: OnceLock<&[Bitboard]> = OnceLock::new();
 static BISHOP_PEXT_TABLE: OnceLock<&[Bitboard]> = OnceLock::new();
 
@@ -139,8 +129,6 @@ pub(crate) fn init() {
         BISHOP_LAYOUT.total,
     )));
 }
-
-
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "bmi2")]
@@ -182,26 +170,30 @@ unsafe fn rook_attacks_pext_impl(_sq: Square, _occupied: Bitboard) -> Bitboard {
 /// Return the attack set for a bishop on `sq` given the `occupied` board,
 /// using the BMI2 `pext` instruction.
 ///
-/// # Safety
+/// # Panics
 ///
-/// Caller must ensure the CPU supports BMI2 (e.g., by calling `has_bmi2()`).
-/// On non-x86_64 platforms, calling this function panics.
+/// Panics if the PEXT tables have not been initialized (call `attacks::init()` first).
+/// On non-x86_64 platforms, this function panics unconditionally.
+/// The caller MUST ensure the CPU supports BMI2 before calling (checked during `init()`).
 #[inline(always)]
-pub unsafe fn bishop_attacks_pext(sq: Square, occupied: Bitboard) -> Bitboard {
-    // SAFETY: The caller has verified BMI2 support via has_bmi2().
+pub fn bishop_attacks_pext(sq: Square, occupied: Bitboard) -> Bitboard {
+    // SAFETY: This function is only called after init() has verified BMI2 support
+    // via has_bmi2(), which guarantees BMI2 is available for the process lifetime.
     unsafe { bishop_attacks_pext_impl(sq, occupied) }
 }
 
 /// Return the attack set for a rook on `sq` given the `occupied` board,
 /// using the BMI2 `pext` instruction.
 ///
-/// # Safety
+/// # Panics
 ///
-/// Caller must ensure the CPU supports BMI2 (e.g., by calling `has_bmi2()`).
-/// On non-x86_64 platforms, calling this function panics.
+/// Panics if the PEXT tables have not been initialized (call `attacks::init()` first).
+/// On non-x86_64 platforms, this function panics unconditionally.
+/// The caller MUST ensure the CPU supports BMI2 before calling (checked during `init()`).
 #[inline(always)]
-pub unsafe fn rook_attacks_pext(sq: Square, occupied: Bitboard) -> Bitboard {
-    // SAFETY: The caller has verified BMI2 support via has_bmi2().
+pub fn rook_attacks_pext(sq: Square, occupied: Bitboard) -> Bitboard {
+    // SAFETY: This function is only called after init() has verified BMI2 support
+    // via has_bmi2(), which guarantees BMI2 is available for the process lifetime.
     unsafe { rook_attacks_pext_impl(sq, occupied) }
 }
 
@@ -315,23 +307,21 @@ mod tests {
             let sq = Square::from_u8(sq_idx as u8);
             for occ_val in [0u64, 0xFF, 0xFFFF, 0xDEADBEEF, 0xFFFFFFFFFFFFFFFF] {
                 let occ = Bitboard(occ_val);
-                unsafe {
-                    let pext_atk = bishop_attacks_pext(sq, occ);
-                    let loop_atk = magic::sliding_attack(&BISHOP_DIRS, sq, occ);
-                    assert_eq!(
-                        pext_atk, loop_atk,
-                        "Bishop HW PEXT mismatch at sq={:?}, occ=0x{:x}",
-                        sq, occ_val
-                    );
+                let pext_atk = bishop_attacks_pext(sq, occ);
+                let loop_atk = magic::sliding_attack(&BISHOP_DIRS, sq, occ);
+                assert_eq!(
+                    pext_atk, loop_atk,
+                    "Bishop HW PEXT mismatch at sq={:?}, occ=0x{:x}",
+                    sq, occ_val
+                );
 
-                    let pext_atk = rook_attacks_pext(sq, occ);
-                    let loop_atk = magic::sliding_attack(&ROOK_DIRS, sq, occ);
-                    assert_eq!(
-                        pext_atk, loop_atk,
-                        "Rook HW PEXT mismatch at sq={:?}, occ=0x{:x}",
-                        sq, occ_val
-                    );
-                }
+                let pext_atk = rook_attacks_pext(sq, occ);
+                let loop_atk = magic::sliding_attack(&ROOK_DIRS, sq, occ);
+                assert_eq!(
+                    pext_atk, loop_atk,
+                    "Rook HW PEXT mismatch at sq={:?}, occ=0x{:x}",
+                    sq, occ_val
+                );
             }
         }
     }

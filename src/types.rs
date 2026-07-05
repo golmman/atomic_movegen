@@ -493,6 +493,8 @@ impl Piece {
             "Piece::type_of called with invalid Piece encoding: inner={}",
             inner
         );
+        // SAFETY: inner is 0..5 after masking and decrementing a valid Piece.
+        // All discriminants 0..5 are valid PieceType values.
         unsafe { std::mem::transmute(inner) }
     }
 

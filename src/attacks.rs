@@ -23,7 +23,7 @@ mod sliding_dispatch {
     pub fn bishop_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
         // After init(), IMPL is stable and threadsafe to read.
         if IMPL.load(Ordering::Relaxed) == 2 {
-            unsafe { crate::pext::bishop_attacks_pext(sq, occupied) }
+            crate::pext::bishop_attacks_pext(sq, occupied)
         } else {
             crate::magic::bishop_attacks(sq, occupied)
         }
@@ -32,7 +32,7 @@ mod sliding_dispatch {
     #[inline(always)]
     pub fn rook_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
         if IMPL.load(Ordering::Relaxed) == 2 {
-            unsafe { crate::pext::rook_attacks_pext(sq, occupied) }
+            crate::pext::rook_attacks_pext(sq, occupied)
         } else {
             crate::magic::rook_attacks(sq, occupied)
         }
@@ -279,8 +279,6 @@ pub fn knight_attacks(sq: Square) -> Bitboard {
 pub fn pawn_attacks(c: Color, sq: Square) -> Bitboard {
     PAWN_ATTACKS[sq as usize][c as usize]
 }
-
-
 
 /// Initialize all attack tables (magic and PEXT).
 ///
