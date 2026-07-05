@@ -19,33 +19,7 @@ pub const RANK_6BB: Bitboard = Bitboard(RANK_1BB.0 << (FILE_NB * 5));
 pub const RANK_7BB: Bitboard = Bitboard(RANK_1BB.0 << (FILE_NB * 6));
 pub const RANK_8BB: Bitboard = Bitboard(RANK_1BB.0 << (FILE_NB * 7));
 
-pub const DARK_SQUARES: Bitboard = Bitboard(0xAA55AA55AA55AA55);
-
 pub const ALL_SQUARES: Bitboard = Bitboard(!0u64);
-
-pub fn square_bb(sq: Square) -> Bitboard {
-    Bitboard::square_bb(sq)
-}
-
-pub fn file_bb(f: File) -> Bitboard {
-    FILE_ABB << (f as usize)
-}
-
-pub fn rank_bb(r: Rank) -> Bitboard {
-    RANK_1BB << (FILE_NB * (r as usize))
-}
-
-pub fn adjacent_files_bb(f: File) -> Bitboard {
-    let f_idx = f as usize;
-    let mut b = Bitboard::EMPTY;
-    if f_idx > 0 {
-        b = b | (FILE_ABB << (f_idx - 1));
-    }
-    if f_idx < 7 {
-        b = b | (FILE_ABB << (f_idx + 1));
-    }
-    b
-}
 
 #[inline(always)]
 pub fn shift_north(b: Bitboard) -> Bitboard {
@@ -95,7 +69,7 @@ pub fn pawn_attacks_bb(c: Color, pawns: Bitboard) -> Bitboard {
 }
 
 pub fn pawn_attacks_from(c: Color, sq: Square) -> Bitboard {
-    pawn_attacks_bb(c, square_bb(sq))
+    pawn_attacks_bb(c, Bitboard::square_bb(sq))
 }
 
 #[inline(always)]
@@ -112,22 +86,6 @@ pub fn aligned(s1: Square, s2: Square, s3: Square) -> bool {
     line_bb(s1, s2) & Bitboard::square_bb(s3) != Bitboard::EMPTY
 }
 
-pub fn popcount(bb: Bitboard) -> u32 {
-    bb.count()
-}
-
-pub fn lsb(bb: Bitboard) -> Square {
-    bb.lsb()
-}
-
-pub fn more_than_one(bb: Bitboard) -> bool {
-    bb.more_than_one()
-}
-
-pub fn pop_lsb(bb: &mut Bitboard) -> Square {
-    bb.pop_lsb()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,20 +100,20 @@ mod tests {
 
     #[test]
     fn test_shifts() {
-        let b = square_bb(Square::A2);
-        assert_eq!(shift_north(b), square_bb(Square::A3));
-        assert_eq!(shift_south(b), square_bb(Square::A1));
+        let b = Bitboard::square_bb(Square::A2);
+        assert_eq!(shift_north(b), Bitboard::square_bb(Square::A3));
+        assert_eq!(shift_south(b), Bitboard::square_bb(Square::A1));
 
-        let b = square_bb(Square::B2);
-        assert_eq!(shift_east(b), square_bb(Square::C2));
-        assert_eq!(shift_west(b), square_bb(Square::A2));
+        let b = Bitboard::square_bb(Square::B2);
+        assert_eq!(shift_east(b), Bitboard::square_bb(Square::C2));
+        assert_eq!(shift_west(b), Bitboard::square_bb(Square::A2));
     }
 
     #[test]
     fn test_between_bb() {
         let between = between_bb(Square::C1, Square::F4);
-        assert!(between & square_bb(Square::D2) != Bitboard::EMPTY);
-        assert!(between & square_bb(Square::E3) != Bitboard::EMPTY);
+        assert!(between & Bitboard::square_bb(Square::D2) != Bitboard::EMPTY);
+        assert!(between & Bitboard::square_bb(Square::E3) != Bitboard::EMPTY);
         // Non-aligned squares return empty
         assert!((between_bb(Square::A1, Square::B3)).is_empty());
         // Same-square returns empty
@@ -165,11 +123,11 @@ mod tests {
     #[test]
     fn test_line_bb() {
         let line = line_bb(Square::A1, Square::H8);
-        assert!(line & square_bb(Square::B2) != Bitboard::EMPTY);
-        assert!(line & square_bb(Square::C3) != Bitboard::EMPTY);
+        assert!(line & Bitboard::square_bb(Square::B2) != Bitboard::EMPTY);
+        assert!(line & Bitboard::square_bb(Square::C3) != Bitboard::EMPTY);
         // Line includes both endpoints
-        assert!(line & square_bb(Square::A1) != Bitboard::EMPTY);
-        assert!(line & square_bb(Square::H8) != Bitboard::EMPTY);
+        assert!(line & Bitboard::square_bb(Square::A1) != Bitboard::EMPTY);
+        assert!(line & Bitboard::square_bb(Square::H8) != Bitboard::EMPTY);
     }
 
     #[test]

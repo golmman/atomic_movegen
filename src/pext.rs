@@ -7,13 +7,6 @@
 //! Tables are built at init time using a software PEXT emulation, so
 //! they work regardless of CPU support. The hot-path lookup uses hardware
 //! PEXT when available via `#[target_feature(enable = "bmi2")]`.
-//!
-//! # Dead-code note
-//!
-//! The compiler cannot trace usage across `#[target_feature]` boundaries,
-//! so items like the table statics appear unused. They are in fact used
-//! in the hot-path `bishop_attacks_pext` / `rook_attacks_pext` functions
-//! called from `attacks.rs`.
 
 #![allow(dead_code)]
 

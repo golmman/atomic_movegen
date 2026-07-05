@@ -548,12 +548,12 @@ pub fn queen_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
 // For testing: expose the loop-based reference
 // ---------------------------------------------------------------------------
 
-#[doc(hidden)]
+#[cfg(test)]
 pub fn bishop_attacks_loop(sq: Square, occupied: Bitboard) -> Bitboard {
     sliding_attack(&BISHOP_DIRS, sq, occupied)
 }
 
-#[doc(hidden)]
+#[cfg(test)]
 pub fn rook_attacks_loop(sq: Square, occupied: Bitboard) -> Bitboard {
     sliding_attack(&ROOK_DIRS, sq, occupied)
 }

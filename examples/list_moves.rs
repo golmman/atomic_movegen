@@ -21,12 +21,10 @@ fn main() {
 
     println!("Legal moves ({} total):", moves.len());
     for &m in moves.as_slice() {
-        println!("  {}{}", sq_str(m.from_sq()), sq_str(m.to_sq()));
+        println!(
+            "  {}{}",
+            atomic_movegen::types::sq_str(m.from_sq()),
+            atomic_movegen::types::sq_str(m.to_sq())
+        );
     }
-}
-
-fn sq_str(sq: atomic_movegen::types::Square) -> String {
-    let files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
-    let idx = sq as usize;
-    format!("{}{}", files[idx % 8], (idx / 8 + 1))
 }

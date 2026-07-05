@@ -141,9 +141,73 @@ pub const SQUARE_NB: usize = 64;
 pub const FILE_NB: usize = 8;
 pub const RANK_NB: usize = 8;
 
-pub fn is_ok(s: Square) -> bool {
-    (s as usize) < SQUARE_NB
-}
+// Consolidation point for Square-by-index lookup.
+pub(crate) const SQUARES: [Square; 64] = [
+    Square::A1,
+    Square::B1,
+    Square::C1,
+    Square::D1,
+    Square::E1,
+    Square::F1,
+    Square::G1,
+    Square::H1,
+    Square::A2,
+    Square::B2,
+    Square::C2,
+    Square::D2,
+    Square::E2,
+    Square::F2,
+    Square::G2,
+    Square::H2,
+    Square::A3,
+    Square::B3,
+    Square::C3,
+    Square::D3,
+    Square::E3,
+    Square::F3,
+    Square::G3,
+    Square::H3,
+    Square::A4,
+    Square::B4,
+    Square::C4,
+    Square::D4,
+    Square::E4,
+    Square::F4,
+    Square::G4,
+    Square::H4,
+    Square::A5,
+    Square::B5,
+    Square::C5,
+    Square::D5,
+    Square::E5,
+    Square::F5,
+    Square::G5,
+    Square::H5,
+    Square::A6,
+    Square::B6,
+    Square::C6,
+    Square::D6,
+    Square::E6,
+    Square::F6,
+    Square::G6,
+    Square::H6,
+    Square::A7,
+    Square::B7,
+    Square::C7,
+    Square::D7,
+    Square::E7,
+    Square::F7,
+    Square::G7,
+    Square::H7,
+    Square::A8,
+    Square::B8,
+    Square::C8,
+    Square::D8,
+    Square::E8,
+    Square::F8,
+    Square::G8,
+    Square::H8,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
@@ -180,85 +244,35 @@ impl Rank {
 }
 
 pub fn file_of(s: Square) -> File {
-    let idx = s as u8;
-    // SAFETY: idx & 7 produces a value in 0..7, all valid File discriminants.
-    unsafe { std::mem::transmute(idx & 7) }
+    static FILES: [File; 8] = [
+        File::A,
+        File::B,
+        File::C,
+        File::D,
+        File::E,
+        File::F,
+        File::G,
+        File::H,
+    ];
+    FILES[(s as u8 & 7) as usize]
 }
 
 pub fn rank_of(s: Square) -> Rank {
-    let idx = s as u8;
-    // SAFETY: (idx >> 3) & 7 produces a value in 0..7, all valid Rank discriminants.
-    unsafe { std::mem::transmute((idx >> 3) & 7) }
+    static RANKS: [Rank; 8] = [
+        Rank::R1,
+        Rank::R2,
+        Rank::R3,
+        Rank::R4,
+        Rank::R5,
+        Rank::R6,
+        Rank::R7,
+        Rank::R8,
+    ];
+    RANKS[((s as u8 >> 3) & 7) as usize]
 }
 
 pub fn make_square(f: File, r: Rank) -> Square {
     let idx = (r as usize) * 8 + (f as usize);
-    static SQUARES: [Square; 64] = [
-        Square::A1,
-        Square::B1,
-        Square::C1,
-        Square::D1,
-        Square::E1,
-        Square::F1,
-        Square::G1,
-        Square::H1,
-        Square::A2,
-        Square::B2,
-        Square::C2,
-        Square::D2,
-        Square::E2,
-        Square::F2,
-        Square::G2,
-        Square::H2,
-        Square::A3,
-        Square::B3,
-        Square::C3,
-        Square::D3,
-        Square::E3,
-        Square::F3,
-        Square::G3,
-        Square::H3,
-        Square::A4,
-        Square::B4,
-        Square::C4,
-        Square::D4,
-        Square::E4,
-        Square::F4,
-        Square::G4,
-        Square::H4,
-        Square::A5,
-        Square::B5,
-        Square::C5,
-        Square::D5,
-        Square::E5,
-        Square::F5,
-        Square::G5,
-        Square::H5,
-        Square::A6,
-        Square::B6,
-        Square::C6,
-        Square::D6,
-        Square::E6,
-        Square::F6,
-        Square::G6,
-        Square::H6,
-        Square::A7,
-        Square::B7,
-        Square::C7,
-        Square::D7,
-        Square::E7,
-        Square::F7,
-        Square::G7,
-        Square::H7,
-        Square::A8,
-        Square::B8,
-        Square::C8,
-        Square::D8,
-        Square::E8,
-        Square::F8,
-        Square::G8,
-        Square::H8,
-    ];
     SQUARES[idx]
 }
 
@@ -486,19 +500,32 @@ impl Piece {
     }
 
     pub fn type_of(self) -> PieceType {
-        let inner = (self.0 & 7).wrapping_sub(1);
+        let inner = (self.0 & 7) - 1;
         debug_assert!(
             inner < 6,
             "Piece::type_of called with invalid Piece encoding: inner={}",
             inner
         );
-        // SAFETY: For valid pieces, (self.0 & 7) is in 1..=6, so wrapping_sub(1) maps to 0..=5.
-        // All PieceType discriminants 0..=5 are valid.
         unsafe { std::mem::transmute(inner) }
     }
 
     pub fn is_ok(self) -> bool {
         self.0 != 0
+    }
+
+    pub fn ascii_char(self) -> char {
+        let t = match self.type_of() {
+            PieceType::Pawn => 'P',
+            PieceType::Knight => 'N',
+            PieceType::Bishop => 'B',
+            PieceType::Rook => 'R',
+            PieceType::Queen => 'Q',
+            PieceType::Commoner => 'C',
+        };
+        match self.color() {
+            Color::White => t,
+            Color::Black => t.to_ascii_lowercase(),
+        }
     }
 }
 
@@ -511,15 +538,7 @@ impl fmt::Display for Piece {
             Color::White => "W",
             Color::Black => "B",
         };
-        let t = match self.type_of() {
-            PieceType::Pawn => "P",
-            PieceType::Knight => "N",
-            PieceType::Bishop => "B",
-            PieceType::Rook => "R",
-            PieceType::Queen => "Q",
-            PieceType::Commoner => "C",
-        };
-        write!(f, "{}{}", c, t)
+        write!(f, "{}{}", c, self.ascii_char().to_ascii_uppercase())
     }
 }
 
@@ -539,14 +558,6 @@ pub const B_COMMONER: Piece = Piece::from_parts(Color::Black, PieceType::Commone
 
 pub fn make_piece(color: Color, pt: PieceType) -> Piece {
     Piece::from_parts(color, pt)
-}
-
-pub fn color_of(p: Piece) -> Color {
-    p.color()
-}
-
-pub fn type_of(p: Piece) -> PieceType {
-    p.type_of()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -638,72 +649,6 @@ impl ops::Add<Direction> for Square {
     fn add(self, rhs: Direction) -> Square {
         let idx = (self as i16) + (rhs as i16);
         if (0..64).contains(&idx) {
-            static SQUARES: [Square; 64] = [
-                Square::A1,
-                Square::B1,
-                Square::C1,
-                Square::D1,
-                Square::E1,
-                Square::F1,
-                Square::G1,
-                Square::H1,
-                Square::A2,
-                Square::B2,
-                Square::C2,
-                Square::D2,
-                Square::E2,
-                Square::F2,
-                Square::G2,
-                Square::H2,
-                Square::A3,
-                Square::B3,
-                Square::C3,
-                Square::D3,
-                Square::E3,
-                Square::F3,
-                Square::G3,
-                Square::H3,
-                Square::A4,
-                Square::B4,
-                Square::C4,
-                Square::D4,
-                Square::E4,
-                Square::F4,
-                Square::G4,
-                Square::H4,
-                Square::A5,
-                Square::B5,
-                Square::C5,
-                Square::D5,
-                Square::E5,
-                Square::F5,
-                Square::G5,
-                Square::H5,
-                Square::A6,
-                Square::B6,
-                Square::C6,
-                Square::D6,
-                Square::E6,
-                Square::F6,
-                Square::G6,
-                Square::H6,
-                Square::A7,
-                Square::B7,
-                Square::C7,
-                Square::D7,
-                Square::E7,
-                Square::F7,
-                Square::G7,
-                Square::H7,
-                Square::A8,
-                Square::B8,
-                Square::C8,
-                Square::D8,
-                Square::E8,
-                Square::F8,
-                Square::G8,
-                Square::H8,
-            ];
             SQUARES[idx as usize]
         } else {
             Square::NONE
@@ -714,22 +659,25 @@ impl ops::Add<Direction> for Square {
 impl ops::Sub<Direction> for Square {
     type Output = Square;
     fn sub(self, rhs: Direction) -> Square {
-        self + Direction::from(-(rhs as i16))
+        match Direction::from(-(rhs as i16)) {
+            Some(d) => self + d,
+            None => Square::NONE,
+        }
     }
 }
 
 impl Direction {
-    fn from(val: i16) -> Direction {
+    fn from(val: i16) -> Option<Direction> {
         match val {
-            8 => Direction::North,
-            1 => Direction::East,
-            -8 => Direction::South,
-            -1 => Direction::West,
-            9 => Direction::NorthEast,
-            7 => Direction::NorthWest,
-            -7 => Direction::SouthEast,
-            -9 => Direction::SouthWest,
-            _ => panic!("Invalid direction value"),
+            8 => Some(Direction::North),
+            1 => Some(Direction::East),
+            -8 => Some(Direction::South),
+            -1 => Some(Direction::West),
+            9 => Some(Direction::NorthEast),
+            7 => Some(Direction::NorthWest),
+            -7 => Some(Direction::SouthEast),
+            -9 => Some(Direction::SouthWest),
+            _ => None,
         }
     }
 }
@@ -865,6 +813,56 @@ impl MoveList {
     }
 }
 
+/// Convert a `Square` to its algebraic notation string (e.g. `Square::E2` -> `"e2"`).
+pub fn sq_str(sq: Square) -> String {
+    let files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+    let idx = sq as usize;
+    format!("{}{}", files[idx % 8], (idx / 8 + 1))
+}
+
+/// Parse a square in algebraic notation (e.g. `"e2"`) into a `Square`.
+pub fn parse_sq(s: &str) -> Square {
+    if s.len() < 2 {
+        return Square::A1;
+    }
+    let file = match s.chars().next().unwrap() {
+        'a' => 0,
+        'b' => 1,
+        'c' => 2,
+        'd' => 3,
+        'e' => 4,
+        'f' => 5,
+        'g' => 6,
+        'h' => 7,
+        _ => 0,
+    };
+    let rank = match s.chars().nth(1).unwrap() {
+        '1' => Rank::R1,
+        '2' => Rank::R2,
+        '3' => Rank::R3,
+        '4' => Rank::R4,
+        '5' => Rank::R5,
+        '6' => Rank::R6,
+        '7' => Rank::R7,
+        '8' => Rank::R8,
+        _ => Rank::R1,
+    };
+    make_square(
+        match file {
+            0 => File::A,
+            1 => File::B,
+            2 => File::C,
+            3 => File::D,
+            4 => File::E,
+            5 => File::F,
+            6 => File::G,
+            7 => File::H,
+            _ => unreachable!(),
+        },
+        rank,
+    )
+}
+
 impl Default for MoveList {
     fn default() -> Self {
         Self::new()
@@ -969,11 +967,11 @@ mod tests {
     #[test]
     fn test_piece() {
         let wp = make_piece(Color::White, PieceType::Pawn);
-        assert_eq!(color_of(wp), Color::White);
-        assert_eq!(type_of(wp), PieceType::Pawn);
+        assert_eq!(wp.color(), Color::White);
+        assert_eq!(wp.type_of(), PieceType::Pawn);
 
         let bk = make_piece(Color::Black, PieceType::Commoner);
-        assert_eq!(color_of(bk), Color::Black);
-        assert_eq!(type_of(bk), PieceType::Commoner);
+        assert_eq!(bk.color(), Color::Black);
+        assert_eq!(bk.type_of(), PieceType::Commoner);
     }
 }

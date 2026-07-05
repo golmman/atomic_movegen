@@ -80,9 +80,3 @@ fn main() {
         }
     }
 }
-
-fn sq_str(sq: Square) -> String {
-    let files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
-    let idx = sq as usize;
-    format!("{}{}", files[idx % 8], (idx / 8 + 1))
-}

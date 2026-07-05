@@ -23,7 +23,7 @@ fn char_to_piece(c: char) -> Option<Piece> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct StateInfo {
     // Hot fields (read in legal() and generate_legal())
     pub checkers: Bitboard,
@@ -154,7 +154,7 @@ impl Board {
         let ep_square = if parts[3] == "-" {
             None
         } else {
-            Some(parse_square(parts[3]))
+            Some(crate::types::parse_sq(parts[3]))
         };
 
         let rule50 = if parts.len() > 4 {
@@ -194,20 +194,7 @@ impl Board {
                         fen.push_str(&empty.to_string());
                         empty = 0;
                     }
-                    let p = self.squares[idx];
-                    let c = match p.color() {
-                        Color::White => 'W',
-                        Color::Black => 'B',
-                    };
-                    let t = match p.type_of() {
-                        PieceType::Pawn => 'P',
-                        PieceType::Knight => 'N',
-                        PieceType::Bishop => 'B',
-                        PieceType::Rook => 'R',
-                        PieceType::Queen => 'Q',
-                        PieceType::Commoner => 'C',
-                    };
-                    fen.push(if c == 'W' { t } else { t.to_ascii_lowercase() });
+                    fen.push(self.squares[idx].ascii_char());
                 }
             }
             if empty > 0 {
@@ -248,7 +235,7 @@ impl Board {
 
         fen.push(' ');
         match self.ep_square {
-            Some(sq) => fen.push_str(&square_str(sq)),
+            Some(sq) => fen.push_str(&crate::types::sq_str(sq)),
             None => fen.push('-'),
         }
 
@@ -269,7 +256,8 @@ impl Board {
         self.squares[sq as usize] == NO_PIECE
     }
 
-    pub fn pieces(&self) -> Bitboard {
+    #[inline(always)]
+    pub fn occupied(&self) -> Bitboard {
         self.by_color[0] | self.by_color[1]
     }
 
@@ -303,11 +291,6 @@ impl Board {
     #[inline(always)]
     pub fn commoners(&self, c: Color) -> Bitboard {
         self.pieces_color_pt(c, PieceType::Commoner)
-    }
-
-    #[inline(always)]
-    pub fn occupied(&self) -> Bitboard {
-        self.pieces()
     }
 
     pub fn attackers_to(&self, sq: Square, occupied: Bitboard) -> Bitboard {
@@ -356,6 +339,7 @@ impl Board {
         let mut checkers = Bitboard::EMPTY;
         let occupied = self.occupied();
 
+        let them_bb = self.pieces_color(them);
         let mut c = commoners;
         while !c.is_empty() {
             let ksq = c.pop_lsb();
@@ -363,15 +347,15 @@ impl Board {
             let bishop_atk = attacks::bishop_attacks(ksq, occupied);
             let queen_atk = rook_atk | bishop_atk;
             checkers = checkers
-                | (rook_atk & self.by_type[PieceType::Rook as usize] & self.pieces_color(them))
-                | (bishop_atk & self.by_type[PieceType::Bishop as usize] & self.pieces_color(them))
-                | (queen_atk & self.by_type[PieceType::Queen as usize] & self.pieces_color(them))
+                | (rook_atk & self.by_type[PieceType::Rook as usize] & them_bb)
+                | (bishop_atk & self.by_type[PieceType::Bishop as usize] & them_bb)
+                | (queen_atk & self.by_type[PieceType::Queen as usize] & them_bb)
                 | (attacks::knight_attacks(ksq)
                     & self.by_type[PieceType::Knight as usize]
-                    & self.pieces_color(them))
+                    & them_bb)
                 | (attacks::pawn_attacks(us, ksq)
                     & self.by_type[PieceType::Pawn as usize]
-                    & self.pieces_color(them));
+                    & them_bb);
         }
 
         // Adjacent commoner check (extinction pseudo-royal)
@@ -453,14 +437,8 @@ impl Board {
         let pt = piece.type_of();
         let is_capture = !self.empty(to);
 
-        // Handle castling
         if m.move_type() == MoveType::Castling {
-            let (kfrom, kto, rfrom, rto) = match (us, to > from) {
-                (Color::White, true) => (Square::E1, Square::G1, Square::H1, Square::F1),
-                (Color::White, false) => (Square::E1, Square::C1, Square::A1, Square::D1),
-                (Color::Black, true) => (Square::E8, Square::G8, Square::H8, Square::F8),
-                (Color::Black, false) => (Square::E8, Square::C8, Square::A8, Square::D8),
-            };
+            let (kfrom, kto, rfrom, rto) = castling_squares(us, to > from);
             self.move_piece(kfrom, kto);
             self.move_piece(rfrom, rto);
             self.castling_rights &= match us {
@@ -509,7 +487,7 @@ impl Board {
         if is_capture || m.move_type() == MoveType::EnPassant {
             // Blast zone = king attacks from `to`, minus pawn squares
             let blast_zone = attacks::king_attacks(to) & !self.by_type[PieceType::Pawn as usize];
-            let mut to_blast = blast_zone & self.pieces();
+            let mut to_blast = blast_zone & self.occupied();
 
             // Always blast the capturer at ground zero (pawns are NOT immune at `to`).
             to_blast = to_blast | Bitboard::square_bb(to);
@@ -593,12 +571,7 @@ impl Board {
 
         // Handle castling
         if m.move_type() == MoveType::Castling {
-            let (kfrom, kto, rfrom, rto) = match (us, to > from) {
-                (Color::White, true) => (Square::E1, Square::G1, Square::H1, Square::F1),
-                (Color::White, false) => (Square::E1, Square::C1, Square::A1, Square::D1),
-                (Color::Black, true) => (Square::E8, Square::G8, Square::H8, Square::F8),
-                (Color::Black, false) => (Square::E8, Square::C8, Square::A8, Square::D8),
-            };
+            let (kfrom, kto, rfrom, rto) = castling_squares(us, to > from);
             self.move_piece(kto, kfrom);
             self.move_piece(rto, rfrom);
             self.game_ply -= 1;
@@ -688,23 +661,14 @@ impl Board {
         let us = self.side_to_move;
         let them = us.flip();
 
-        // Moving piece must exist
         let piece = self.piece_on(from);
         if piece == NO_PIECE {
             return false;
         }
 
-        // Pre-compute is_capture (needed for early-out and later logic)
         let is_capture = m.move_type() != MoveType::Castling
             && (m.move_type() == MoveType::EnPassant || self.piece_on(to) != NO_PIECE);
 
-        // Fast-path: delegate to the trivially-legal check.
-        if is_move_trivially_legal(self, m, state) {
-            return true;
-        }
-
-        // Castling: check pass-through squares BEFORE the move
-        // (with current board state, before king/rook move)
         if m.move_type() == MoveType::Castling {
             let ksq = from;
             let occupied = self.occupied();
@@ -714,182 +678,113 @@ impl Board {
                 [Square::from_index(ksq as i8 - 1), ksq]
             };
             for &sq in &pass_through {
-                // Blast adjacency immunity: skip attack check if an enemy
-                // commoner is adjacent (mutual destruction would protect it)
                 let adjacent_enemy_commoners = self.commoners(them) & attacks::king_attacks(sq);
                 if adjacent_enemy_commoners.is_empty() {
-                    let rook_atk = attacks::rook_attacks(sq, occupied);
-                    let bishop_atk = attacks::bishop_attacks(sq, occupied);
-                    let queen_atk = rook_atk | bishop_atk;
-                    let rook_attackers = rook_atk
-                        & self.by_type[PieceType::Rook as usize]
-                        & self.by_color[them as usize];
-                    let bishop_attackers = bishop_atk
-                        & self.by_type[PieceType::Bishop as usize]
-                        & self.by_color[them as usize];
-                    let queen_attackers = queen_atk
-                        & self.by_type[PieceType::Queen as usize]
-                        & self.by_color[them as usize];
-                    let knight_attackers = attacks::knight_attacks(sq)
-                        & self.by_type[PieceType::Knight as usize]
-                        & self.by_color[them as usize];
-                    let commoner_attackers = attacks::king_attacks(sq)
-                        & self.by_type[PieceType::Commoner as usize]
-                        & self.by_color[them as usize];
-                    let pawn_attackers = attacks::pawn_attacks(self.side_to_move, sq)
-                        & self.by_type[PieceType::Pawn as usize]
-                        & self.by_color[them as usize];
-                    if (rook_attackers
-                        | bishop_attackers
-                        | queen_attackers
-                        | knight_attackers
-                        | commoner_attackers
-                        | pawn_attackers)
-                        != Bitboard::EMPTY
-                    {
+                    let atk = attackers_to(self, sq, occupied, self.by_color[them as usize])
+                        | (attacks::king_attacks(sq)
+                            & self.by_type[PieceType::Commoner as usize]
+                            & self.by_color[them as usize]);
+                    if atk != Bitboard::EMPTY {
                         return false;
                     }
                 }
             }
-            // Fall through to destination check below
         }
 
-        // Pre-compute occupied after the move (without cloning/do_move)
-        let mut occupied = self.pieces() ^ from; // remove moving piece from origin
-        let mut kto = to; // king/square destination (may differ from `to` for castling)
+        let mut occupied = self.occupied() ^ from;
+        let mut kto = to;
 
         if m.move_type() == MoveType::Castling {
-            // Adjust for castling: king moves to kto_actual, rook moves rfrom->rto
-            let (kto_actual, rfrom, rto) = match (us, to > from) {
-                (Color::White, true) => (Square::G1, Square::H1, Square::F1),
-                (Color::White, false) => (Square::C1, Square::A1, Square::D1),
-                (Color::Black, true) => (Square::G8, Square::H8, Square::F8),
-                (Color::Black, false) => (Square::C8, Square::A8, Square::D8),
-            };
+            let (_, kto_actual, rfrom, rto) = castling_squares(us, to > from);
             kto = kto_actual;
-            occupied = occupied ^ Bitboard::square_bb(rfrom); // remove rook from origin
-            occupied = occupied | Bitboard::square_bb(rto); // add rook at destination
+            occupied = occupied ^ Bitboard::square_bb(rfrom);
+            occupied = occupied | Bitboard::square_bb(rto);
         } else if m.move_type() == MoveType::EnPassant {
-            // Remove the captured pawn (the e.p. target)
             let capsq = match us {
                 Color::White => Square::from_index(to as i8 - 8),
                 Color::Black => Square::from_index(to as i8 + 8),
             };
             occupied = occupied & !Bitboard::square_bb(capsq);
-        } else if self.piece_on(to) != NO_PIECE {
-            // Regular capture: the captured piece at `to` will be removed
-            // by the blast (to is always blasted), so no explicit removal needed.
         }
 
-        // Add the moving piece at its destination
         occupied = occupied | Bitboard::square_bb(kto);
 
-        // Apply blast on capture
-        // Castling encodes the rook's square as `to`, not a capture target.
         if is_capture {
-            // Use PRE-MOVE board state for blast computation (matching reference).
-            // Adjacent blast removes non-pawn pieces within king-attacks of kto.
-            // Ground zero (kto) is always removed (Bug #1 fix).
             let pre_pawns = self.by_type[PieceType::Pawn as usize];
-            let pre_non_pawns = self.pieces() ^ pre_pawns;
+            let pre_non_pawns = self.occupied() ^ pre_pawns;
             let blast_adjacent = attacks::king_attacks(kto) & pre_non_pawns;
             occupied = occupied & !(blast_adjacent | Bitboard::square_bb(kto));
         }
 
-        // Self-explosion check: ensure at least one own commoner survived.
-        // Note: self.commoners(us) is the PRE-MOVE position. Our commoner
-        // might have moved to `kto` (non-capture) or could have been destroyed
-        // by blast (capture). We add the moved commoner if it survived.
         let mut our_commoners = self.commoners(us) & occupied;
 
-        // If the moving piece was a commoner and the move is not a capture
-        // (no blast → piece survives at kto), add it at its new location.
         if m.move_type() == MoveType::Castling {
-            // Castling: the king moved to kto (no blast)
             our_commoners = our_commoners | Bitboard::square_bb(kto);
         } else if !is_capture {
             let moving_piece = self.piece_on(from);
             if moving_piece != NO_PIECE && moving_piece.type_of() == PieceType::Commoner {
-                // Non-capture: the commoner survived at kto (no blast destruction)
                 our_commoners = our_commoners | Bitboard::square_bb(kto);
             }
         }
-        // For captures: the piece at kto is ALWAYS destroyed by the blast
-        // (Bug #1 fix), so the moved commoner does NOT survive at kto.
 
         if our_commoners.is_empty() {
             return false;
         }
 
-        // Extinction pseudo-royal: in atomic chess, only the last 1 commoner
-        // per side is "pseudo-royal" (extinctionPieceCount=0, threshold=1).
-        // Commoners beyond the threshold are not protected from attacks.
-        //
-        // Reference (Fairy-Stockfish position.cpp lines 1156-1188):
-        //   pseudoRoyals = st->pseudoRoyals & pieces(sideToMove);
-        //   // Computed at state-setup: only pieces with count <= threshold+1
-        //   if (!(pseudoRoyalsTheirs & ~occupied)) // skip if enemy PR destroyed
-        //       while (pseudoRoyals)              // for each own PR
-        //           // check adjacency immunity + attackers
         let our_pr_count = state.commoners_count as usize;
         let them_pr_count = state.them_commoners_count as usize;
 
-        // Only check attacks if we have ≤1 commoner (pseudo-royal threshold).
         if our_pr_count <= 1 {
-            // Skip the attack check entirely if we destroyed the enemy's last
-            // pseudo-royal commoner (winning move — no need to verify safety).
             let enemy_pr_destroyed =
                 them_pr_count <= 1 && (self.commoners(them) & occupied).is_empty();
 
             if !enemy_pr_destroyed {
-                // Use PRE-BLAST enemy commoner positions for adjacency immunity
-                // (Bug #2 fix).
                 let them_commoners = self.commoners(them);
-                // Filter opponent pieces to those that survived the blast
                 let enemy_survivors = self.by_color[them as usize] & occupied;
 
                 let mut c = our_commoners;
                 while !c.is_empty() {
                     let ksq = c.pop_lsb();
-
-                    // Blast adjacency immunity: if an enemy commoner is adjacent
-                    // (pre-blast, even if destroyed by blast), this commoner is
-                    // immune to being "in check" (mutual destruction).
                     let adjacent_enemy = them_commoners & attacks::king_attacks(ksq);
-                    if adjacent_enemy.is_empty() {
-                        // No adjacent enemy commoner — check attackers normally.
-                        // Use post-blast occupied for blocking and filter opponent
-                        // pieces to those that survived the blast.
-                        let rook_atk = attacks::rook_attacks(ksq, occupied);
-                        let bishop_atk = attacks::bishop_attacks(ksq, occupied);
-                        let queen_atk = rook_atk | bishop_atk;
-                        let rook_attackers =
-                            rook_atk & self.by_type[PieceType::Rook as usize] & enemy_survivors;
-                        let bishop_attackers =
-                            bishop_atk & self.by_type[PieceType::Bishop as usize] & enemy_survivors;
-                        let queen_attackers =
-                            queen_atk & self.by_type[PieceType::Queen as usize] & enemy_survivors;
-                        let knight_attackers = attacks::knight_attacks(ksq)
-                            & self.by_type[PieceType::Knight as usize]
-                            & enemy_survivors;
-                        let pawn_attackers = attacks::pawn_attacks(us, ksq)
-                            & self.by_type[PieceType::Pawn as usize]
-                            & enemy_survivors;
-                        if (rook_attackers
-                            | bishop_attackers
-                            | queen_attackers
-                            | knight_attackers
-                            | pawn_attackers)
-                            != Bitboard::EMPTY
-                        {
-                            return false;
-                        }
+                    if adjacent_enemy.is_empty()
+                        && attackers_to(self, ksq, occupied, enemy_survivors) != Bitboard::EMPTY
+                    {
+                        return false;
                     }
                 }
             }
         }
 
         true
+    }
+}
+
+/// Return the bitboard of enemy sliding/leaper pieces (rook, bishop, queen,
+/// knight, pawn) that attack `sq` on the given `occupied` board, filtered to
+/// the enemy pieces in `enemy_bb`.  Commoner (king) attacks are *not* included
+/// (they are handled separately via adjacency-immunity in the pseudo-royal
+/// rules).
+#[inline(always)]
+fn attackers_to(board: &Board, sq: Square, occupied: Bitboard, enemy_bb: Bitboard) -> Bitboard {
+    let rook_atk = attacks::rook_attacks(sq, occupied);
+    let bishop_atk = attacks::bishop_attacks(sq, occupied);
+    let queen_atk = rook_atk | bishop_atk;
+    rook_atk & board.by_type[PieceType::Rook as usize] & enemy_bb
+        | bishop_atk & board.by_type[PieceType::Bishop as usize] & enemy_bb
+        | queen_atk & board.by_type[PieceType::Queen as usize] & enemy_bb
+        | attacks::knight_attacks(sq) & board.by_type[PieceType::Knight as usize] & enemy_bb
+        | attacks::pawn_attacks(board.side_to_move, sq)
+            & board.by_type[PieceType::Pawn as usize]
+            & enemy_bb
+}
+
+/// Return the castling square data for a given color and side.
+fn castling_squares(us: Color, kingside: bool) -> (Square, Square, Square, Square) {
+    match (us, kingside) {
+        (Color::White, true) => (Square::E1, Square::G1, Square::H1, Square::F1),
+        (Color::White, false) => (Square::E1, Square::C1, Square::A1, Square::D1),
+        (Color::Black, true) => (Square::E8, Square::G8, Square::H8, Square::F8),
+        (Color::Black, false) => (Square::E8, Square::C8, Square::A8, Square::D8),
     }
 }
 
@@ -945,18 +840,6 @@ impl fmt::Display for Board {
         for rank in (0..8).rev() {
             write!(f, "{} ", rank + 1)?;
             for file in 0..8 {
-                let _idx = rank * 8 + file;
-                let _sq = match file {
-                    0 => Square::A1,
-                    1 => Square::B1,
-                    2 => Square::C1,
-                    3 => Square::D1,
-                    4 => Square::E1,
-                    5 => Square::F1,
-                    6 => Square::G1,
-                    7 => Square::H1,
-                    _ => unreachable!(),
-                };
                 let wrapped_sq = make_square(
                     match file {
                         0 => File::A,
@@ -985,20 +868,7 @@ impl fmt::Display for Board {
                 if self.squares[wrapped_idx] == NO_PIECE {
                     write!(f, " .")?;
                 } else {
-                    let piece = self.squares[wrapped_idx];
-                    let c = match piece.color() {
-                        Color::White => 'W',
-                        Color::Black => 'B',
-                    };
-                    let t = match piece.type_of() {
-                        PieceType::Pawn => 'P',
-                        PieceType::Knight => 'N',
-                        PieceType::Bishop => 'B',
-                        PieceType::Rook => 'R',
-                        PieceType::Queen => 'Q',
-                        PieceType::Commoner => 'C',
-                    };
-                    write!(f, " {}", if c == 'W' { t } else { t.to_ascii_lowercase() })?;
+                    write!(f, " {}", self.squares[wrapped_idx].ascii_char())?;
                 }
             }
             writeln!(f)?;
@@ -1012,153 +882,10 @@ impl fmt::Display for Board {
     }
 }
 
-fn parse_square(s: &str) -> Square {
-    if s.len() < 2 {
-        return Square::A1;
-    }
-    let file = match s.chars().next().unwrap() {
-        'a' => 0,
-        'b' => 1,
-        'c' => 2,
-        'd' => 3,
-        'e' => 4,
-        'f' => 5,
-        'g' => 6,
-        'h' => 7,
-        _ => 0,
-    };
-    let rank = match s.chars().nth(1).unwrap() {
-        '1' => 0,
-        '2' => 1,
-        '3' => 2,
-        '4' => 3,
-        '5' => 4,
-        '6' => 5,
-        '7' => 6,
-        '8' => 7,
-        _ => 0,
-    };
-    make_square(
-        match file {
-            0 => File::A,
-            1 => File::B,
-            2 => File::C,
-            3 => File::D,
-            4 => File::E,
-            5 => File::F,
-            6 => File::G,
-            7 => File::H,
-            _ => unreachable!(),
-        },
-        match rank {
-            0 => Rank::R1,
-            1 => Rank::R2,
-            2 => Rank::R3,
-            3 => Rank::R4,
-            4 => Rank::R5,
-            5 => Rank::R6,
-            6 => Rank::R7,
-            7 => Rank::R8,
-            _ => unreachable!(),
-        },
-    )
-}
-
-fn square_str(sq: Square) -> String {
-    let f = match file_of(sq) {
-        File::A => 'a',
-        File::B => 'b',
-        File::C => 'c',
-        File::D => 'd',
-        File::E => 'e',
-        File::F => 'f',
-        File::G => 'g',
-        File::H => 'h',
-    };
-    let r = match rank_of(sq) {
-        Rank::R1 => '1',
-        Rank::R2 => '2',
-        Rank::R3 => '3',
-        Rank::R4 => '4',
-        Rank::R5 => '5',
-        Rank::R6 => '6',
-        Rank::R7 => '7',
-        Rank::R8 => '8',
-    };
-    format!("{}{}", f, r)
-}
-
-// Helper to allow Square from index
 impl Square {
     pub fn from_index(idx: i8) -> Square {
-        static SQUARES: [Square; 64] = [
-            Square::A1,
-            Square::B1,
-            Square::C1,
-            Square::D1,
-            Square::E1,
-            Square::F1,
-            Square::G1,
-            Square::H1,
-            Square::A2,
-            Square::B2,
-            Square::C2,
-            Square::D2,
-            Square::E2,
-            Square::F2,
-            Square::G2,
-            Square::H2,
-            Square::A3,
-            Square::B3,
-            Square::C3,
-            Square::D3,
-            Square::E3,
-            Square::F3,
-            Square::G3,
-            Square::H3,
-            Square::A4,
-            Square::B4,
-            Square::C4,
-            Square::D4,
-            Square::E4,
-            Square::F4,
-            Square::G4,
-            Square::H4,
-            Square::A5,
-            Square::B5,
-            Square::C5,
-            Square::D5,
-            Square::E5,
-            Square::F5,
-            Square::G5,
-            Square::H5,
-            Square::A6,
-            Square::B6,
-            Square::C6,
-            Square::D6,
-            Square::E6,
-            Square::F6,
-            Square::G6,
-            Square::H6,
-            Square::A7,
-            Square::B7,
-            Square::C7,
-            Square::D7,
-            Square::E7,
-            Square::F7,
-            Square::G7,
-            Square::H7,
-            Square::A8,
-            Square::B8,
-            Square::C8,
-            Square::D8,
-            Square::E8,
-            Square::F8,
-            Square::G8,
-            Square::H8,
-        ];
         if (0..64).contains(&idx) {
-            SQUARES[idx as usize]
+            crate::types::SQUARES[idx as usize]
         } else {
             Square::NONE
         }

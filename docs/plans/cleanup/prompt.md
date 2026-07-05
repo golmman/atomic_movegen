@@ -1,8 +1,9 @@
-package name with "-" ? -> rust convention
-deployment to crates.io
-code audit, review, cleanup
-readme: update, document examples
-ideas from https://github.com/ankan-ban/perft_gpu
+DONE: package name with "-" ? -> rust convention
+TODO: deployment to crates.io
+TODO: code audit, review, cleanup
+TODO: readme: update, document examples
+TODO: rust docs
+TODO: ideas from https://github.com/ankan-ban/perft_gpu
 
 
 Perform a code audit.

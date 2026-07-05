@@ -2,6 +2,7 @@ use atomic_movegen::board::Board;
 use atomic_movegen::movegen;
 use atomic_movegen::perft;
 use atomic_movegen::types::MoveList;
+use atomic_movegen::types::sq_str;
 use std::env;
 
 fn main() {
@@ -36,10 +37,4 @@ fn main() {
         println!("{}{}: {}", sq_str(m.from_sq()), sq_str(m.to_sq()), cnt);
     }
     println!("\nNodes searched: {}", total);
-}
-
-fn sq_str(sq: atomic_movegen::types::Square) -> String {
-    let files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
-    let idx = sq as usize;
-    format!("{}{}", files[idx % 8], (idx / 8 + 1))
 }

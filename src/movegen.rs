@@ -4,6 +4,13 @@ use crate::board::{
 };
 use crate::types::*;
 
+const PROMOTION_PIECES: [PieceType; 4] = [
+    PieceType::Queen,
+    PieceType::Rook,
+    PieceType::Bishop,
+    PieceType::Knight,
+];
+
 pub fn generate_pseudo_legal(board: &Board, moves: &mut MoveList) {
     let us = board.side_to_move();
     let them = us.flip();
@@ -16,7 +23,6 @@ pub fn generate_pseudo_legal(board: &Board, moves: &mut MoveList) {
         generate_pawn_moves_for(board, us, them, from, moves);
     }
 
-    // Knight moves
     let mut knights = board.pieces_color_pt(us, PieceType::Knight);
     while !knights.is_empty() {
         let from = knights.pop_lsb();
@@ -28,7 +34,6 @@ pub fn generate_pseudo_legal(board: &Board, moves: &mut MoveList) {
         }
     }
 
-    // Bishop moves
     let mut bishops = board.pieces_color_pt(us, PieceType::Bishop);
     while !bishops.is_empty() {
         let from = bishops.pop_lsb();
@@ -40,7 +45,6 @@ pub fn generate_pseudo_legal(board: &Board, moves: &mut MoveList) {
         }
     }
 
-    // Rook moves
     let mut rooks = board.pieces_color_pt(us, PieceType::Rook);
     while !rooks.is_empty() {
         let from = rooks.pop_lsb();
@@ -52,7 +56,6 @@ pub fn generate_pseudo_legal(board: &Board, moves: &mut MoveList) {
         }
     }
 
-    // Queen moves
     let mut queens = board.pieces_color_pt(us, PieceType::Queen);
     while !queens.is_empty() {
         let from = queens.pop_lsb();
@@ -64,7 +67,6 @@ pub fn generate_pseudo_legal(board: &Board, moves: &mut MoveList) {
         }
     }
 
-    // Commoner (king) moves
     let mut commoners = board.pieces_color_pt(us, PieceType::Commoner);
     while !commoners.is_empty() {
         let from = commoners.pop_lsb();
@@ -90,9 +92,9 @@ fn generate_pawn_moves_for(
     let from_rank = rank_of(from);
     let from_file = file_of(from) as i8;
 
-    let (push_dir, push_double, start_rank, promo_rank, _to_rank, _to_file_inc) = match us {
-        Color::White => (8i8, 16i8, Rank::R2, Rank::R8, Rank::R3, 1i8),
-        Color::Black => (-8i8, -16i8, Rank::R7, Rank::R1, Rank::R6, -1i8),
+    let (push_dir, push_double, start_rank, promo_rank) = match us {
+        Color::White => (8i8, 16i8, Rank::R2, Rank::R8),
+        Color::Black => (-8i8, -16i8, Rank::R7, Rank::R1),
     };
 
     let from_idx = from as i8;
@@ -102,12 +104,7 @@ fn generate_pawn_moves_for(
     let to_sq = Square::from_index(to_idx);
     if to_sq != Square::NONE && board.empty(to_sq) {
         if rank_of(to_sq) == promo_rank {
-            for &pt in &[
-                PieceType::Queen,
-                PieceType::Rook,
-                PieceType::Bishop,
-                PieceType::Knight,
-            ] {
+            for &pt in &PROMOTION_PIECES {
                 moves.push(Move::make_promotion(from, to_sq, pt));
             }
         } else {
@@ -141,12 +138,7 @@ fn generate_pawn_moves_for(
         }
         if board.pieces_color(them) & Bitboard::square_bb(to_sq) != Bitboard::EMPTY {
             if rank_of(to_sq) == promo_rank {
-                for &pt in &[
-                    PieceType::Queen,
-                    PieceType::Rook,
-                    PieceType::Bishop,
-                    PieceType::Knight,
-                ] {
+                for &pt in &PROMOTION_PIECES {
                     moves.push(Move::make_promotion(from, to_sq, pt));
                 }
             } else {

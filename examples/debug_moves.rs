@@ -22,8 +22,8 @@ fn main() {
         if !pseudo_set.insert((m.from_sq(), m.to_sq(), m.move_type())) {
             println!(
                 "DUPLICATE PSEUDO-LEGAL: {}{}",
-                sq_str(m.from_sq()),
-                sq_str(m.to_sq())
+                atomic_movegen::types::sq_str(m.from_sq()),
+                atomic_movegen::types::sq_str(m.to_sq())
             );
         }
     }
@@ -36,8 +36,8 @@ fn main() {
         if !legal_set.insert((m.from_sq(), m.to_sq(), m.move_type())) {
             println!(
                 "DUPLICATE LEGAL: {}{}",
-                sq_str(m.from_sq()),
-                sq_str(m.to_sq())
+                atomic_movegen::types::sq_str(m.from_sq()),
+                atomic_movegen::types::sq_str(m.to_sq())
             );
         }
     }
@@ -48,10 +48,4 @@ fn main() {
         pseudo_set.len()
     );
     println!("Legal moves: {} (unique: {})", legal.len(), legal_set.len());
-}
-
-fn sq_str(sq: Square) -> String {
-    let files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
-    let idx = sq as usize;
-    format!("{}{}", files[idx % 8], (idx / 8 + 1))
 }
