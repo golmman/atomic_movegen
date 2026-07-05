@@ -45,7 +45,7 @@ mod sliding_dispatch {
 }
 
 #[cfg(target_arch = "x86_64")]
-use sliding_dispatch::{bishop_attacks, queen_attacks, rook_attacks};
+pub use sliding_dispatch::{bishop_attacks, queen_attacks, rook_attacks};
 
 #[cfg(not(target_arch = "x86_64"))]
 pub use crate::magic::{bishop_attacks, queen_attacks, rook_attacks};
