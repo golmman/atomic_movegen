@@ -2,6 +2,11 @@
 name = "atomic-movegen"
 version = "0.1.0"
 edition = "2024"
+description = "Legal move generation for atomic chess."
+license = "MIT"
+repository = "https://github.com/golmman/atomic_movegen"
+rust-version = "1.85"
+exclude = ["Fairy-Stockfish/**", "docs/**"]
 
 [dependencies]
 
@@ -19,6 +24,3 @@ overflow-checks = false
 inherits = "release"
 debug = 2
 strip = false
-
-[[example]]
-name = "perft"

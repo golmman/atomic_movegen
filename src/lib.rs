@@ -40,6 +40,7 @@ use crate::types::MoveList;
 ///
 /// This is the standard perft (performance test) function used to verify
 /// move-generator correctness against a reference engine.
+#[must_use]
 pub fn perft(board: &mut board::Board, depth: u32) -> u64 {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(attacks::init);

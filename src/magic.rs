@@ -381,6 +381,11 @@ const fn compute_bishop_entries() -> [MagicEntry; 64] {
 pub(crate) const ROOK_ENTRIES: [MagicEntry; 64] = compute_rook_entries();
 pub(crate) const BISHOP_ENTRIES: [MagicEntry; 64] = compute_bishop_entries();
 
+/// Compute sliding-piece attacks by ray-casting in the given directions.
+///
+/// Walks along each direction from `sq` until hitting the edge of the board
+/// or an occupied square (inclusive). Used as the reference implementation
+/// for building magic and PEXT tables.
 pub(crate) fn sliding_attack(directions: &[(i8, i8)], sq: Square, occupied: Bitboard) -> Bitboard {
     let mut result = 0u64;
     let s_idx = sq as i8;
@@ -403,6 +408,11 @@ pub(crate) fn sliding_attack(directions: &[(i8, i8)], sq: Square, occupied: Bitb
     Bitboard(result)
 }
 
+/// Build a magic-bitboard attack table for a given piece type.
+///
+/// Enumerates all occupancy subsets of each square's mask, computes the
+/// reference attack via [`sliding_attack`], and stores the result at the
+/// magic-indexed position in the flat table.
 fn build_magic_table(
     directions: &[(i8, i8)],
     masks: &[Bitboard; 64],

@@ -8,7 +8,6 @@ A Rust library for legal move generation in [atomic chess](https://en.wikipedia.
 - FEN parsing and output
 - Perft (performance test) recursion
 - Blast-on-capture, COMMONER pseudo-royalty, pawn blast immunity
-- Zero `unsafe` Rust
 
 ## Usage (library)
 

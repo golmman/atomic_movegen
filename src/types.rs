@@ -216,6 +216,7 @@ pub(crate) const SQUARES: [Square; 64] = [
 /// A file (column) on a chessboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum File {
     A,
     B,
@@ -234,6 +235,7 @@ impl File {
 /// A rank (row) on a chessboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum Rank {
     R1,
     R2,
@@ -298,11 +300,13 @@ impl Bitboard {
     pub const EMPTY: Bitboard = Bitboard(0);
 
     /// Returns `true` if no squares are set.
+    #[must_use]
     pub fn is_empty(self) -> bool {
         self.0 == 0
     }
 
     /// Return the number of squares set in the bitboard.
+    #[must_use]
     pub fn count(self) -> u32 {
         self.0.count_ones()
     }
@@ -311,6 +315,7 @@ impl Bitboard {
     ///
     /// # Panics
     /// Panics in debug mode if the bitboard is empty.
+    #[must_use]
     pub fn lsb(self) -> Square {
         debug_assert!(!self.is_empty());
         let idx = self.0.trailing_zeros() as u8;
@@ -327,6 +332,7 @@ impl Bitboard {
     }
 
     /// Returns `true` if more than one square is set.
+    #[must_use]
     pub fn more_than_one(self) -> bool {
         self.0 & (self.0 - 1) != 0
     }
@@ -427,6 +433,7 @@ impl ops::BitOr<Square> for Square {
 
 /// A side in a chess game.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Color {
     White = 0,
     Black = 1,
@@ -450,6 +457,7 @@ impl Color {
 /// losing all commoners loses the game.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum PieceType {
     Pawn = 0,
     Knight = 1,
@@ -477,6 +485,7 @@ impl Piece {
     }
 
     /// Return the color of this piece.
+    #[must_use]
     pub fn color(self) -> Color {
         if self.0 & 8 == 0 {
             Color::White
@@ -486,6 +495,7 @@ impl Piece {
     }
 
     /// Return the piece type.
+    #[must_use]
     pub fn type_of(self) -> PieceType {
         let inner = (self.0 & 7) - 1;
         debug_assert!(
@@ -501,6 +511,7 @@ impl Piece {
     /// Return the ASCII character for this piece.
     ///
     /// Upper-case for white (`P`, `N`, `B`, `R`, `Q`, `C`), lower-case for black.
+    #[must_use]
     pub fn ascii_char(self) -> char {
         let t = match self.type_of() {
             PieceType::Pawn => 'P',
@@ -551,6 +562,7 @@ pub fn make_piece(color: Color, pt: PieceType) -> Piece {
 
 /// The type of a chess move (normal, promotion, en-passant, castling).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum MoveType {
     Normal = 0,
     Promotion = 1,
@@ -572,6 +584,7 @@ impl Move {
     pub const NULL: Move = Move(1 + (1 << 6));
 
     /// Return the origin square of this move.
+    #[must_use]
     pub fn from_sq(self) -> Square {
         let idx = ((self.0 >> 6) & 0x3f) as u8;
         // SAFETY: (self.0 >> 6) & 0x3f extracts a 6-bit field (0..63).
@@ -580,6 +593,7 @@ impl Move {
     }
 
     /// Return the destination square of this move.
+    #[must_use]
     pub fn to_sq(self) -> Square {
         let idx = (self.0 & 0x3f) as u8;
         // SAFETY: self.0 & 0x3f extracts a 6-bit field (0..63).
@@ -588,6 +602,7 @@ impl Move {
     }
 
     /// Return the move type (normal, promotion, en-passant, castling).
+    #[must_use]
     pub fn move_type(self) -> MoveType {
         match (self.0 >> 12) & 3 {
             0 => MoveType::Normal,
@@ -598,6 +613,7 @@ impl Move {
     }
 
     /// Return the promotion piece type (valid only for promotion moves).
+    #[must_use]
     pub fn promotion_type(self) -> PieceType {
         static TYPES: [PieceType; 4] = [
             PieceType::Knight,
@@ -753,6 +769,11 @@ impl MoveList {
 }
 
 /// Convert a `Square` to its algebraic notation string (e.g. `Square::E2` -> `"e2"`).
+///
+/// This is a convenience helper exposed for the crate's own example binaries;
+/// downstream consumers should prefer formatting squares via their own display
+/// logic. Not covered by semantic versioning guarantees.
+#[doc(hidden)]
 pub fn sq_str(sq: Square) -> String {
     let files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
     let idx = sq as usize;
@@ -760,6 +781,11 @@ pub fn sq_str(sq: Square) -> String {
 }
 
 /// Parse a square in algebraic notation (e.g. `"e2"`) into a `Square`.
+///
+/// This is a convenience helper exposed for the crate's own example binaries;
+/// downstream consumers should prefer more robust parsers. Not covered by
+/// semantic versioning guarantees.
+#[doc(hidden)]
 pub fn parse_sq(s: &str) -> Square {
     if s.len() < 2 {
         return Square::A1;

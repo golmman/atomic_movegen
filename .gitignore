@@ -17,3 +17,6 @@ target
 perf.data
 perf.data.old
 
+# Library crate — Cargo.lock should not be committed
+Cargo.lock
+

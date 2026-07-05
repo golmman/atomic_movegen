@@ -1,5 +1,6 @@
 use atomic_movegen::board::Board;
 use atomic_movegen::movegen;
+use atomic_movegen::types::sq_str;
 use atomic_movegen::types::*;
 use std::env;
 

@@ -1,5 +1,6 @@
 use atomic_movegen::board::Board;
 use atomic_movegen::movegen;
+use atomic_movegen::types::sq_str;
 use atomic_movegen::types::MoveList;
 use std::env;
 
@@ -21,10 +22,6 @@ fn main() {
 
     println!("Legal moves ({} total):", moves.len());
     for &m in moves.as_slice() {
-        println!(
-            "  {}{}",
-            atomic_movegen::types::sq_str(m.from_sq()),
-            atomic_movegen::types::sq_str(m.to_sq())
-        );
+        println!("  {}{}", sq_str(m.from_sq()), sq_str(m.to_sq()));
     }
 }

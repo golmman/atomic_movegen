@@ -1,5 +1,6 @@
 use atomic_movegen::board::Board;
 use atomic_movegen::movegen;
+use atomic_movegen::types::sq_str;
 use atomic_movegen::types::*;
 use std::collections::HashSet;
 use std::env;
@@ -22,8 +23,8 @@ fn main() {
         if !pseudo_set.insert((m.from_sq(), m.to_sq(), m.move_type())) {
             println!(
                 "DUPLICATE PSEUDO-LEGAL: {}{}",
-                atomic_movegen::types::sq_str(m.from_sq()),
-                atomic_movegen::types::sq_str(m.to_sq())
+                sq_str(m.from_sq()),
+                sq_str(m.to_sq())
             );
         }
     }
@@ -36,8 +37,8 @@ fn main() {
         if !legal_set.insert((m.from_sq(), m.to_sq(), m.move_type())) {
             println!(
                 "DUPLICATE LEGAL: {}{}",
-                atomic_movegen::types::sq_str(m.from_sq()),
-                atomic_movegen::types::sq_str(m.to_sq())
+                sq_str(m.from_sq()),
+                sq_str(m.to_sq())
             );
         }
     }

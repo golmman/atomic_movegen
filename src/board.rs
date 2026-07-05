@@ -1,7 +1,52 @@
 use crate::attacks;
 use crate::bitboard::*;
 use crate::types::*;
+use std::error::Error;
 use std::fmt;
+
+/// Errors that can occur when parsing a FEN string.
+#[derive(Debug)]
+pub enum FenError {
+    /// Fewer than 4 space-separated fields.
+    TooShort {
+        /// Number of fields actually found.
+        parts: usize,
+    },
+    /// The board section does not contain exactly 8 ranks.
+    WrongRankCount {
+        /// Expected number of ranks (always 8).
+        expected: u8,
+        /// Number of ranks found.
+        got: usize,
+    },
+    /// Invalid side-to-move field (expected `"w"` or `"b"`).
+    InvalidSideToMove(String),
+    /// Invalid castling rights field.
+    InvalidCastling(String),
+    /// Invalid en-passant target square.
+    InvalidEpSquare(String),
+    /// Integer parse failure in the move-clock or full-move fields.
+    ParseInt(String),
+}
+
+impl fmt::Display for FenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FenError::TooShort { parts } => {
+                write!(f, "FEN too short: expected at least 4 parts, got {parts}")
+            }
+            FenError::WrongRankCount { expected, got } => {
+                write!(f, "Expected {expected} ranks in FEN, got {got}")
+            }
+            FenError::InvalidSideToMove(v) => write!(f, "Invalid side to move: {v}"),
+            FenError::InvalidCastling(v) => write!(f, "Invalid castling rights: {v}"),
+            FenError::InvalidEpSquare(v) => write!(f, "Invalid en-passant square: {v}"),
+            FenError::ParseInt(v) => write!(f, "Failed to parse integer: {v}"),
+        }
+    }
+}
+
+impl Error for FenError {}
 
 fn char_to_piece(c: char) -> Option<Piece> {
     match c {
@@ -110,13 +155,12 @@ impl Board {
     /// Accepts standard FEN with 4–6 space-separated fields. The piece
     /// character set includes standard chess pieces plus `C`/`c` and `K`/`k`
     /// for commoners (king-like pseudo-royal pieces).
-    pub fn from_fen(fen: &str) -> Result<Self, String> {
+    pub fn from_fen(fen: &str) -> Result<Self, FenError> {
         let parts: Vec<&str> = fen.split_whitespace().collect();
         if parts.len() < 4 {
-            return Err(format!(
-                "FEN too short: expected at least 4 parts, got {}",
-                parts.len()
-            ));
+            return Err(FenError::TooShort {
+                parts: parts.len(),
+            });
         }
 
         let mut squares = [NO_PIECE; 64];
@@ -127,7 +171,10 @@ impl Board {
         // Our board indices: rank 1 = 0-7, rank 2 = 8-15, ..., rank 8 = 56-63
         let rows: Vec<&str> = parts[0].split('/').collect();
         if rows.len() != 8 {
-            return Err(format!("Expected 8 ranks in FEN, got {}", rows.len()));
+            return Err(FenError::WrongRankCount {
+                expected: 8,
+                got: rows.len(),
+            });
         }
         for (ri, row) in rows.iter().enumerate() {
             let rank_idx = 7 - ri; // rank 0 (index 7) = rank 8 in FEN
@@ -152,7 +199,9 @@ impl Board {
         let side_to_move = match parts[1] {
             "w" => Color::White,
             "b" => Color::Black,
-            _ => return Err(format!("Invalid side to move: {}", parts[1])),
+            _ => {
+                return Err(FenError::InvalidSideToMove(parts[1].to_string()));
+            }
         };
 
         let mut castling_rights = 0u8;
@@ -163,24 +212,30 @@ impl Board {
                 'k' => castling_rights |= BK_CASTLE,
                 'q' => castling_rights |= BQ_CASTLE,
                 '-' => break,
-                _ => {}
+                _ => {
+                    return Err(FenError::InvalidCastling(c.to_string()));
+                }
             }
         }
 
         let ep_square = if parts[3] == "-" {
             None
         } else {
-            Some(crate::types::parse_sq(parts[3]))
+            let sq = crate::types::parse_sq(parts[3]);
+            if sq == Square::A1 && parts[3] != "a1" {
+                return Err(FenError::InvalidEpSquare(parts[3].to_string()));
+            }
+            Some(sq)
         };
 
         let rule50 = if parts.len() > 4 {
-            parts[4].parse::<u8>().unwrap_or(0)
+            parts[4].parse::<u8>().map_err(|e| FenError::ParseInt(e.to_string()))?
         } else {
             0
         };
 
         let game_ply = if parts.len() > 5 {
-            parts[5].parse::<u16>().unwrap_or(1)
+            parts[5].parse::<u16>().map_err(|e| FenError::ParseInt(e.to_string()))?
         } else {
             1
         };
@@ -198,6 +253,7 @@ impl Board {
     }
 
     /// Serialize the board to a FEN string.
+    #[must_use]
     pub fn fen(&self) -> String {
         let mut fen = String::new();
         for rank in (0..8).rev() {
@@ -266,17 +322,20 @@ impl Board {
 
     /// Return the piece on a square (or [`NO_PIECE`] if empty).
     #[inline(always)]
+    #[must_use]
     pub fn piece_on(&self, sq: Square) -> Piece {
         self.squares[sq as usize]
     }
 
     /// Return `true` if the given square is empty.
+    #[must_use]
     pub fn empty(&self, sq: Square) -> bool {
         self.squares[sq as usize] == NO_PIECE
     }
 
     /// Return the bitboard of all occupied squares.
     #[inline(always)]
+    #[must_use]
     pub fn occupied(&self) -> Bitboard {
         self.by_color[0] | self.by_color[1]
     }
@@ -300,22 +359,26 @@ impl Board {
     }
 
     /// Return the side to move.
+    #[must_use]
     pub fn side_to_move(&self) -> Color {
         self.side_to_move
     }
 
     /// Return the castling rights bitmask.
+    #[must_use]
     pub fn castling_rights(&self) -> u8 {
         self.castling_rights
     }
 
     /// Return the en-passant target square, if any.
+    #[must_use]
     pub fn ep_square(&self) -> Option<Square> {
         self.ep_square
     }
 
     /// Return the bitboard of commoners (king-like pseudo-royal pieces) for a color.
     #[inline(always)]
+    #[must_use]
     pub fn commoners(&self, c: Color) -> Bitboard {
         self.pieces_color_pt(c, PieceType::Commoner)
     }
@@ -324,6 +387,7 @@ impl Board {
     ///
     /// Includes pawns, knights, bishops, rooks, queens, and commoners of either
     /// color that attack `sq`.
+    #[must_use]
     pub fn attackers_to(&self, sq: Square, occupied: Bitboard) -> Bitboard {
         let mut attackers = Bitboard::EMPTY;
 
@@ -405,6 +469,7 @@ impl Board {
     }
 
     /// Return the bitboard of enemy pieces checking the side to move.
+    #[must_use]
     pub fn checkers(&self) -> Bitboard {
         self.compute_checkers(self.side_to_move)
     }
@@ -442,6 +507,7 @@ impl Board {
 
     /// Return the bitboard of pieces of the given color that are pinned
     /// (cannot move without exposing a commoner to capture).
+    #[must_use]
     pub fn pinned(&self, c: Color) -> Bitboard {
         self.compute_pinned(c)
     }
@@ -688,6 +754,7 @@ impl Board {
     /// safety, pseudo-royal adjacency, and commoner extinction.
     ///
     /// `state` must contain up-to-date cached fields for the current position.
+    #[must_use]
     pub fn legal(&self, m: Move, state: &StateInfo) -> bool {
         let from = m.from_sq();
         let to = m.to_sq();

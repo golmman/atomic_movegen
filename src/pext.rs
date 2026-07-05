@@ -7,8 +7,11 @@
 //! Tables are built at init time using a software PEXT emulation, so
 //! they work regardless of CPU support. The hot-path lookup uses hardware
 //! PEXT when available via `#[target_feature(enable = "bmi2")]`.
+//!
+//! On non-x86_64 the entire module is dead code (the caller in `attacks`
+//! is gated behind `#[cfg(target_arch = "x86_64")]`).
 
-#![allow(dead_code)]
+#![cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 
 use crate::magic::{self, BISHOP_DIRS, BISHOP_MASKS, ROOK_DIRS, ROOK_MASKS};
 use crate::types::*;
@@ -17,7 +20,7 @@ use std::sync::OnceLock;
 /// Returns `true` if the CPU supports the BMI2 instruction set (PEXT).
 ///
 /// On non-x86_64 architectures this always returns `false`.
-pub fn has_bmi2() -> bool {
+pub(crate) fn has_bmi2() -> bool {
     #[cfg(target_arch = "x86_64")]
     {
         std::arch::is_x86_feature_detected!("bmi2")
@@ -50,6 +53,9 @@ fn pext_soft(val: u64, mask: u64) -> u64 {
 }
 
 /// Compiled-time layout for a PEXT-indexed table.
+///
+/// Stores the popcount and offset for each square, plus the total table
+/// size, allowing O(1) lookup of a square's PEXT-indexed attack range.
 struct PextLayout {
     popcounts: [u32; 64],
     offsets: [usize; 64],
@@ -57,6 +63,10 @@ struct PextLayout {
 }
 
 /// Compute popcounts and offsets from masks at compile time.
+///
+/// For each square the occupancy mask has `p` bits set, requiring `2^p`
+/// entries in the PEXT attack table. This function computes the cumulative
+/// offset and popcount for every square.
 const fn compute_pext_layout(masks: &[Bitboard; 64]) -> PextLayout {
     let mut popcounts = [0u32; 64];
     let mut offsets = [0usize; 64];
@@ -176,7 +186,7 @@ unsafe fn rook_attacks_pext_impl(_sq: Square, _occupied: Bitboard) -> Bitboard {
 /// On non-x86_64 platforms, this function panics unconditionally.
 /// The caller MUST ensure the CPU supports BMI2 before calling (checked during `init()`).
 #[inline(always)]
-pub fn bishop_attacks_pext(sq: Square, occupied: Bitboard) -> Bitboard {
+pub(crate) fn bishop_attacks_pext(sq: Square, occupied: Bitboard) -> Bitboard {
     // SAFETY: This function is only called after init() has verified BMI2 support
     // via has_bmi2(), which guarantees BMI2 is available for the process lifetime.
     unsafe { bishop_attacks_pext_impl(sq, occupied) }
@@ -191,7 +201,7 @@ pub fn bishop_attacks_pext(sq: Square, occupied: Bitboard) -> Bitboard {
 /// On non-x86_64 platforms, this function panics unconditionally.
 /// The caller MUST ensure the CPU supports BMI2 before calling (checked during `init()`).
 #[inline(always)]
-pub fn rook_attacks_pext(sq: Square, occupied: Bitboard) -> Bitboard {
+pub(crate) fn rook_attacks_pext(sq: Square, occupied: Bitboard) -> Bitboard {
     // SAFETY: This function is only called after init() has verified BMI2 support
     // via has_bmi2(), which guarantees BMI2 is available for the process lifetime.
     unsafe { rook_attacks_pext_impl(sq, occupied) }
