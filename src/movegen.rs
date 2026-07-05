@@ -90,7 +90,7 @@ fn generate_pawn_moves_for(
     moves: &mut MoveList,
 ) {
     let from_rank = rank_of(from);
-    let from_file = file_of(from) as i8;
+    let from_f = file_of(from) as i8;
 
     let (push_dir, push_double, start_rank, promo_rank) = match us {
         Color::White => (8i8, 16i8, Rank::R2, Rank::R8),
@@ -123,7 +123,7 @@ fn generate_pawn_moves_for(
 
     // Captures - adjacent files only
     for df in &[-1i8, 1i8] {
-        let target_f = from_file + df;
+        let target_f = from_f + df;
         if !(0..=7).contains(&target_f) {
             continue;
         }
@@ -150,8 +150,8 @@ fn generate_pawn_moves_for(
     // En passant
     if let Some(ep_sq) = board.ep_square() {
         let ep_f = file_of(ep_sq) as i8;
-        if ep_f == from_file - 1 || ep_f == from_file + 1 {
-            let df = ep_f - from_file;
+        if ep_f == from_f - 1 || ep_f == from_f + 1 {
+            let df = ep_f - from_f;
             let to_idx = from_idx + push_dir + df;
             let to_sq = Square::from_index(to_idx);
             if to_sq == ep_sq {
@@ -243,10 +243,6 @@ pub fn generate_legal(board: &Board, moves: &mut MoveList) {
         }
         write_idx
     };
-    // SAFETY: new_len <= orig_len (we only copy, never create new entries).
-    // The unchecked set_len avoids redundant zeroing; values at indices
-    // >= new_len are stale but never accessed because as_slice()/len() use
-    // the updated length.
     moves.set_len(new_len);
 }
 

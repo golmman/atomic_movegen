@@ -1,9 +1,9 @@
 //! Magic bitboards for sliding piece attacks.
 //!
 //! Replaces the ray-casting loop with a constant-time table lookup
-//! using precomputed magic multipliers. Pure safe Rust.
+//! using precomputed magic multipliers.
 //!
-//! Tables are initialized once at first use via `LazyLock`; masks,
+//! Tables are initialized once at first use via `OnceLock`; masks,
 //! magic numbers, and index bits are `const` arrays (zero indirection).
 
 use crate::types::*;

@@ -22,57 +22,6 @@ pub const RANK_8BB: Bitboard = Bitboard(RANK_1BB.0 << (FILE_NB * 7));
 pub const ALL_SQUARES: Bitboard = Bitboard(!0u64);
 
 #[inline(always)]
-pub fn shift_north(b: Bitboard) -> Bitboard {
-    b << 8
-}
-
-#[inline(always)]
-pub fn shift_south(b: Bitboard) -> Bitboard {
-    b >> 8
-}
-
-#[inline(always)]
-pub fn shift_east(b: Bitboard) -> Bitboard {
-    (b & !FILE_HBB) << 1
-}
-
-#[inline(always)]
-pub fn shift_west(b: Bitboard) -> Bitboard {
-    (b & !FILE_ABB) >> 1
-}
-
-#[inline(always)]
-pub fn shift_ne(b: Bitboard) -> Bitboard {
-    (b & !FILE_HBB) << 9
-}
-
-#[inline(always)]
-pub fn shift_nw(b: Bitboard) -> Bitboard {
-    (b & !FILE_ABB) << 7
-}
-
-#[inline(always)]
-pub fn shift_se(b: Bitboard) -> Bitboard {
-    (b & !FILE_HBB) >> 7
-}
-
-#[inline(always)]
-pub fn shift_sw(b: Bitboard) -> Bitboard {
-    (b & !FILE_ABB) >> 9
-}
-
-pub fn pawn_attacks_bb(c: Color, pawns: Bitboard) -> Bitboard {
-    match c {
-        Color::White => shift_nw(pawns) | shift_ne(pawns),
-        Color::Black => shift_sw(pawns) | shift_se(pawns),
-    }
-}
-
-pub fn pawn_attacks_from(c: Color, sq: Square) -> Bitboard {
-    pawn_attacks_bb(c, Bitboard::square_bb(sq))
-}
-
-#[inline(always)]
 pub fn between_bb(s1: Square, s2: Square) -> Bitboard {
     BETWEEN_BB[s1 as usize][s2 as usize]
 }
@@ -82,6 +31,7 @@ pub fn line_bb(s1: Square, s2: Square) -> Bitboard {
     LINE_BB[s1 as usize][s2 as usize]
 }
 
+#[cfg(test)]
 pub fn aligned(s1: Square, s2: Square, s3: Square) -> bool {
     line_bb(s1, s2) & Bitboard::square_bb(s3) != Bitboard::EMPTY
 }
@@ -96,17 +46,6 @@ mod tests {
         assert_eq!(FILE_HBB.0, 0x8080808080808080);
         assert_eq!(RANK_1BB.0, 0xFF);
         assert_eq!(RANK_8BB.0, 0xFF00000000000000);
-    }
-
-    #[test]
-    fn test_shifts() {
-        let b = Bitboard::square_bb(Square::A2);
-        assert_eq!(shift_north(b), Bitboard::square_bb(Square::A3));
-        assert_eq!(shift_south(b), Bitboard::square_bb(Square::A1));
-
-        let b = Bitboard::square_bb(Square::B2);
-        assert_eq!(shift_east(b), Bitboard::square_bb(Square::C2));
-        assert_eq!(shift_west(b), Bitboard::square_bb(Square::A2));
     }
 
     #[test]

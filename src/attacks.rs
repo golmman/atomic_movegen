@@ -308,17 +308,6 @@ pub fn init() {
     }
 }
 
-pub fn attacks_bb(pt: PieceType, sq: Square, occupied: Bitboard) -> Bitboard {
-    match pt {
-        PieceType::Pawn => Bitboard::EMPTY,
-        PieceType::Knight => knight_attacks(sq),
-        PieceType::Bishop => bishop_attacks(sq, occupied),
-        PieceType::Rook => rook_attacks(sq, occupied),
-        PieceType::Queen => queen_attacks(sq, occupied),
-        PieceType::Commoner => king_attacks(sq),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

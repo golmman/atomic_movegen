@@ -135,8 +135,6 @@ pub const SQ_E8: Square = Square::E8;
 pub const SQ_F8: Square = Square::F8;
 pub const SQ_G8: Square = Square::G8;
 pub const SQ_H8: Square = Square::H8;
-pub const SQ_NONE: Square = Square::NONE;
-
 pub const SQUARE_NB: usize = 64;
 pub const FILE_NB: usize = 8;
 pub const RANK_NB: usize = 8;
@@ -276,43 +274,11 @@ pub fn make_square(f: File, r: Rank) -> Square {
     SQUARES[idx]
 }
 
-pub fn relative_rank(c: Color, r: Rank) -> Rank {
-    match c {
-        Color::White => r,
-        Color::Black => {
-            let ranks = [
-                Rank::R8,
-                Rank::R7,
-                Rank::R6,
-                Rank::R5,
-                Rank::R4,
-                Rank::R3,
-                Rank::R2,
-                Rank::R1,
-            ];
-            ranks[r as usize]
-        }
-    }
-}
-
-pub fn relative_rank_sq(c: Color, s: Square) -> Rank {
-    relative_rank(c, rank_of(s))
-}
-
-pub fn pawn_push(c: Color) -> Direction {
-    match c {
-        Color::White => Direction::North,
-        Color::Black => Direction::South,
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bitboard(pub u64);
 
 impl Bitboard {
     pub const EMPTY: Bitboard = Bitboard(0);
-    pub const ALL: Bitboard = Bitboard(!0u64);
-
     pub fn is_empty(self) -> bool {
         self.0 == 0
     }
@@ -325,14 +291,6 @@ impl Bitboard {
         debug_assert!(!self.is_empty());
         let idx = self.0.trailing_zeros() as u8;
         // SAFETY: trailing_zeros() returns 0..63 when self is non-empty.
-        // All discriminants 0..63 are valid Square values.
-        unsafe { std::mem::transmute(idx) }
-    }
-
-    pub fn msb(self) -> Square {
-        debug_assert!(!self.is_empty());
-        let idx = (63 - self.0.leading_zeros()) as u8;
-        // SAFETY: leading_zeros() returns 0..63 on u64, so (63 - leading_zeros()) is 0..63.
         // All discriminants 0..63 are valid Square values.
         unsafe { std::mem::transmute(idx) }
     }
@@ -454,17 +412,6 @@ impl Color {
             Color::Black => Color::White,
         }
     }
-
-    pub fn to_usize(self) -> usize {
-        self as usize
-    }
-}
-
-impl ops::Not for Color {
-    type Output = Color;
-    fn not(self) -> Color {
-        self.flip()
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -507,10 +454,6 @@ impl Piece {
             inner
         );
         unsafe { std::mem::transmute(inner) }
-    }
-
-    pub fn is_ok(self) -> bool {
-        self.0 != 0
     }
 
     pub fn ascii_char(self) -> char {
@@ -659,51 +602,11 @@ impl ops::Add<Direction> for Square {
 impl ops::Sub<Direction> for Square {
     type Output = Square;
     fn sub(self, rhs: Direction) -> Square {
-        match Direction::from(-(rhs as i16)) {
-            Some(d) => self + d,
-            None => Square::NONE,
-        }
-    }
-}
-
-impl Direction {
-    fn from(val: i16) -> Option<Direction> {
-        match val {
-            8 => Some(Direction::North),
-            1 => Some(Direction::East),
-            -8 => Some(Direction::South),
-            -1 => Some(Direction::West),
-            9 => Some(Direction::NorthEast),
-            7 => Some(Direction::NorthWest),
-            -7 => Some(Direction::SouthEast),
-            -9 => Some(Direction::SouthWest),
-            _ => None,
-        }
-    }
-}
-
-impl ops::Add for Direction {
-    type Output = Direction;
-    fn add(self, rhs: Direction) -> Direction {
-        let val = (self as i16) + (rhs as i16);
-        match val {
-            16 => Direction::North,
-            2 => Direction::East,
-            -16 => Direction::South,
-            -2 => Direction::West,
-            8 => Direction::North,
-            1 => Direction::East,
-            -8 => Direction::South,
-            -1 => Direction::West,
-            9 => Direction::NorthEast,
-            7 => Direction::NorthWest,
-            -7 => Direction::SouthEast,
-            -9 => Direction::SouthWest,
-            17 => Direction::NorthEast,
-            15 => Direction::NorthWest,
-            -15 => Direction::SouthEast,
-            -17 => Direction::SouthWest,
-            _ => panic!("Invalid combined direction"),
+        let idx = (self as i16) - (rhs as i16);
+        if (0..64).contains(&idx) {
+            SQUARES[idx as usize]
+        } else {
+            Square::NONE
         }
     }
 }
@@ -769,12 +672,6 @@ impl MoveList {
         }
     }
 
-    /// Removes all moves from the list (retains the allocated array).
-    #[inline]
-    pub fn clear(&mut self) {
-        self.len = 0;
-    }
-
     /// Sets the length directly (caller must ensure `len <= MAX_MOVES` and
     /// that elements beyond `len` are unused).
     #[inline]
@@ -794,22 +691,6 @@ impl MoveList {
     pub fn as_mut_slice(&mut self) -> &mut [Move] {
         let len = self.len;
         &mut self.moves[..len]
-    }
-
-    /// Retains only the moves satisfying the predicate, compacting in place.
-    pub fn retain<F>(&mut self, mut f: F)
-    where
-        F: FnMut(Move) -> bool,
-    {
-        let mut write_idx = 0;
-        for i in 0..self.len {
-            let m = self.moves[i];
-            if f(m) {
-                self.moves[write_idx] = m;
-                write_idx += 1;
-            }
-        }
-        self.len = write_idx;
     }
 }
 
