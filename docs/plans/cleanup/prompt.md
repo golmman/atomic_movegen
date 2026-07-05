@@ -15,4 +15,13 @@ Add a report to `docs/plans/cleanup/report-code-cleanup.md`.
 
 ---
 
+Please investigate:
+* why is the attacks module public?
+  * also: the functions in this module are not documented consistently
+* why is the bitboard module public?
+* why is the magic module public?
+* why is the pext module public?
+* why do we need the perft function? It is already an example
+* shouldn't we document the examples?
 
+Don't implement anything yet, we just want to know the things which could need a little housekeeping.
