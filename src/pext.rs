@@ -1,12 +1,13 @@
 //! PEXT-based sliding piece attacks (BMI2 instruction).
 //!
 //! When BMI2 is available, the `pext` instruction replaces the magic
-//! multiplication + shift with a single instruction, giving ~2× speedup
-//! for sliding piece attacks.
+//! multiplication + shift with a single instruction (same latency on
+//! Zen 3, ~1-2 cycles faster on Intel).
 //!
 //! Tables are built at init time using a software PEXT emulation, so
-//! they work regardless of CPU support. The hot-path lookup uses hardware
-//! PEXT when available via `#[target_feature(enable = "bmi2")]`.
+//! they work regardless of CPU support. The hot-path lookup uses inline
+//! asm for the `pext` instruction (no `#[target_feature]` barrier), so
+//! the entire attack lookup inlines into the caller.
 //!
 //! On non-x86_64 the entire module is dead code (the caller in `attacks`
 //! is gated behind `#[cfg(target_arch = "x86_64")]`).
@@ -56,6 +57,7 @@ fn pext_soft(val: u64, mask: u64) -> u64 {
 ///
 /// Stores the popcount and offset for each square, plus the total table
 /// size, allowing O(1) lookup of a square's PEXT-indexed attack range.
+#[cfg_attr(not(test), allow(dead_code))]
 struct PextLayout {
     popcounts: [u32; 64],
     offsets: [usize; 64],
@@ -140,71 +142,58 @@ pub(crate) fn init() {
     )));
 }
 
+/// Return the attack set for a bishop on `sq` given the `occupied` board,
+/// using the BMI2 `pext` instruction via inline asm.
+///
+/// Tables must be initialized via `attacks::init()`.
+/// Has BMI2 check via `has_bmi2()` before calling (enforced by `init()`).
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "bmi2")]
-unsafe fn bishop_attacks_pext_impl(sq: Square, occupied: Bitboard) -> Bitboard {
+#[inline(always)]
+pub(crate) fn bishop_attacks_pext(sq: Square, occupied: Bitboard) -> Bitboard {
+    let sq_idx = sq as usize;
+    let mask = BISHOP_MASKS[sq_idx];
+    let occ = (occupied & mask).0;
+    let idx: u64;
+    unsafe {
+        core::arch::asm!(
+            "pext {0}, {1}, {2}",
+            out(reg) idx,
+            in(reg) occ,
+            in(reg) mask.0,
+            options(pure, nomem, nostack),
+        );
+    }
     let table = BISHOP_PEXT_TABLE
         .get()
         .expect("PEXT tables not initialized — call attacks::init()");
-    let sq_idx = sq as usize;
-    let mask = BISHOP_MASKS[sq_idx];
-    let occ = occupied & mask;
-    let idx = core::arch::x86_64::_pext_u64(occ.0, mask.0) as usize;
-    table[BISHOP_LAYOUT.offsets[sq_idx] + idx]
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "bmi2")]
-unsafe fn rook_attacks_pext_impl(sq: Square, occupied: Bitboard) -> Bitboard {
-    let table = ROOK_PEXT_TABLE
-        .get()
-        .expect("PEXT tables not initialized — call attacks::init()");
-    let sq_idx = sq as usize;
-    let mask = ROOK_MASKS[sq_idx];
-    let occ = occupied & mask;
-    let idx = core::arch::x86_64::_pext_u64(occ.0, mask.0) as usize;
-    table[ROOK_LAYOUT.offsets[sq_idx] + idx]
-}
-
-// Non-x86_64 stubs that should never be called (has_bmi2() returns false).
-#[cfg(not(target_arch = "x86_64"))]
-unsafe fn bishop_attacks_pext_impl(_sq: Square, _occupied: Bitboard) -> Bitboard {
-    unreachable!("PEXT not available on non-x86_64")
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-unsafe fn rook_attacks_pext_impl(_sq: Square, _occupied: Bitboard) -> Bitboard {
-    unreachable!("PEXT not available on non-x86_64")
-}
-
-/// Return the attack set for a bishop on `sq` given the `occupied` board,
-/// using the BMI2 `pext` instruction.
-///
-/// # Panics
-///
-/// Panics if the PEXT tables have not been initialized (call `attacks::init()` first).
-/// On non-x86_64 platforms, this function panics unconditionally.
-/// The caller MUST ensure the CPU supports BMI2 before calling (checked during `init()`).
-#[inline(always)]
-pub(crate) fn bishop_attacks_pext(sq: Square, occupied: Bitboard) -> Bitboard {
-    // SAFETY: This function is only called after init() has verified BMI2 support
-    // via has_bmi2(), which guarantees BMI2 is available for the process lifetime.
-    unsafe { bishop_attacks_pext_impl(sq, occupied) }
+    table[BISHOP_LAYOUT.offsets[sq_idx] + idx as usize]
 }
 
 /// Return the attack set for a rook on `sq` given the `occupied` board,
-/// using the BMI2 `pext` instruction.
+/// using the BMI2 `pext` instruction via inline asm.
 ///
-/// # Panics
-///
-/// Panics if the PEXT tables have not been initialized (call `attacks::init()` first).
-/// On non-x86_64 platforms, this function panics unconditionally.
-/// The caller MUST ensure the CPU supports BMI2 before calling (checked during `init()`).
+/// Tables must be initialized via `attacks::init()`.
+/// Has BMI2 check via `has_bmi2()` before calling (enforced by `init()`).
+#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 pub(crate) fn rook_attacks_pext(sq: Square, occupied: Bitboard) -> Bitboard {
-    // SAFETY: This function is only called after init() has verified BMI2 support
-    // via has_bmi2(), which guarantees BMI2 is available for the process lifetime.
-    unsafe { rook_attacks_pext_impl(sq, occupied) }
+    let sq_idx = sq as usize;
+    let mask = ROOK_MASKS[sq_idx];
+    let occ = (occupied & mask).0;
+    let idx: u64;
+    unsafe {
+        core::arch::asm!(
+            "pext {0}, {1}, {2}",
+            out(reg) idx,
+            in(reg) occ,
+            in(reg) mask.0,
+            options(pure, nomem, nostack),
+        );
+    }
+    let table = ROOK_PEXT_TABLE
+        .get()
+        .expect("PEXT tables not initialized — call attacks::init()");
+    table[ROOK_LAYOUT.offsets[sq_idx] + idx as usize]
 }
 
 #[cfg(test)]

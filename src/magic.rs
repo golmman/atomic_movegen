@@ -509,6 +509,10 @@ pub fn rook_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
 }
 
 /// Return the attack set for a queen (bishop + rook).
+///
+/// On x86_64 the dispatch module in `attacks` provides its own `queen_attacks`,
+/// so this function is unused there.
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 #[inline(always)]
 pub fn queen_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
     bishop_attacks(sq, occupied) | rook_attacks(sq, occupied)

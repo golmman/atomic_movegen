@@ -25,3 +25,11 @@ Please investigate:
 * shouldn't we document the examples?
 
 Don't implement anything yet, we just want to know the things which could need a little housekeeping.
+
+---
+
+Please investigate:
+* we are currently on a 5950X but the lib is more than 50% slower than on an apple m4
+  * should be better than 56 seconds via `cargo run --release --example verify_perft`
+  * maybe pext is not properly integrated?
+* some additional warnings appear on the 5950X
