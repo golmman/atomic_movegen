@@ -1,3 +1,7 @@
+//! Debug tool to inspect pawn positions and all h3g2 moves for a position.
+//!
+//! Usage: `pawn_debug <FEN>`
+
 use atomic_movegen::board::Board;
 use atomic_movegen::movegen;
 use atomic_movegen::types::sq_str;

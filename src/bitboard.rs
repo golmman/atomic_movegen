@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::attacks::{BETWEEN_BB, LINE_BB};
 use crate::types::*;
 

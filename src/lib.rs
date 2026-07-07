@@ -18,7 +18,7 @@
 //! # Example
 //!
 //! ```rust
-//! use atomic_movegen::board::Board;
+//! use atomic_movegen::Board;
 //! use atomic_movegen::perft;
 //!
 //! let mut board = Board::new();
@@ -27,14 +27,15 @@
 //! ```
 
 pub mod attacks;
-pub mod bitboard;
+pub(crate) mod bitboard;
 pub mod board;
-pub mod magic;
+pub(crate) mod magic;
 pub mod movegen;
-pub mod pext;
+pub(crate) mod pext;
 pub mod types;
 
-use crate::types::MoveList;
+pub use board::Board;
+pub use types::{Bitboard, Color, Move, MoveList, PieceType, Square};
 
 /// Count the number of legal moves at each node to the given depth (perft).
 ///

@@ -19,6 +19,7 @@ mod sliding_dispatch {
         IMPL.store(2, Ordering::Relaxed);
     }
 
+    /// Return the attack set for a bishop on `sq` given the `occupied` board.
     #[inline(always)]
     pub fn bishop_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
         // After init(), IMPL is stable and threadsafe to read.
@@ -29,6 +30,7 @@ mod sliding_dispatch {
         }
     }
 
+    /// Return the attack set for a rook on `sq` given the `occupied` board.
     #[inline(always)]
     pub fn rook_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
         if IMPL.load(Ordering::Relaxed) == 2 {
@@ -38,6 +40,7 @@ mod sliding_dispatch {
         }
     }
 
+    /// Return the attack set for a queen (bishop + rook).
     #[inline(always)]
     pub fn queen_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
         bishop_attacks(sq, occupied) | rook_attacks(sq, occupied)
@@ -216,6 +219,7 @@ const fn compute_between_bb() -> [[Bitboard; 64]; 64] {
 }
 
 /// Compute line-squares table for all 64×64 square pairs at compile time.
+#[allow(dead_code)]
 const fn compute_line_bb() -> [[Bitboard; 64]; 64] {
     let mut table = [[Bitboard(0); 64]; 64];
     let mut s1: u8 = 0;
@@ -260,6 +264,7 @@ pub(crate) static BETWEEN_BB: [[Bitboard; 64]; 64] = compute_between_bb();
 /// of all squares on the same rank, file, or diagonal as `s1` and `s2`
 /// (including `s1` and `s2` themselves), or `Bitboard::EMPTY` when the
 /// two squares are not aligned.
+#[allow(dead_code)]
 pub(crate) static LINE_BB: [[Bitboard; 64]; 64] = compute_line_bb();
 
 /// Return the attack bitboard for a king on the given square.

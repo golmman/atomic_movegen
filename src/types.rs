@@ -773,7 +773,6 @@ impl MoveList {
 /// This is a convenience helper exposed for the crate's own example binaries;
 /// downstream consumers should prefer formatting squares via their own display
 /// logic. Not covered by semantic versioning guarantees.
-#[doc(hidden)]
 pub fn sq_str(sq: Square) -> String {
     let files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
     let idx = sq as usize;
@@ -785,7 +784,6 @@ pub fn sq_str(sq: Square) -> String {
 /// This is a convenience helper exposed for the crate's own example binaries;
 /// downstream consumers should prefer more robust parsers. Not covered by
 /// semantic versioning guarantees.
-#[doc(hidden)]
 pub fn parse_sq(s: &str) -> Square {
     if s.len() < 2 {
         return Square::A1;

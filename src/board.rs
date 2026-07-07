@@ -158,9 +158,7 @@ impl Board {
     pub fn from_fen(fen: &str) -> Result<Self, FenError> {
         let parts: Vec<&str> = fen.split_whitespace().collect();
         if parts.len() < 4 {
-            return Err(FenError::TooShort {
-                parts: parts.len(),
-            });
+            return Err(FenError::TooShort { parts: parts.len() });
         }
 
         let mut squares = [NO_PIECE; 64];
@@ -229,13 +227,17 @@ impl Board {
         };
 
         let rule50 = if parts.len() > 4 {
-            parts[4].parse::<u8>().map_err(|e| FenError::ParseInt(e.to_string()))?
+            parts[4]
+                .parse::<u8>()
+                .map_err(|e| FenError::ParseInt(e.to_string()))?
         } else {
             0
         };
 
         let game_ply = if parts.len() > 5 {
-            parts[5].parse::<u16>().map_err(|e| FenError::ParseInt(e.to_string()))?
+            parts[5]
+                .parse::<u16>()
+                .map_err(|e| FenError::ParseInt(e.to_string()))?
         } else {
             1
         };

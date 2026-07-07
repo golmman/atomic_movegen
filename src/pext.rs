@@ -245,9 +245,9 @@ mod tests {
         let table = BISHOP_PEXT_TABLE
             .get()
             .expect("PEXT tables not initialized");
-        for sq_idx in 0..64 {
+        for (sq_idx, entry) in BISHOP_MASKS.iter().enumerate() {
             let sq = Square::from_u8(sq_idx as u8);
-            let mask = BISHOP_MASKS[sq_idx].0;
+            let mask = entry.0;
             let size = 1usize << BISHOP_LAYOUT.popcounts[sq_idx];
             let mut count = 0;
             let mut subset = 0u64;
@@ -276,9 +276,9 @@ mod tests {
     fn test_pext_vs_loop_rook() {
         super::init();
         let table = ROOK_PEXT_TABLE.get().expect("PEXT tables not initialized");
-        for sq_idx in 0..64 {
+        for (sq_idx, entry) in ROOK_MASKS.iter().enumerate() {
             let sq = Square::from_u8(sq_idx as u8);
-            let mask = ROOK_MASKS[sq_idx].0;
+            let mask = entry.0;
             let size = 1usize << ROOK_LAYOUT.popcounts[sq_idx];
             let mut count = 0;
             let mut subset = 0u64;

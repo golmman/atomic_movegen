@@ -1,3 +1,7 @@
+//! Show the FEN string and legal moves after playing a move from a position.
+//!
+//! Usage: `fen_after <FEN> <MOVE>` where MOVE is a 4-character string (e.g. e2e4).
+
 use atomic_movegen::board::Board;
 use atomic_movegen::movegen;
 use atomic_movegen::types::parse_sq;

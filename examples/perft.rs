@@ -1,3 +1,7 @@
+//! Run a perft (performance test) from a given FEN position.
+//!
+//! Usage: `perft <FEN> <DEPTH>`
+
 use std::env;
 
 fn main() {
