@@ -20,9 +20,9 @@ perf record -F 999 -g --call-graph dwarf target/profiling/examples/perft 'r1b1Br
 
 ---
 
-Create a plan for the implementation of item 1 of `docs/plans/perf_analysis4/analysis.md`.
+Create a plan for the implementation of item 1 of `docs/plans/perf_analysis5/analysis.md`.
 Tests against the baseline should be done via `cargo run --release --example verify_perft`.
-Store the plan in `docs/plans/perf_analysis4/plan1.md`
+Store the plan in `docs/plans/perf_analysis5/plan1.md`
 
 ---
 
