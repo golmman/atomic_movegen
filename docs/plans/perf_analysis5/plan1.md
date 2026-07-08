@@ -2,26 +2,42 @@
 
 **Corresponds to:** Item 1 of `analysis.md` — *"Add EVASIONS/NON_EVASIONS move generation split"*
 **Estimated speedup:** 8–20 %
-**Effort:** ~120 lines changed across `src/movegen.rs`, `src/board.rs` (moderate)
+**Effort:** ~130 lines changed across `src/movegen.rs`, `src/board.rs` (moderate)
 **Fairy-Stockfish reference:** `movegen.cpp:376–474` (`generate_all<EVASIONS>`) and `movegen.cpp:509–526` (`generate<LEGAL>`)
 
 ---
 
 ## 1. Problem
 
-`generate_legal()` (`src/movegen.rs:233–257`) currently calls `generate_pseudo_legal()` unconditionally, which generates **all** pseudo-legal moves (30–80+ in typical positions) regardless of whether the side to move is in check. When in check:
+`generate_legal()` (`src/movegen.rs:233–257`) currently calls `generate_pseudo_legal()` unconditionally, generating **all** pseudo-legal moves (30–80+ in typical positions) regardless of whether the side is in check. When in check:
 
 1. `is_move_trivially_legal()` immediately returns `false` (because `state.checkers` is non-empty at `board.rs:901`).
-2. Every pseudo-legal move falls through to the full `legal()` check — blast simulation, commoner adjacency, `attackers_to` — even for non-commoner moves that can't possibly stop the check.
+2. Every pseudo-legal move falls through to the full `legal()` check — blast simulation, commoner adjacency, `attackers_to` — even for non-commoner moves that can't possibly resolve the check.
 3. In double-check positions (≥2 checkers), **no** non-commoner move can ever be legal, yet all are still generated and filtered.
 
-perf shows this waste is significant: tactical positions with checks (Tests #2, #13, #33 — the 3 slowest) spend the majority of time filtering irrelevant non-commoner moves.
+`perf` shows this waste is significant: tactical positions with checks (Tests #2, #13, #33 — the 3 slowest) spend the majority of time filtering irrelevant non-commoner moves.
 
 ---
 
-## 2. Design
+## 2. Atomic Chess Check Semantics
 
-### 2.1 New entry-point: `generate_legal()`
+Before designing the evasions path, it's important to understand all the ways a position can be "in check" in atomic chess. `compute_checkers()` (`board.rs:429–470`) identifies two kinds of checks:
+
+### 2.1 Standard checks (sliding + leaper)
+
+Rook, Bishop, Queen, Knight, and Pawn attacks on our commoner squares. These use the standard `attacks::*_attacks(ksq, occupied)` and `attacks::pawn_attacks(us, ksq)` lookups. Computed in the slider/leaper loop at `board.rs:442–455`.
+
+### 2.2 Commoner adjacency checks
+
+Enemy commoners adjacent to any of our commoners also appear in `checkers` (`board.rs:458–468`). This is the extinction pseudo-royal rule: adjacent commoners threaten each other. These are **leaper checks** (king-step distance) and **cannot be blocked** — only captured or evaded.
+
+**Key insight:** A commoner adjacency check means the checker is an enemy commoner that is king-adjacent to one of our commoners. The only non-commoner way to resolve it is capturing the adjacent enemy commoner.
+
+---
+
+## 3. Design
+
+### 3.1 New entry-point: `generate_legal()`
 
 Refactor `generate_legal()` to branch on check state **before** generating any moves:
 
@@ -31,134 +47,329 @@ generate_legal(board, moves):
     board.populate_state(&state)
 
     if state.checkers.is_empty():
-        generate_non_evasions(board, moves)         // same as current generate_pseudo_legal
+        generate_pseudo_legal(board, moves)       // unchanged — public API preserved
     else:
-        generate_evasions(board, &state, moves)     // restricted target
+        generate_evasions(board, &state, moves)   // restricted target
 
-    // Compaction — still needed because evasions-generated moves can be
+    // Compaction — still needed because evasion-generated moves can be
     // illegal for non-check reasons (self-explosion, adjacency, pin).
-    for each move m:
-        if board.legal(m, &state):
-            keep(m)
+    compact(moves, board, &state)
 ```
 
-**Key differences from current:**
-- The non-evasions path keeps `is_move_trivially_legal()` as a fast-path filter (same as today).
-- The evasions path skips `is_move_trivially_legal()` (it always returns `false` when `checkers != EMPTY`) and calls `legal()` directly.
+**Key decisions:**
+- **`generate_pseudo_legal` keeps its name and public visibility.** It's the existing public API. Only `generate_legal()` is refactored internally.
+- The compaction pass is unchanged: `is_move_trivially_legal()` + `legal()` for non-evasions, `legal()` only for evasions (since `is_move_trivially_legal` always returns false when checkers is non-empty — no point calling it).
 
-### 2.2 Non-evasions path: `generate_non_evasions()`
+### 3.2 Evasions path: `generate_evasions()`
 
-Identical to the current `generate_pseudo_legal()` function body (`movegen.rs:20–89`). All piece types generated normally, castling included. The compaction pass applies `is_move_trivially_legal()` + `legal()` as before.
+New `pub(crate)` function that generates a restricted set of pseudo-legal moves based on the check configuration.
 
-### 2.3 Evasions path: `generate_evasions()`
+#### 3.2.1 Double-check shortcut
 
-New function that generates a restricted set of pseudo-legal moves based on the check configuration.
-
-#### 2.3.1 Double-check shortcut
-
-When `state.checkers.count() > 1`:
-- Only generate **commoner moves** (unrestricted). Non-commoner moves cannot possibly resolve a double check.
-- Skip all pawn/leaper/slider/castling generation entirely.
-- The `legal()` filter still applies (self-explosion, adjacency, pin).
+When `state.checkers.more_than_one()`:
+- Only generate **commoner moves** (to non-own squares). No non-commoner move can resolve a double check.
+- Skip all pawn/knight/bishop/rook/queen/castling generation entirely.
+- The `legal()` filter still applies (self-explosion, adjacency, commoner safety).
 
 This mirrors FS `movegen.cpp:385`: `if (Type != EVASIONS || !more_than_one(pos.checkers()))`.
 
-#### 2.3.2 Single-check logic
+**Note on commoner adjacency double-checks:** If `checkers` contains two entries and both are enemy commoner adjacency checks, the above shortcut is still correct — only our commoner moves can resolve it (move our commoner away, or capture one of the adjacent enemy commoners).
 
-When exactly one checker:
+#### 3.2.2 Single-check logic
 
-1. **Identify the checker** — `checker_sq = state.checkers.lsb()`, `checker_type = board.piece_on(checker_sq).type_of()`.
-2. **Determine whether the checker is a slider** (Rook, Bishop, Queen) or a leaper (Knight, Pawn).
+When exactly one checker (`!state.checkers.more_than_one()` and `!state.checkers.is_empty()`):
+
+1. **Identify the checker:**
+   ```rust
+   let checker_sq = state.checkers.lsb();
+   let checker_piece = board.piece_on(checker_sq);
+   let checker_type = checker_piece.type_of();
+   ```
+
+2. **Classify the check type:**
+   - **Slider check** (Rook, Bishop, Queen): Can be blocked or captured.
+   - **Leaper check** (Knight, Pawn, Commoner-adjacency): Can only be captured (no blocking squares).
+
 3. **Compute the restricted `target`** for non-commoner moves:
-   - **Slider check:** `target = between_bb(attacked_commoner_sq, checker_sq) | state.checkers`
-     - The `between_bb` covers blocking squares; `state.checkers` covers captures of the checker.
-     - If multiple commoners are attacked by the same slider (same ray), take the union of `between_bb` for all attacked commoners. In practice this is rare; the first attacked commoner suffices for correctness (extra squares just generate more moves that `legal()` will filter).
-   - **Leaper check (Knight/Pawn):** `target = state.checkers` — can't block a leaper, must capture the checker.
-4. **Generate non-commoner moves restricted to `target`:**
-   - Pawn: only pushes/captures landing on `target` squares (including promotions).
-   - Knight, Bishop, Rook, Queen: only attacks intersecting `target`.
-   - Skip castling entirely (never legal when in check).
-5. **Generate commoner moves** unrestricted (all king-attack squares, excluding own pieces). The legality filter will catch any that don't resolve the check.
 
-#### 2.3.3 FS equivalence
+   ```rust
+   let mut target = state.checkers;  // captures of checker always in target
+
+   let is_slider = matches!(checker_type,
+       PieceType::Rook | PieceType::Bishop | PieceType::Queen);
+
+   if is_slider {
+       // Find which commoner(s) this slider is attacking, add blocking squares
+       let mut commoners = board.commoners(us);
+       while !commoners.is_empty() {
+           let ksq = commoners.pop_lsb();
+           // Check if the checker actually attacks this commoner
+           let between = between_bb(ksq, checker_sq);
+           // The checker attacks ksq if they're on the same line and
+           // there are no pieces between them (except possibly the commoner itself)
+           if line_bb(ksq, checker_sq) != Bitboard::EMPTY {
+               // Verify no blockers between checker and commoner
+               let blockers = between & board.occupied();
+               if blockers.is_empty() {
+                   target = target | between;
+               }
+           }
+       }
+   }
+   ```
+
+   **Simplification:** We can use a simpler approach — compute the checker's attack set from the checker square and test if it includes our commoner:
+
+   ```rust
+   if is_slider {
+       let mut commoners = board.commoners(us);
+       let occupied = board.occupied();
+       while !commoners.is_empty() {
+           let ksq = commoners.pop_lsb();
+           // Use the appropriate slider attack from the checker's square
+           let checker_attacks = match checker_type {
+               PieceType::Rook => attacks::rook_attacks(checker_sq, occupied),
+               PieceType::Bishop => attacks::bishop_attacks(checker_sq, occupied),
+               PieceType::Queen => attacks::queen_attacks(checker_sq, occupied),
+               _ => unreachable!(),
+           };
+           if (checker_attacks & Bitboard::square_bb(ksq)) != Bitboard::EMPTY {
+               target = target | between_bb(ksq, checker_sq);
+           }
+       }
+   }
+   ```
+
+   **Even simpler (recommended):** Since `compute_checkers` already verified the checker attacks a commoner, and we only have one checker, we know at least one commoner is attacked. For the typical single-commoner case (one King), there's exactly one between_bb to add. For multi-commoner, we iterate and add all relevant between_bb sets. Over-generating (adding all commoners' between_bb even if not attacked) is safe — `legal()` filters false positives.
+
+   **Recommended final approach:**
+   ```rust
+   if is_slider {
+       let mut commoners = board.commoners(us);
+       while !commoners.is_empty() {
+           let ksq = commoners.pop_lsb();
+           target = target | between_bb(ksq, checker_sq);
+       }
+   }
+   ```
+   This over-generates slightly for multi-commoner positions where only one commoner is attacked, but `legal()` handles it. The simplicity and branch-free nature is more important for performance.
+
+4. **Generate non-commoner moves restricted to `target`.**
+5. **Generate commoner moves unrestricted** (all king-attack squares intersected with `!own_pieces`). The `legal()` filter catches any that don't resolve the check.
+6. **Skip castling** (never legal when in check).
+
+#### 3.2.3 En-passant edge case
+
+En-passant can resolve a check in two ways:
+1. **The checking pawn can be captured en-passant.** The EP destination square differs from the checker square (e.g., checker is on d4, EP destination is d3). The EP target square is in `target` only if `target` includes `checkers` (which it always does). But the *EP destination* square is not the checker square — it's one rank behind. So we need special handling.
+2. **The EP capture blast zone destroys the checker.** This is handled by `legal()`, not by movegen.
+
+**Solution:** When generating pawn evasion moves, always include en-passant captures of the checking piece. Check if the checker is a pawn and `board.ep_square()` is set:
+
+```rust
+// In generate_evasion_pawn_moves:
+if let Some(ep_sq) = board.ep_square() {
+    // The captured pawn in EP is one rank behind the EP square
+    let ep_captured_sq = match us {
+        Color::White => Square::from_index(ep_sq as i8 - 8),
+        Color::Black => Square::from_index(ep_sq as i8 + 8),
+    };
+    // If the captured pawn is the checker, include this EP
+    if Bitboard::square_bb(ep_captured_sq) & state.checkers != Bitboard::EMPTY {
+        // Generate EP moves for adjacent pawns
+        // (same logic as current generate_pawn_moves_for EP section)
+    }
+}
+```
+
+Alternatively, simply **always generate EP moves** in the evasions path (there are at most 2 EP capture moves per position). The `legal()` filter handles illegality. This is simpler and the performance cost is negligible.
+
+**Recommended:** Always generate EP moves in evasions — simplest, safest.
+
+#### 3.2.4 FS equivalence table
 
 | FS concept | atomic_movegen equivalent |
 |---|---|
 | `pos.checkers()` | `state.checkers` |
-| `ksq` (king square) | Each commoner in `commoners(us)` |
-| `between_bb(ksq, lsb(pos.checkers()))` | `between_bb(commoner_sq, checker_sq)` |
+| `ksq` (king square) | Each commoner in `board.commoners(us)` |
+| `between_bb(ksq, lsb(pos.checkers()))` | `between_bb(commoner_sq, checker_sq)` for each commoner |
 | `more_than_one(pos.checkers())` | `state.checkers.more_than_one()` |
-| Leaper vs slider check | `checker_type` dispatch |
-| King moves unrestricted | Commoner moves unrestricted |
-
-### 2.4 Evasions-specific helpers
-
-**`generate_evasion_pawn_moves()`** — Like `generate_pawn_moves_for` but accepts a `target: Bitboard` parameter. For each pawn, only generate pushes/captures whose destination is in `target`. Promotions are included if the dest is a promotion rank and in `target`. En-passant is included if the dest is in `target`.
-
-**`generate_evasion_piece_moves()`** — Generic helper taking `PieceType`, generates moves for all pieces of that type, filtering attacks by `target`. Replaces the per-type loops in `generate_pseudo_legal` when in the evasion path.
-
-**`generate_evasion_commoner_moves()`** — Generates commoner moves to all non-own squares (same as the commoner loop in `generate_pseudo_legal` but without the target restriction). Called in both single and double check.
+| `non_sliding_riders()` | Commoner adjacency checkers (leaper type) |
+| `LeaperAttacks[type][sq] & ksq` | Knight/Pawn check → target = checkers only |
+| King moves unrestricted target | Commoner moves with target `!own_pieces` |
 
 ---
 
-## 3. Implementation Steps
+## 4. Implementation Steps
 
-### Step 1: Rename existing `generate_pseudo_legal` to `generate_non_evasions`
+### Step 1: Add helper `attacks_for_pt()` (~15 lines) in `movegen.rs`
 
-- `movegen.rs:20` — rename function, keep body unchanged.
-- Update the doc comment: "Generate all pseudo-legal non-evasive moves..."
-
-### Step 2: Add `generate_evasions()` function (~80 lines)
-
-Pseudo-code:
+A dispatch function returning the attack set for a given piece type on a square:
 
 ```rust
+#[inline(always)]
+fn attacks_for_pt(pt: PieceType, sq: Square, occupied: Bitboard) -> Bitboard {
+    match pt {
+        PieceType::Knight => attacks::knight_attacks(sq),
+        PieceType::Bishop => attacks::bishop_attacks(sq, occupied),
+        PieceType::Rook => attacks::rook_attacks(sq, occupied),
+        PieceType::Queen => attacks::queen_attacks(sq, occupied),
+        PieceType::Commoner => attacks::king_attacks(sq),
+        _ => Bitboard::EMPTY,
+    }
+}
+```
+
+### Step 2: Add `generate_evasions()` (~60 lines) in `movegen.rs`
+
+```rust
+/// Generate pseudo-legal evasion moves when the side to move is in check.
+///
+/// Restricts non-commoner moves to the check evasion target (blocking and
+/// capturing the checker). Commoner moves are unrestricted.
 fn generate_evasions(board: &Board, state: &StateInfo, moves: &mut MoveList) {
     let us = board.side_to_move();
     let them = us.flip();
     let occupied = board.occupied();
+    let our_pieces = board.pieces_color(us);
 
-    // Double check — only commoner moves
+    // --- Commoner moves (always generated, unrestricted) ---
+    let commoner_target = !our_pieces;
+    let mut commoners = board.pieces_color_pt(us, PieceType::Commoner);
+    while !commoners.is_empty() {
+        let from = commoners.pop_lsb();
+        let mut a = attacks::king_attacks(from) & commoner_target;
+        while !a.is_empty() {
+            let to = a.pop_lsb();
+            moves.push(Move::make_move(from, to));
+        }
+    }
+
+    // --- Double check: only commoner moves ---
     if state.checkers.more_than_one() {
-        generate_commoner_moves(board, us, them, moves);
         return;
     }
 
-    // Single check
+    // --- Single check: non-commoner moves restricted to target ---
     let checker_sq = state.checkers.lsb();
     let checker_type = board.piece_on(checker_sq).type_of();
     let is_slider = matches!(checker_type,
         PieceType::Rook | PieceType::Bishop | PieceType::Queen);
 
-    // Build target for non-commoner moves
-    let mut target = state.checkers;  // captures always allowed
+    let mut target = state.checkers; // always allow capturing the checker
     if is_slider {
-        // Find attacked commoner(s) and add between_bb
-        let mut commoners = board.commoners(us);
-        while !commoners.is_empty() {
-            let ksq = commoners.pop_lsb();
-            let slider_atk = attacks::rook_attacks(checker_sq, occupied)
-                           | attacks::bishop_attacks(checker_sq, occupied);
-            if slider_atk & Bitboard::square_bb(ksq) != Bitboard::EMPTY {
-                target = target | between_bb(ksq, checker_sq);
+        // Add blocking squares between each commoner and the checker
+        let mut c = board.commoners(us);
+        while !c.is_empty() {
+            let ksq = c.pop_lsb();
+            target = target | between_bb(ksq, checker_sq);
+        }
+    }
+
+    // Pawns
+    let mut p = board.pieces_color_pt(us, PieceType::Pawn);
+    while !p.is_empty() {
+        let from = p.pop_lsb();
+        generate_pawn_evasion_moves(board, us, them, from, target, moves);
+    }
+
+    // Knights, Bishops, Rooks, Queens
+    for &pt in &[PieceType::Knight, PieceType::Bishop, PieceType::Rook, PieceType::Queen] {
+        let mut pieces = board.pieces_color_pt(us, pt);
+        while !pieces.is_empty() {
+            let from = pieces.pop_lsb();
+            let mut a = attacks_for_pt(pt, from, occupied) & target;
+            while !a.is_empty() {
+                let to = a.pop_lsb();
+                moves.push(Move::make_move(from, to));
             }
         }
     }
-    // else: leaper — target = checkers (already set above)
 
-    // Non-commoner evasions restricted to target
-    generate_pawn_moves_to_target(board, us, them, target, moves);
-    generate_piece_moves_to_target(board, us, them, PieceType::Knight, target, moves);
-    generate_piece_moves_to_target(board, us, them, PieceType::Bishop, target, moves);
-    generate_piece_moves_to_target(board, us, them, PieceType::Rook, target, moves);
-    generate_piece_moves_to_target(board, us, them, PieceType::Queen, target, moves);
-
-    // Commoner moves unrestricted
-    generate_commoner_moves(board, us, them, moves);
+    // No castling when in check
 }
 ```
 
-### Step 3: Refactor `generate_legal()` (~25 lines)
+### Step 3: Add `generate_pawn_evasion_moves()` (~55 lines) in `movegen.rs`
+
+A variant of `generate_pawn_moves_for` that restricts push/capture destinations to `target`, but always includes en-passant (at most 1 EP move per pawn, `legal()` filters):
+
+```rust
+fn generate_pawn_evasion_moves(
+    board: &Board, us: Color, them: Color,
+    from: Square, target: Bitboard, moves: &mut MoveList,
+) {
+    let from_rank = rank_of(from);
+    let from_f = file_of(from) as i8;
+    let (push_dir, push_double, start_rank, promo_rank) = match us {
+        Color::White => (8i8, 16i8, Rank::R2, Rank::R8),
+        Color::Black => (-8i8, -16i8, Rank::R7, Rank::R1),
+    };
+    let from_idx = from as i8;
+
+    // Single push — only if destination is in target
+    let to_idx = from_idx + push_dir;
+    let to_sq = Square::from_index(to_idx);
+    if to_sq != Square::NONE && board.empty(to_sq) {
+        if (Bitboard::square_bb(to_sq) & target) != Bitboard::EMPTY {
+            if rank_of(to_sq) == promo_rank {
+                for &pt in &PROMOTION_PIECES {
+                    moves.push(Move::make_promotion(from, to_sq, pt));
+                }
+            } else {
+                moves.push(Move::make_move(from, to_sq));
+            }
+        }
+
+        // Double push — only if destination is in target
+        if from_rank == start_rank {
+            let to_idx2 = from_idx + push_double;
+            let to_sq2 = Square::from_index(to_idx2);
+            if to_sq2 != Square::NONE && board.empty(to_sq2)
+                && (Bitboard::square_bb(to_sq2) & target) != Bitboard::EMPTY
+            {
+                moves.push(Move::make_move(from, to_sq2));
+            }
+        }
+    }
+
+    // Captures — only if destination is in target
+    for df in &[-1i8, 1i8] {
+        let target_f = from_f + df;
+        if !(0..=7).contains(&target_f) { continue; }
+        let to_idx = from_idx + push_dir + df;
+        let to_sq = Square::from_index(to_idx);
+        if to_sq == Square::NONE { continue; }
+        if file_of(to_sq) as i8 != target_f { continue; }
+        if (board.pieces_color(them) & Bitboard::square_bb(to_sq)) != Bitboard::EMPTY
+            && (Bitboard::square_bb(to_sq) & target) != Bitboard::EMPTY
+        {
+            if rank_of(to_sq) == promo_rank {
+                for &pt in &PROMOTION_PIECES {
+                    moves.push(Move::make_promotion(from, to_sq, pt));
+                }
+            } else {
+                moves.push(Move::make_move(from, to_sq));
+            }
+        }
+    }
+
+    // En passant — always generate (at most 1 per pawn, legal() filters)
+    if let Some(ep_sq) = board.ep_square() {
+        let ep_f = file_of(ep_sq) as i8;
+        if ep_f == from_f - 1 || ep_f == from_f + 1 {
+            let df = ep_f - from_f;
+            let to_idx = from_idx + push_dir + df;
+            let to_sq = Square::from_index(to_idx);
+            if to_sq == ep_sq {
+                moves.push(Move::make_enpassant(from, ep_sq));
+            }
+        }
+    }
+}
+```
+
+### Step 4: Refactor `generate_legal()` (~30 lines) in `movegen.rs`
 
 ```rust
 pub fn generate_legal(board: &Board, moves: &mut MoveList) {
@@ -166,32 +377,33 @@ pub fn generate_legal(board: &Board, moves: &mut MoveList) {
     board.populate_state(&mut state);
 
     if state.checkers.is_empty() {
-        generate_non_evasions(board, moves);
+        generate_pseudo_legal(board, moves);
     } else {
         generate_evasions(board, &state, moves);
     }
 
-    // Compaction pass
+    // In-place compaction: filter out illegal moves.
     let orig_len = moves.len();
-    if orig_len == 0 { return; }
+    if orig_len == 0 {
+        return;
+    }
 
+    let in_check = !state.checkers.is_empty();
     let new_len = {
         let ms = moves.as_mut_slice();
         let mut write_idx = 0;
         for read_idx in 0..orig_len {
             let m = ms[read_idx];
-            if state.checkers.is_empty() {
-                // Non-evasions: use fast-path + legal
-                if is_move_trivially_legal(board, m, &state) || board.legal(m, &state) {
-                    ms[write_idx] = m;
-                    write_idx += 1;
-                }
+            // In check: skip trivially-legal (always false), go straight to legal().
+            // Not in check: try trivially-legal fast-path first.
+            let keep = if in_check {
+                board.legal(m, &state)
             } else {
-                // Evasions: skip trivially-legal (always false), go straight to legal
-                if board.legal(m, &state) {
-                    ms[write_idx] = m;
-                    write_idx += 1;
-                }
+                is_move_trivially_legal(board, m, &state) || board.legal(m, &state)
+            };
+            if keep {
+                ms[write_idx] = m;
+                write_idx += 1;
             }
         }
         write_idx
@@ -200,109 +412,62 @@ pub fn generate_legal(board: &Board, moves: &mut MoveList) {
 }
 ```
 
-### Step 4: Extract `generate_commoner_moves()` from `generate_non_evasions` (~12 lines)
+### Step 5: Import `between_bb` in `movegen.rs`
 
-Pull the commoner loop body into a shared helper called by both `generate_non_evasions` and `generate_evasions`:
-
-```rust
-fn generate_commoner_moves(board: &Board, us: Color, them: Color, moves: &mut MoveList) {
-    let target = !board.pieces_color(us);
-    let mut commoners = board.pieces_color_pt(us, PieceType::Commoner);
-    while !commoners.is_empty() {
-        let from = commoners.pop_lsb();
-        let attacks = attacks::king_attacks(from) & target;
-        let mut a = attacks;
-        while !a.is_empty() {
-            let to = a.pop_lsb();
-            moves.push(Move::make_move(from, to));
-        }
-    }
-}
-```
-
-### Step 5: Add `generate_pawn_moves_to_target()` (~50 lines)
-
-A modified version of `generate_pawn_moves_for` that takes a `target: Bitboard` and only generates moves landing on `target`. For the evasions path, the existing per-pawn loop is fine — we just restrict destination filtering. The simplest approach is to add a `target` parameter to `generate_pawn_moves_for` (defaulting to `!occupied | board.pieces_color(them)` for the non-evasions path), or create a separate helper.
-
-Given the existing per-pawn iteration in `generate_pawn_moves_for`, the simplest change is to add a `target` parameter:
-
-```rust
-fn generate_pawn_moves_for(board: &Board, us: Color, them: Color,
-    from: Square, moves: &mut MoveList, target: Bitboard)
-```
-
-In the single-push path: `if to_sq != Square::NONE && board.empty(to_sq) && (Bitboard::square_bb(to_sq) & target) != EMPTY`.
-Same for captures, ep, promotions.
-
-### Step 6: Add `generate_piece_moves_to_target()` (~15 lines)
-
-A generic helper that iterates pieces of a given type, computes attacks, and filters by target:
-
-```rust
-fn generate_piece_moves_to_target(board: &Board, us: Color, them: Color,
-    pt: PieceType, target: Bitboard, moves: &mut MoveList)
-{
-    let occupied = board.occupied();
-    let mut pieces = board.pieces_color_pt(us, pt);
-    while !pieces.is_empty() {
-        let from = pieces.pop_lsb();
-        let attacks = attacks_for(pt, from, occupied) & target;
-        let mut a = attacks;
-        while !a.is_empty() {
-            let to = a.pop_lsb();
-            moves.push(Move::make_move(from, to));
-        }
-    }
-}
-```
-
-Where `attacks_for()` dispatches to `knight_attacks`, `bishop_attacks`, `rook_attacks`, `queen_attacks` based on `pt`.
-
-### Step 7: Update `generate_non_evasions` to call helpers
-
-Replace the inlined loops with calls to `generate_commoner_moves`, `generate_piece_moves_to_target`, and `generate_pawn_moves_for(..., full_target)`.
+Add `use crate::bitboard::between_bb;` to the imports at the top of `movegen.rs`.
 
 ---
 
-## 4. Correctness Verification
+## 5. Files Changed
 
-### 4.1 Unit tests in `movegen.rs`
+| File | Change | Lines |
+|------|--------|-------|
+| `src/movegen.rs` | Add `generate_evasions()`, `generate_pawn_evasion_moves()`, `attacks_for_pt()`. Refactor `generate_legal()`. Add import. | ~130 new/modified |
+| `src/board.rs` | No changes needed. | 0 |
+
+---
+
+## 6. Correctness Verification
+
+### 6.1 Unit tests in `movegen.rs`
 
 Add `#[cfg(test)]` tests for the evasions path:
 
-- **Test A**: Position with single commoner in check by a rook. Only generate 1 blocking move + N captures + commoner moves. Verify via known perft values.
-- **Test B**: Position with double check. Verify no non-commoner moves generated.
-- **Test C**: Position with leaper check (knight fork). Verify no blocking moves generated.
-- **Test D**: Position with multiple commoners where only one is in check. Verify non-attacked commoner moves are still generated.
+- **Test A: Single slider check.** Position with one commoner in check by a rook on an open file. Verify that the evasion-generated move list is a subset of the full pseudo-legal list filtered by `legal()`.
+- **Test B: Double check.** Position with a rook and a knight giving check. Verify only commoner moves are generated.
+- **Test C: Leaper check (knight).** Verify no blocking moves generated, only capture of the knight or commoner moves.
+- **Test D: Commoner adjacency check.** Position with adjacent enemy commoner. Verify the evasion path handles this correctly.
+- **Test E: En-passant captures checker.** A checking pawn that can be captured en-passant. Verify the EP move is generated.
+- **Test F: Multi-commoner, only one attacked.** Verify non-attacked commoner can still move.
 
-### 4.2 Full regression: `cargo run --release --example verify_perft`
-
-Run the full 41-position perft suite at depths 1–6. All positions must match the expected values in `perft_values.md`. This is the definitive correctness check.
-
-### 4.3 Test commands
+### 6.2 Full regression
 
 ```sh
-cargo test             # unit tests
-cargo clippy           # no warnings
-cargo fmt              # formatting
-cargo run --release --example verify_perft   # 41 positions, depths 1–6
+cargo test                                          # unit tests
+cargo clippy                                        # no warnings
+cargo fmt                                           # formatting
+cargo run --release --example verify_perft           # 41 positions, depths 1–6
 ```
+
+All 41 perft positions must match the expected values in `perft_values.md`. This is the definitive correctness check.
 
 ---
 
-## 5. Expected Impact
+## 7. Expected Impact
 
 - **Check positions (Tests #2, #13, #33):** Non-commoner pseudo-legal moves reduced by 50–80 % in single-check, 90–100 % in double-check.
-- **Non-check positions (all others):** Zero overhead — the `state.checkers.is_empty()` branch resolves at compile time to the same non-evasions path as today, with the same `is_move_trivially_legal()` fast-path.
+- **Non-check positions (all others):** Zero overhead — the `state.checkers.is_empty()` branch goes to the unchanged `generate_pseudo_legal` path with the same `is_move_trivially_legal()` fast-path.
 - **Total:** 8–20 % overall speedup on the `verify_perft` benchmark.
 
 ---
 
-## 6. Risk Assessment
+## 8. Risk Assessment
 
 | Risk | Likelihood | Mitigation |
 |------|-----------|------------|
-| Incorrect between_bb for multi-commoner check | Low | `legal()` filter catches any false positives; tests verify no false negatives |
-| Compiler fails to inline helpers | Low | `#[inline(always)]` on all evasion helpers |
-| Pawn evasions miss en-passant that captures checker | Low | EP destination is always checked against target before generation |
-| Performance regression on non-check path | None | `generate_non_evasions` path is identical to current `generate_pseudo_legal` |
+| Incorrect between_bb target for multi-commoner check | Low | Over-generating (union of all commoners' between_bb) is safe; `legal()` catches false positives. Under-generating would be caught by verify_perft. |
+| En-passant evasion missed | Low | Always generating EP in evasions path eliminates this risk entirely. |
+| Commoner adjacency check not handled | None | Adjacency checkers are in `state.checkers`, classified as leaper → target = checkers → must capture. |
+| Compiler fails to inline helpers | Low | `#[inline(always)]` on all evasion helpers. |
+| Performance regression on non-check path | None | `generate_pseudo_legal` path is unchanged. |
+| `generate_pseudo_legal` public API breakage | None | Function name and signature preserved. |
