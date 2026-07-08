@@ -81,13 +81,13 @@ def main():
     entries = []
     seen_fens = set()
 
-    while len(entries) < 20:
+    while len(entries) < 1000:
         # Start fresh game
         send(proc, "position startpos")
         move_stack = []
         ply = 0
 
-        while len(entries) < 20:
+        while len(entries) < 1000:
             # Get legal moves
             send(proc, "go perft 1")
             out = read_until(proc, "Nodes searched:")
