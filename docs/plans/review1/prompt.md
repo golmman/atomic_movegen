@@ -10,3 +10,7 @@ Each plan should include a final task that documents the things learned during i
 ---
 
 Implement the plans of `docs/plans/review1/` in order.
+
+---
+
+Implement `docs/plans/review1/plan1.md`
