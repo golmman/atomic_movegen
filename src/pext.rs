@@ -294,6 +294,7 @@ mod tests {
     /// If BMI2 is available, verify the hardware PEXT path matches the
     /// loop-based reference on a subset of positions.
     #[test]
+    #[cfg(target_arch = "x86_64")]
     fn test_pext_hardware_vs_loop() {
         if !has_bmi2() {
             return;
