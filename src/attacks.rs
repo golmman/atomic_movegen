@@ -1,56 +1,8 @@
 use crate::types::*;
 
-// On x86_64: runtime dispatch between PEXT (BMI2) and magic-multiply.
-// On other architectures: direct re-export of the magic fallback.
-
-#[cfg(target_arch = "x86_64")]
-mod sliding_dispatch {
-    use crate::types::*;
-    use core::sync::atomic::{AtomicU8, Ordering};
-
-    // 0 = uninit, 1 = Magic, 2 = Pext
-    static IMPL: AtomicU8 = AtomicU8::new(0);
-
-    pub(crate) fn force_magic() {
-        IMPL.store(1, Ordering::Relaxed);
-    }
-
-    pub(crate) fn force_pext() {
-        IMPL.store(2, Ordering::Relaxed);
-    }
-
-    /// Return the attack set for a bishop on `sq` given the `occupied` board.
-    #[inline(always)]
-    pub fn bishop_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
-        // After init(), IMPL is stable and threadsafe to read.
-        if IMPL.load(Ordering::Relaxed) == 2 {
-            crate::pext::bishop_attacks_pext(sq, occupied)
-        } else {
-            crate::magic::bishop_attacks(sq, occupied)
-        }
-    }
-
-    /// Return the attack set for a rook on `sq` given the `occupied` board.
-    #[inline(always)]
-    pub fn rook_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
-        if IMPL.load(Ordering::Relaxed) == 2 {
-            crate::pext::rook_attacks_pext(sq, occupied)
-        } else {
-            crate::magic::rook_attacks(sq, occupied)
-        }
-    }
-
-    /// Return the attack set for a queen (bishop + rook).
-    #[inline(always)]
-    pub fn queen_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
-        bishop_attacks(sq, occupied) | rook_attacks(sq, occupied)
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-pub use sliding_dispatch::{bishop_attacks, queen_attacks, rook_attacks};
-
-#[cfg(not(target_arch = "x86_64"))]
+// Sliding piece attacks are always served by the magic-bitboard tables.
+// PEXT was removed in plan 2 to keep the default build zero-unsafe and to
+// avoid the slow AMD-Zen PEXT implementation.
 pub use crate::magic::{bishop_attacks, queen_attacks, rook_attacks};
 
 // Leaper attack tables computed at compile time (no lazy init).
@@ -285,21 +237,12 @@ pub fn pawn_attacks(c: Color, sq: Square) -> Bitboard {
     PAWN_ATTACKS[sq as usize][c as usize]
 }
 
-/// Initialize all attack tables (magic and PEXT).
+/// Initialize the magic bitboard attack tables.
 ///
 /// Must be called before any call to `bishop_attacks`, `rook_attacks`, or
 /// `queen_attacks`. Safe to call multiple times — subsequent calls are no-ops.
 pub fn init() {
     crate::magic::init();
-    #[cfg(target_arch = "x86_64")]
-    {
-        if crate::pext::has_bmi2() {
-            crate::pext::init();
-            sliding_dispatch::force_pext();
-        } else {
-            sliding_dispatch::force_magic();
-        }
-    }
 }
 
 #[cfg(test)]

@@ -31,8 +31,8 @@ pub(crate) mod bitboard;
 pub mod board;
 pub(crate) mod magic;
 pub mod movegen;
-pub(crate) mod pext;
 pub mod types;
+pub(crate) mod util;
 
 pub use board::Board;
 pub use types::{Bitboard, Color, Move, MoveList, PieceType, Square};

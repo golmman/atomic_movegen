@@ -27,3 +27,4 @@ cargo run --example verify_perft [MAX_DEPTH]     # run all 41 perft_values.md po
 - Tests go in a `#[cfg(test)] mod tests` at the bottom of each module.
 - The most important quality attributes for this library are in order from most to least important:
   - correctness, performance, maintainability, testability, consistency
+- only use reading `git` commands, never writing ones (no `git add`, `git rm`, `git commit`, etc.)

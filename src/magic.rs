@@ -288,32 +288,8 @@ pub(crate) const BISHOP_MASKS: [Bitboard; 64] = [
     Bitboard(0x0040201008040200),
 ];
 
-const fn compute_offsets(index_bits: &[u32; 64]) -> [usize; 64] {
-    let mut offsets = [0usize; 64];
-    let mut total = 0usize;
-    let mut i = 0;
-    while i < 64 {
-        offsets[i] = total;
-        total += 1usize << index_bits[i];
-        i += 1;
-    }
-    offsets
-}
-
-const fn total_table_size(index_bits: &[u32; 64]) -> usize {
-    let mut total = 0usize;
-    let mut i = 0;
-    while i < 64 {
-        total += 1usize << index_bits[i];
-        i += 1;
-    }
-    total
-}
-
-const ROOK_OFFSETS: [usize; 64] = compute_offsets(&ROOK_INDEX_BITS);
-const BISHOP_OFFSETS: [usize; 64] = compute_offsets(&BISHOP_INDEX_BITS);
-const ROOK_TABLE_SIZE: usize = total_table_size(&ROOK_INDEX_BITS);
-const BISHOP_TABLE_SIZE: usize = total_table_size(&BISHOP_INDEX_BITS);
+const ROOK_TABLE_SIZE: usize = crate::util::total_table_size(&ROOK_INDEX_BITS);
+const BISHOP_TABLE_SIZE: usize = crate::util::total_table_size(&BISHOP_INDEX_BITS);
 
 pub(crate) const ROOK_DIRS: [(i8, i8); 4] = [(0, 1), (0, -1), (1, 0), (-1, 0)];
 pub(crate) const BISHOP_DIRS: [(i8, i8); 4] = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
@@ -385,7 +361,7 @@ pub(crate) const BISHOP_ENTRIES: [MagicEntry; 64] = compute_bishop_entries();
 ///
 /// Walks along each direction from `sq` until hitting the edge of the board
 /// or an occupied square (inclusive). Used as the reference implementation
-/// for building magic and PEXT tables.
+/// for building magic bitboard tables.
 pub(crate) fn sliding_attack(directions: &[(i8, i8)], sq: Square, occupied: Bitboard) -> Bitboard {
     let mut result = 0u64;
     let s_idx = sq as i8;
@@ -418,7 +394,7 @@ fn build_magic_table(
     masks: &[Bitboard; 64],
     magics: &[u64; 64],
     index_bits: &[u32; 64],
-    offsets: &[usize; 64],
+    entries: &[MagicEntry; 64],
     total_size: usize,
 ) -> Box<[Bitboard]> {
     let mut table = vec![Bitboard::EMPTY; total_size].into_boxed_slice();
@@ -427,7 +403,7 @@ fn build_magic_table(
         let mask = masks[sq].0;
         let magic = magics[sq];
         let shift = 64 - index_bits[sq];
-        let offset = offsets[sq];
+        let offset = entries[sq].offset as usize;
         let size_check = 1usize << index_bits[sq];
         let sq_enum = Square::from_u8(sq as u8);
 
@@ -473,7 +449,7 @@ pub(crate) fn init() {
         &ROOK_MASKS,
         &ROOK_MAGICS,
         &ROOK_INDEX_BITS,
-        &ROOK_OFFSETS,
+        &ROOK_ENTRIES,
         ROOK_TABLE_SIZE,
     )));
     _ = BISHOP_TABLE.set(Box::leak(build_magic_table(
@@ -481,7 +457,7 @@ pub(crate) fn init() {
         &BISHOP_MASKS,
         &BISHOP_MAGICS,
         &BISHOP_INDEX_BITS,
-        &BISHOP_OFFSETS,
+        &BISHOP_ENTRIES,
         BISHOP_TABLE_SIZE,
     )));
 }
@@ -509,10 +485,6 @@ pub fn rook_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
 }
 
 /// Return the attack set for a queen (bishop + rook).
-///
-/// On x86_64 the dispatch module in `attacks` provides its own `queen_attacks`,
-/// so this function is unused there.
-#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 #[inline(always)]
 pub fn queen_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
     bishop_attacks(sq, occupied) | rook_attacks(sq, occupied)

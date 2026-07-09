@@ -537,6 +537,13 @@ impl Board {
     ///
     /// Handles all move types (normal, promotion, en-passant, castling) as well
     /// as atomic-blast removal on captures.
+    ///
+    /// `state` is used only for undo information; cached attack fields
+    /// (`checkers`, `pinned`, `commoners_count`) are *not* populated here.
+    /// Callers that need a legal move check must call [`populate_state`](Self::populate_state)
+    /// themselves before calling [`legal`](Self::legal), or use
+    /// [`generate_legal`](crate::movegen::generate_legal) which creates its own
+    /// populated `StateInfo`.
     pub fn do_move(&mut self, m: Move, state: &mut StateInfo) {
         state.castling_rights = self.castling_rights;
         state.ep_square = self.ep_square;
@@ -677,13 +684,12 @@ impl Board {
 
         self.side_to_move = them;
         self.game_ply += 1;
-
-        self.populate_state(state);
     }
 
     /// Unmake `m`, restoring the board to its state before [`do_move`](Self::do_move).
     ///
-    /// `state` must be the same [`StateInfo`] that was passed to `do_move`.
+    /// `state` must be the same [`StateInfo`] that was passed to `do_move`. It
+    /// is used only for undo data; cached attack fields are not restored.
     pub fn undo_move(&mut self, m: Move, state: &StateInfo) {
         self.castling_rights = state.castling_rights;
         self.ep_square = state.ep_square;
