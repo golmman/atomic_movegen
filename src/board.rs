@@ -1,3 +1,6 @@
+//! Board representation, FEN parsing, move make/unmake, and legality checking
+//! for atomic chess.
+
 use crate::attacks;
 use crate::bitboard::*;
 use crate::types::*;
@@ -85,20 +88,30 @@ fn char_to_piece(c: char) -> Option<Piece> {
 /// [`Board::legal`] and [`generate_legal`](crate::movegen::generate_legal).
 #[derive(Debug, Clone, Copy)]
 pub struct StateInfo {
-    // Hot fields (read in legal() and generate_legal())
+    /// Enemy pieces attacking the side to move's commoners (hot).
     pub checkers: Bitboard,
+    /// Pieces of the side to move that are pinned to a commoner (hot).
     pub pinned: Bitboard,
+    /// Number of commoners the side to move has on the board (hot).
     pub commoners_count: u32,
+    /// Number of commoners the opponent has on the board (hot).
     pub them_commoners_count: u32,
 
-    // Cold fields (read in undo_move, write in do_move / populate_state)
+    /// Castling rights before the move (undo data).
     pub castling_rights: u8,
+    /// En-passant target before the move (undo data).
     pub ep_square: Option<Square>,
+    /// Half-move clock before the move (undo data).
     pub rule50: u16,
+    /// Number of pieces removed by a blast during `do_move` (undo data).
     pub captured_count: u8,
+    /// Blast-removed pieces stored for `undo_move` (undo data).
     pub captured: [(Square, Piece); 9],
+    /// The square of the main piece captured during `do_move`, if any.
     pub cap_sq: Option<Square>,
+    /// The piece captured on `cap_sq`.
     pub cap_piece: Piece,
+    /// The piece type of the piece captured on `cap_sq`.
     pub cap_pt: PieceType,
 }
 
@@ -168,6 +181,23 @@ impl Board {
     /// Accepts standard FEN with 4 or 6 space-separated fields. The piece
     /// character set includes standard chess pieces plus `C`/`c` and `K`/`k`
     /// for commoners (king-like pseudo-royal pieces).
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`FenError`] variant for malformed input:
+    ///
+    /// - `TooShort` — fewer than 4 fields.
+    /// - `InvalidFieldCount` — not 4 or 6 fields.
+    /// - `WrongRankCount` — the board section does not contain 8 ranks.
+    /// - `InvalidPlacement` — a rank does not sum to 8 columns, an invalid
+    ///   character appears, or a piece is placed outside the board.
+    /// - `InvalidSideToMove` — the side-to-move field is not `w` or `b`.
+    /// - `InvalidCastling` — the castling field is malformed or a castling
+    ///   right is set without the required pieces on the board.
+    /// - `InvalidEpSquare` — the en-passant target is not a valid square, is
+    ///   on the wrong rank, or has no enemy pawn behind it.
+    /// - `ParseInt` — the half-move clock or full-move number is not a valid
+    ///   integer.
     pub fn from_fen(fen: &str) -> Result<Self, FenError> {
         let parts: Vec<&str> = fen.split_whitespace().collect();
         if parts.len() < 4 {

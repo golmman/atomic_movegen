@@ -1,8 +1,12 @@
+//! Precomputed attack tables and initialization for atomic chess.
+//!
+//! Provides king, knight, pawn, and magic-bitboard sliding-piece attacks.
+
 use crate::types::*;
 
 // Sliding piece attacks are always served by the magic-bitboard tables.
-// PEXT was removed in plan 2 to keep the default build zero-unsafe and to
-// avoid the slow AMD-Zen PEXT implementation.
+// PEXT was removed in plan 2 to keep the default build free of `unsafe` blocks
+// and to avoid the slow AMD-Zen PEXT implementation.
 pub use crate::magic::{bishop_attacks, queen_attacks, rook_attacks};
 
 // Leaper attack tables computed at compile time (no lazy init).

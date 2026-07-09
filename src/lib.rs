@@ -1,19 +1,29 @@
 //! `atomic-movegen` — atomic chess move generation in Rust.
 //!
 //! This crate implements legal move generation, FEN parsing, and perft for
-//! [atomic chess](https://en.wikipedia.org/wiki/Atomic_chess).
+//! the standard `atomic` variant, validated against the
+//! [Fairy-Stockfish](https://github.com/fairy-stockfish/Fairy-Stockfish)
+//! reference implementation.
 //!
 //! # Atomic chess rules implemented
 //!
 //! - **Blast on capture:** capturing (or en passant) destroys all non-pawn
 //!   pieces in a 3×3 king-move blast zone centered on the capture square,
-//!   including the capturer itself if it is not a pawn.
-//! - **Pawns are blast-immune:** pawns are never removed by a blast.
-//! - **COMMONER replaces KING:** pieces move like kings but are pseudo-royal.
-//!   Losing all COMMONERs means loss. Adjacent COMMONERs (even own) are illegal
-//!   (extinction pseudo-royal rule).
+//!   including the capturer itself.
+//! - **Pawns and the blast:** pawns are not removed by the blast except when
+//!   a pawn is the capturer at the blast square (`to`). In that case the
+//!   capturing pawn is also destroyed.
+//! - **COMMONER replaces KING:** a commoner moves like a king. Losing all of
+//!   your commoners loses the game.
+//! - **Pseudo-royal only for the last commoner:** a commoner is treated as
+//!   pseudo-royal (it cannot be left under attack, cannot move next to an
+//!   enemy commoner, and its loss ends the game) only when it is the side's
+//!   last commoner. This is `extinctionPseudoRoyal` with the default
+//!   `extinctionPieceCount = 0` in Fairy-Stockfish's `atomic` variant.
+//! - **Not `atomar`:** commoners are not mutually immune and there is no
+//!   `mutuallyImmuneTypes` / `blastImmuneTypes` rule.
 //! - **No check/mate in the usual sense:** the game ends when a side has no
-//!   COMMONERs left.
+//!   commoners left.
 //!
 //! # Example
 //!
@@ -25,6 +35,8 @@
 //! let nodes = perft(&mut board, 3);
 //! assert_eq!(nodes, 8902);
 //! ```
+
+#![warn(missing_docs)]
 
 pub mod attacks;
 pub(crate) mod bitboard;

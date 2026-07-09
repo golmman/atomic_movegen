@@ -1,3 +1,8 @@
+//! Core types and constants for atomic chess move generation.
+//!
+//! This module defines squares, bitboards, pieces, colors, moves, and the
+//! move list container used by the rest of the crate.
+
 use std::fmt;
 use std::ops;
 
@@ -6,6 +11,7 @@ use std::ops;
 /// Layout: `A1` = 0, `B1` = 1, …, `H1` = 7, `A2` = 8, …, `H8` = 63.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
+#[allow(missing_docs)]
 pub enum Square {
     A1,
     B1,
@@ -74,70 +80,25 @@ pub enum Square {
     NONE,
 }
 
-pub const SQ_A1: Square = Square::A1;
-pub const SQ_B1: Square = Square::B1;
-pub const SQ_C1: Square = Square::C1;
-pub const SQ_D1: Square = Square::D1;
-pub const SQ_E1: Square = Square::E1;
-pub const SQ_F1: Square = Square::F1;
-pub const SQ_G1: Square = Square::G1;
-pub const SQ_H1: Square = Square::H1;
-pub const SQ_A2: Square = Square::A2;
-pub const SQ_B2: Square = Square::B2;
-pub const SQ_C2: Square = Square::C2;
-pub const SQ_D2: Square = Square::D2;
-pub const SQ_E2: Square = Square::E2;
-pub const SQ_F2: Square = Square::F2;
-pub const SQ_G2: Square = Square::G2;
-pub const SQ_H2: Square = Square::H2;
-pub const SQ_A3: Square = Square::A3;
-pub const SQ_B3: Square = Square::B3;
-pub const SQ_C3: Square = Square::C3;
-pub const SQ_D3: Square = Square::D3;
-pub const SQ_E3: Square = Square::E3;
-pub const SQ_F3: Square = Square::F3;
-pub const SQ_G3: Square = Square::G3;
-pub const SQ_H3: Square = Square::H3;
-pub const SQ_A4: Square = Square::A4;
-pub const SQ_B4: Square = Square::B4;
-pub const SQ_C4: Square = Square::C4;
-pub const SQ_D4: Square = Square::D4;
-pub const SQ_E4: Square = Square::E4;
-pub const SQ_F4: Square = Square::F4;
-pub const SQ_G4: Square = Square::G4;
-pub const SQ_H4: Square = Square::H4;
-pub const SQ_A5: Square = Square::A5;
-pub const SQ_B5: Square = Square::B5;
-pub const SQ_C5: Square = Square::C5;
-pub const SQ_D5: Square = Square::D5;
-pub const SQ_E5: Square = Square::E5;
-pub const SQ_F5: Square = Square::F5;
-pub const SQ_G5: Square = Square::G5;
-pub const SQ_H5: Square = Square::H5;
-pub const SQ_A6: Square = Square::A6;
-pub const SQ_B6: Square = Square::B6;
-pub const SQ_C6: Square = Square::C6;
-pub const SQ_D6: Square = Square::D6;
-pub const SQ_E6: Square = Square::E6;
-pub const SQ_F6: Square = Square::F6;
-pub const SQ_G6: Square = Square::G6;
-pub const SQ_H6: Square = Square::H6;
-pub const SQ_A7: Square = Square::A7;
-pub const SQ_B7: Square = Square::B7;
-pub const SQ_C7: Square = Square::C7;
-pub const SQ_D7: Square = Square::D7;
-pub const SQ_E7: Square = Square::E7;
-pub const SQ_F7: Square = Square::F7;
-pub const SQ_G7: Square = Square::G7;
-pub const SQ_H7: Square = Square::H7;
-pub const SQ_A8: Square = Square::A8;
-pub const SQ_B8: Square = Square::B8;
-pub const SQ_C8: Square = Square::C8;
-pub const SQ_D8: Square = Square::D8;
-pub const SQ_E8: Square = Square::E8;
-pub const SQ_F8: Square = Square::F8;
-pub const SQ_G8: Square = Square::G8;
-pub const SQ_H8: Square = Square::H8;
+macro_rules! define_sq_consts {
+    ($($name:ident, $variant:ident);*) => {
+        $(
+            #[allow(missing_docs)]
+            pub const $name: Square = Square::$variant;
+        )*
+    };
+}
+
+define_sq_consts!(
+    SQ_A1, A1; SQ_B1, B1; SQ_C1, C1; SQ_D1, D1; SQ_E1, E1; SQ_F1, F1; SQ_G1, G1; SQ_H1, H1;
+    SQ_A2, A2; SQ_B2, B2; SQ_C2, C2; SQ_D2, D2; SQ_E2, E2; SQ_F2, F2; SQ_G2, G2; SQ_H2, H2;
+    SQ_A3, A3; SQ_B3, B3; SQ_C3, C3; SQ_D3, D3; SQ_E3, E3; SQ_F3, F3; SQ_G3, G3; SQ_H3, H3;
+    SQ_A4, A4; SQ_B4, B4; SQ_C4, C4; SQ_D4, D4; SQ_E4, E4; SQ_F4, F4; SQ_G4, G4; SQ_H4, H4;
+    SQ_A5, A5; SQ_B5, B5; SQ_C5, C5; SQ_D5, D5; SQ_E5, E5; SQ_F5, F5; SQ_G5, G5; SQ_H5, H5;
+    SQ_A6, A6; SQ_B6, B6; SQ_C6, C6; SQ_D6, D6; SQ_E6, E6; SQ_F6, F6; SQ_G6, G6; SQ_H6, H6;
+    SQ_A7, A7; SQ_B7, B7; SQ_C7, C7; SQ_D7, D7; SQ_E7, E7; SQ_F7, F7; SQ_G7, G7; SQ_H7, H7;
+    SQ_A8, A8; SQ_B8, B8; SQ_C8, C8; SQ_D8, D8; SQ_E8, E8; SQ_F8, F8; SQ_G8, G8; SQ_H8, H8
+);
 /// Number of squares on a chessboard.
 pub const SQUARE_NB: usize = 64;
 /// Number of files on a chessboard.
@@ -233,6 +194,7 @@ impl Square {
 }
 
 /// A file (column) on a chessboard.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 #[non_exhaustive]
@@ -248,10 +210,12 @@ pub enum File {
 }
 
 impl File {
+    /// Number of files on a chessboard.
     pub const NB: usize = 8;
 }
 
 /// A rank (row) on a chessboard.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 #[non_exhaustive]
@@ -267,6 +231,7 @@ pub enum Rank {
 }
 
 impl Rank {
+    /// Number of ranks on a chessboard.
     pub const NB: usize = 8;
 }
 
@@ -409,6 +374,7 @@ impl ops::Shr<usize> for Bitboard {
 }
 
 /// A side in a chess game.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Color {
@@ -417,6 +383,7 @@ pub enum Color {
 }
 
 impl Color {
+    /// Number of colors in a chess game.
     pub const NB: usize = 2;
 
     /// Return the opposite color.
@@ -433,6 +400,7 @@ impl Color {
 ///
 /// In atomic chess, a *commoner* moves like a king and is pseudo-royal:
 /// losing all commoners loses the game.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 #[non_exhaustive]
@@ -446,6 +414,7 @@ pub enum PieceType {
 }
 
 impl PieceType {
+    /// Number of piece types.
     pub const NB: usize = 6;
 }
 
@@ -466,7 +435,10 @@ pub(crate) const PIECE_TYPES: [PieceType; 6] = [
 pub struct Piece(u8);
 
 impl Piece {
-    // Encode as (color << 3) | (pt as u8 + 1) to avoid NO_PIECE = 0 conflict
+    /// Construct a [`Piece`] from a color and piece type.
+    ///
+    /// The internal encoding is `(color << 3) | (piece_type + 1)` so that
+    /// [`NO_PIECE`] can be represented by the value `0`.
     #[inline]
     pub const fn from_parts(color: Color, pt: PieceType) -> Piece {
         Piece(((color as u8) << 3) | ((pt as u8) + 1))
@@ -537,18 +509,31 @@ impl fmt::Display for Piece {
     }
 }
 
+/// An empty square (no piece).
 pub const NO_PIECE: Piece = Piece(0);
+/// White pawn.
 pub const W_PAWN: Piece = Piece::from_parts(Color::White, PieceType::Pawn);
+/// White knight.
 pub const W_KNIGHT: Piece = Piece::from_parts(Color::White, PieceType::Knight);
+/// White bishop.
 pub const W_BISHOP: Piece = Piece::from_parts(Color::White, PieceType::Bishop);
+/// White rook.
 pub const W_ROOK: Piece = Piece::from_parts(Color::White, PieceType::Rook);
+/// White queen.
 pub const W_QUEEN: Piece = Piece::from_parts(Color::White, PieceType::Queen);
+/// White commoner.
 pub const W_COMMONER: Piece = Piece::from_parts(Color::White, PieceType::Commoner);
+/// Black pawn.
 pub const B_PAWN: Piece = Piece::from_parts(Color::Black, PieceType::Pawn);
+/// Black knight.
 pub const B_KNIGHT: Piece = Piece::from_parts(Color::Black, PieceType::Knight);
+/// Black bishop.
 pub const B_BISHOP: Piece = Piece::from_parts(Color::Black, PieceType::Bishop);
+/// Black rook.
 pub const B_ROOK: Piece = Piece::from_parts(Color::Black, PieceType::Rook);
+/// Black queen.
 pub const B_QUEEN: Piece = Piece::from_parts(Color::Black, PieceType::Queen);
+/// Black commoner.
 pub const B_COMMONER: Piece = Piece::from_parts(Color::Black, PieceType::Commoner);
 
 /// Construct a [`Piece`] from a color and piece type.
@@ -566,6 +551,7 @@ pub const PROMOTION_PIECES: [PieceType; 4] = [
 ];
 
 /// The type of a chess move (normal, promotion, en-passant, castling).
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum MoveType {

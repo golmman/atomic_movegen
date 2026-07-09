@@ -1,18 +1,22 @@
 # atomic-movegen
 
-A Rust library for legal move generation in [atomic chess](https://en.wikipedia.org/wiki/Atomic_chess).
+A Rust library for legal move generation in the standard `atomic` variant,
+validated against the [Fairy-Stockfish](https://github.com/fairy-stockfish/Fairy-Stockfish)
+reference implementation.
 
 ## Features
 
 - Legal move generation (pseudo-legal + legality filtering)
 - FEN parsing and output
 - Perft (performance test) recursion
-- Blast-on-capture, COMMONER pseudo-royalty, pawn blast immunity
+- Blast-on-capture, commoner pseudo-royalty (only for the last commoner), pawn
+  blast immunity (except for the capturing pawn at the blast square)
+- Pure safe Rust, zero dependencies
 
 ## Usage (library)
 
 ```rust
-use atomic_movegen::board::Board;
+use atomic_movegen::Board;
 use atomic_movegen::perft;
 
 let mut board = Board::new();
@@ -31,15 +35,15 @@ Output: `197326`
 ## Verify against known perft values
 
 The repository ships with 41 test positions and their expected node counts at
-depths 1–6 in [`perft_values.md`](./perft_values.md).  Use the
-`verify_perft` example to run all of them:
+depths 1–6 in [`perft_values.md`](./perft_values.md).  Use the `verify_perft`
+example to run all of them:
 
 ```sh
 # Quick check at depth 3 (~5 s)
 cargo run --example verify_perft 3
 
 # Full verification at depth 6 — use --release for acceptable runtime
-cargo run --example verify_perft --release
+cargo run --release --example verify_perft
 ```
 
 The tool exits with status 0 if every position matches, or 1 on any mismatch.

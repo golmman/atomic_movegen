@@ -1,3 +1,5 @@
+//! Pseudo-legal and legal move generation for atomic chess.
+
 use crate::attacks;
 use crate::board::{
     BK_CASTLE, BQ_CASTLE, Board, StateInfo, WK_CASTLE, WQ_CASTLE, is_move_trivially_legal,
