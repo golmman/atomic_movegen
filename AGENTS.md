@@ -18,7 +18,7 @@ cargo run --example verify_perft [MAX_DEPTH]     # run all 41 perft_values.md po
 ## Conventions
 
 - Follow standard Rust 2024 edition idioms.
-- Use `cargo clippy` and `cargo fmt` before committing.
+- Use `cargo clippy`, `cargo fmt` and `cargo test` to ensure correctness and code quality.
 - Avoid `unsafe` — try to keep the crate entirely safe Rust.
 - Use `thiserror` for error types, `strum` for enums where appropriate.
 - Name public API types and functions clearly; prefer full words over abbreviations.

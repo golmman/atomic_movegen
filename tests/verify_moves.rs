@@ -29,20 +29,6 @@ fn uci(m: atomic_movegen::types::Move) -> String {
     s
 }
 
-fn fix_halfmove_clock(fen: &str) -> String {
-    let fields: Vec<&str> = fen.splitn(6, ' ').collect();
-    if fields.len() >= 5 {
-        let hm: u16 = fields[4].parse().unwrap_or(0);
-        if hm > 255 {
-            let mut new_fen = fields[..4].join(" ");
-            new_fen.push_str(" 0 ");
-            new_fen.push_str(fields.get(5).unwrap_or(&"1"));
-            return new_fen;
-        }
-    }
-    fen.to_string()
-}
-
 #[test]
 fn verify_moves_md() {
     atomic_movegen::attacks::init();
@@ -72,8 +58,7 @@ fn verify_moves_md() {
         let mut expected: Vec<&str> = moves_str.split_whitespace().collect();
         expected.sort();
 
-        let fen_fixed = fix_halfmove_clock(fen);
-        let board = Board::from_fen(&fen_fixed).expect("Invalid FEN");
+        let board = Board::from_fen(fen).expect("Invalid FEN");
         let mut moves = MoveList::new();
         movegen::generate_legal(&board, &mut moves);
 

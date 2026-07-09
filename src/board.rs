@@ -25,6 +25,13 @@ pub enum FenError {
     InvalidCastling(String),
     /// Invalid en-passant target square.
     InvalidEpSquare(String),
+    /// Invalid piece placement in the FEN board section.
+    InvalidPlacement(String),
+    /// FEN does not have exactly 4 or 6 space-separated fields.
+    InvalidFieldCount {
+        /// Number of fields actually found.
+        got: usize,
+    },
     /// Integer parse failure in the move-clock or full-move fields.
     ParseInt(String),
 }
@@ -41,6 +48,10 @@ impl fmt::Display for FenError {
             FenError::InvalidSideToMove(v) => write!(f, "Invalid side to move: {v}"),
             FenError::InvalidCastling(v) => write!(f, "Invalid castling rights: {v}"),
             FenError::InvalidEpSquare(v) => write!(f, "Invalid en-passant square: {v}"),
+            FenError::InvalidPlacement(v) => write!(f, "Invalid piece placement: {v}"),
+            FenError::InvalidFieldCount { got } => {
+                write!(f, "FEN must have 4 or 6 fields, got {got}")
+            }
             FenError::ParseInt(v) => write!(f, "Failed to parse integer: {v}"),
         }
     }
@@ -83,7 +94,7 @@ pub struct StateInfo {
     // Cold fields (read in undo_move, write in do_move / populate_state)
     pub castling_rights: u8,
     pub ep_square: Option<Square>,
-    pub rule50: u8,
+    pub rule50: u16,
     pub captured_count: u8,
     pub captured: [(Square, Piece); 9],
     pub cap_sq: Option<Square>,
@@ -130,7 +141,7 @@ pub struct Board {
     side_to_move: Color,
     castling_rights: u8,
     ep_square: Option<Square>,
-    rule50: u8,
+    rule50: u16,
     game_ply: u16,
 }
 
@@ -154,13 +165,16 @@ impl Board {
 
     /// Parse a board from a FEN string.
     ///
-    /// Accepts standard FEN with 4–6 space-separated fields. The piece
+    /// Accepts standard FEN with 4 or 6 space-separated fields. The piece
     /// character set includes standard chess pieces plus `C`/`c` and `K`/`k`
     /// for commoners (king-like pseudo-royal pieces).
     pub fn from_fen(fen: &str) -> Result<Self, FenError> {
         let parts: Vec<&str> = fen.split_whitespace().collect();
         if parts.len() < 4 {
             return Err(FenError::TooShort { parts: parts.len() });
+        }
+        if parts.len() != 4 && parts.len() != 6 {
+            return Err(FenError::InvalidFieldCount { got: parts.len() });
         }
 
         let mut squares = [NO_PIECE; 64];
@@ -178,21 +192,45 @@ impl Board {
         }
         for (ri, row) in rows.iter().enumerate() {
             let rank_idx = 7 - ri; // rank 0 (index 7) = rank 8 in FEN
+            let fen_rank = 8 - ri; // FEN rank number for error messages
             let mut col = 0usize;
             for c in row.chars() {
-                if c.is_ascii_digit() {
-                    col += c.to_digit(10).unwrap() as usize;
-                } else if let Some(piece) = char_to_piece(c) {
-                    let sq_idx = rank_idx * 8 + col;
-                    if sq_idx < 64 {
-                        squares[sq_idx] = piece;
-                        let sq = Square::from_u8(sq_idx as u8);
-                        let bb = Bitboard::square_bb(sq);
-                        by_color[piece.color() as usize] = by_color[piece.color() as usize] | bb;
-                        by_type[piece.type_of() as usize] = by_type[piece.type_of() as usize] | bb;
-                    }
-                    col += 1;
+                if c == '0' {
+                    return Err(FenError::InvalidPlacement(format!(
+                        "'0' is not a valid empty-square count at rank {fen_rank}, col {col}"
+                    )));
                 }
+                if c.is_ascii_digit() {
+                    let digit = c.to_digit(10).unwrap() as usize;
+                    if col + digit > 8 {
+                        return Err(FenError::InvalidPlacement(format!(
+                            "digit {c} at rank {fen_rank}, col {col} would exceed 8 columns"
+                        )));
+                    }
+                    col += digit;
+                } else if let Some(piece) = char_to_piece(c) {
+                    if col >= 8 {
+                        return Err(FenError::InvalidPlacement(format!(
+                            "piece '{c}' at rank {fen_rank} is placed past column 8"
+                        )));
+                    }
+                    let sq_idx = rank_idx * 8 + col;
+                    let sq = Square::from_u8(sq_idx as u8);
+                    squares[sq_idx] = piece;
+                    let bb = Bitboard::square_bb(sq);
+                    by_color[piece.color() as usize] = by_color[piece.color() as usize] | bb;
+                    by_type[piece.type_of() as usize] = by_type[piece.type_of() as usize] | bb;
+                    col += 1;
+                } else {
+                    return Err(FenError::InvalidPlacement(format!(
+                        "invalid character '{c}' at rank {fen_rank}, col {col}"
+                    )));
+                }
+            }
+            if col != 8 {
+                return Err(FenError::InvalidPlacement(format!(
+                    "rank {fen_rank} has {col} columns, expected 8"
+                )));
             }
         }
 
@@ -218,17 +256,80 @@ impl Board {
             }
         }
 
+        // Validate castling rights against the actual king/commoner and rook squares.
+        if castling_rights & WK_CASTLE != 0
+            && (squares[Square::E1 as usize] != make_piece(Color::White, PieceType::Commoner)
+                || squares[Square::H1 as usize] != make_piece(Color::White, PieceType::Rook))
+        {
+            return Err(FenError::InvalidCastling(
+                "white king-side castling rights without required pieces".to_string(),
+            ));
+        }
+        if castling_rights & WQ_CASTLE != 0
+            && (squares[Square::E1 as usize] != make_piece(Color::White, PieceType::Commoner)
+                || squares[Square::A1 as usize] != make_piece(Color::White, PieceType::Rook))
+        {
+            return Err(FenError::InvalidCastling(
+                "white queen-side castling rights without required pieces".to_string(),
+            ));
+        }
+        if castling_rights & BK_CASTLE != 0
+            && (squares[Square::E8 as usize] != make_piece(Color::Black, PieceType::Commoner)
+                || squares[Square::H8 as usize] != make_piece(Color::Black, PieceType::Rook))
+        {
+            return Err(FenError::InvalidCastling(
+                "black king-side castling rights without required pieces".to_string(),
+            ));
+        }
+        if castling_rights & BQ_CASTLE != 0
+            && (squares[Square::E8 as usize] != make_piece(Color::Black, PieceType::Commoner)
+                || squares[Square::A8 as usize] != make_piece(Color::Black, PieceType::Rook))
+        {
+            return Err(FenError::InvalidCastling(
+                "black queen-side castling rights without required pieces".to_string(),
+            ));
+        }
+
         let ep_square = if parts[3] == "-" {
             None
         } else {
             let sq = crate::types::parse_sq(parts[3])
                 .ok_or_else(|| FenError::InvalidEpSquare(parts[3].to_string()))?;
+            let expected_rank = match side_to_move {
+                Color::White => Rank::R6,
+                Color::Black => Rank::R3,
+            };
+            if rank_of(sq) != expected_rank {
+                return Err(FenError::InvalidEpSquare(format!(
+                    "{} on rank {:?} is not a valid en-passant square for {:?}",
+                    parts[3],
+                    rank_of(sq),
+                    side_to_move
+                )));
+            }
+            let ep_cap_idx = match side_to_move {
+                Color::White => sq as i8 - 8,
+                Color::Black => sq as i8 + 8,
+            };
+            let ep_cap = Square::from_index(ep_cap_idx);
+            let them = side_to_move.flip();
+            if squares[ep_cap as usize] != make_piece(them, PieceType::Pawn) {
+                return Err(FenError::InvalidEpSquare(format!(
+                    "no {} pawn on the square behind {} for en-passant",
+                    if them == Color::White {
+                        "white"
+                    } else {
+                        "black"
+                    },
+                    parts[3]
+                )));
+            }
             Some(sq)
         };
 
         let rule50 = if parts.len() > 4 {
             parts[4]
-                .parse::<u8>()
+                .parse::<u16>()
                 .map_err(|e| FenError::ParseInt(e.to_string()))?
         } else {
             0
@@ -509,7 +610,7 @@ impl Board {
                 let sniper_sq = s.pop_lsb();
                 let between = between_bb(ksq, sniper_sq) & occupied;
                 if between.count() == 1 {
-                    pinned = pinned | between;
+                    pinned = pinned | (between & self.pieces_color(us));
                 }
             }
         }
@@ -559,6 +660,7 @@ impl Board {
         let piece = self.squares[from as usize];
         let pt = piece.type_of();
         let is_capture = !self.empty(to);
+        let is_capture_or_ep = is_capture || m.move_type() == MoveType::EnPassant;
 
         if m.move_type() == MoveType::Castling {
             let (kfrom, kto, rfrom, rto) = castling_squares(us, to > from);
@@ -616,7 +718,7 @@ impl Board {
         }
 
         // Blast on capture
-        if is_capture || m.move_type() == MoveType::EnPassant {
+        if is_capture_or_ep {
             // Blast zone = king attacks from `to`, minus pawn squares
             let blast_zone = attacks::king_attacks(to) & !self.by_type[PieceType::Pawn as usize];
             let mut to_blast = blast_zone & self.occupied();
@@ -638,32 +740,46 @@ impl Board {
             }
         }
 
-        self.update_castling_rights(from, to, us);
+        self.update_castling_rights(from, to, us, is_capture_or_ep);
 
-        if is_capture || m.move_type() == MoveType::EnPassant {
-            // White king-side
+        if is_capture_or_ep {
+            // Clear white king-side right if the H1 rook is gone.
             if self.castling_rights & WK_CASTLE != 0
                 && self.squares[Square::H1 as usize] != make_piece(Color::White, PieceType::Rook)
             {
                 self.castling_rights &= !WK_CASTLE;
             }
-            // White queen-side
+            // Clear white queen-side right if the A1 rook is gone.
             if self.castling_rights & WQ_CASTLE != 0
                 && self.squares[Square::A1 as usize] != make_piece(Color::White, PieceType::Rook)
             {
                 self.castling_rights &= !WQ_CASTLE;
             }
-            // Black king-side
+            // Clear black king-side right if the H8 rook is gone.
             if self.castling_rights & BK_CASTLE != 0
                 && self.squares[Square::H8 as usize] != make_piece(Color::Black, PieceType::Rook)
             {
                 self.castling_rights &= !BK_CASTLE;
             }
-            // Black queen-side
+            // Clear black queen-side right if the A8 rook is gone.
             if self.castling_rights & BQ_CASTLE != 0
                 && self.squares[Square::A8 as usize] != make_piece(Color::Black, PieceType::Rook)
             {
                 self.castling_rights &= !BQ_CASTLE;
+            }
+            // Clear all white castling rights if the commoner on E1 is gone.
+            if self.castling_rights & (WK_CASTLE | WQ_CASTLE) != 0
+                && self.squares[Square::E1 as usize]
+                    != make_piece(Color::White, PieceType::Commoner)
+            {
+                self.castling_rights &= !(WK_CASTLE | WQ_CASTLE);
+            }
+            // Clear all black castling rights if the commoner on E8 is gone.
+            if self.castling_rights & (BK_CASTLE | BQ_CASTLE) != 0
+                && self.squares[Square::E8 as usize]
+                    != make_piece(Color::Black, PieceType::Commoner)
+            {
+                self.castling_rights &= !(BK_CASTLE | BQ_CASTLE);
             }
         }
 
@@ -778,18 +894,30 @@ impl Board {
         self.by_type[pt as usize] = self.by_type[pt as usize] | sq_bb;
     }
 
-    fn update_castling_rights(&mut self, from: Square, to: Square, _us: Color) {
+    fn update_castling_rights(&mut self, from: Square, to: Square, _us: Color, is_capture: bool) {
         // King side
-        if from == Square::E1 || from == Square::H1 || to == Square::H1 {
+        if from == Square::E1
+            || from == Square::H1
+            || (is_capture && (to == Square::H1 || to == Square::E1))
+        {
             self.castling_rights &= !WK_CASTLE;
         }
-        if from == Square::E1 || from == Square::A1 || to == Square::A1 {
+        if from == Square::E1
+            || from == Square::A1
+            || (is_capture && (to == Square::A1 || to == Square::E1))
+        {
             self.castling_rights &= !WQ_CASTLE;
         }
-        if from == Square::E8 || from == Square::H8 || to == Square::H8 {
+        if from == Square::E8
+            || from == Square::H8
+            || (is_capture && (to == Square::H8 || to == Square::E8))
+        {
             self.castling_rights &= !BK_CASTLE;
         }
-        if from == Square::E8 || from == Square::A8 || to == Square::A8 {
+        if from == Square::E8
+            || from == Square::A8
+            || (is_capture && (to == Square::A8 || to == Square::E8))
+        {
             self.castling_rights &= !BQ_CASTLE;
         }
     }
@@ -1219,7 +1347,7 @@ mod tests {
         crate::attacks::init();
         // White pawn on d5, black pawn on c5 (just double-pushed), black knight on d4
         // White plays dxc6 en passant — blast at c6
-        let fen2 = "4k3/8/8/2Pp4/8/8/8/4K3 w KQkq d6 0 2";
+        let fen2 = "4k3/8/8/2Pp4/8/8/8/4K3 w - d6 0 2";
         let mut board2 = Board::from_fen(fen2).unwrap();
         let mut state2 = StateInfo::new();
         let m = Move::make_enpassant(Square::C5, Square::D6);

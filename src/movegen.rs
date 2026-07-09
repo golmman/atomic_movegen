@@ -161,7 +161,14 @@ fn generate_pawn_moves_for(
             let to_idx = from_idx + push_dir + df;
             let to_sq = Square::from_index(to_idx);
             if to_sq == ep_sq {
-                moves.push(Move::make_enpassant(from, ep_sq));
+                let ep_cap_idx = match us {
+                    Color::White => ep_sq as i8 - 8,
+                    Color::Black => ep_sq as i8 + 8,
+                };
+                let ep_cap = Square::from_index(ep_cap_idx);
+                if board.piece_on(ep_cap) == make_piece(them, PieceType::Pawn) {
+                    moves.push(Move::make_enpassant(from, ep_sq));
+                }
             }
         }
     }
@@ -198,7 +205,10 @@ fn generate_castling(board: &Board, us: Color, moves: &mut MoveList) {
     };
 
     // King-side castling
-    if board.castling_rights() & king_side_right != 0 {
+    if board.castling_rights() & king_side_right != 0
+        && board.piece_on(king_sq) == make_piece(us, PieceType::Commoner)
+        && board.piece_on(king_side_rook_sq) == make_piece(us, PieceType::Rook)
+    {
         let mut clear = true;
         for &sq in &king_side_squares {
             if !board.empty(sq) {
@@ -212,7 +222,10 @@ fn generate_castling(board: &Board, us: Color, moves: &mut MoveList) {
     }
 
     // Queen-side castling
-    if board.castling_rights() & queen_side_right != 0 {
+    if board.castling_rights() & queen_side_right != 0
+        && board.piece_on(king_sq) == make_piece(us, PieceType::Commoner)
+        && board.piece_on(queen_side_rook_sq) == make_piece(us, PieceType::Rook)
+    {
         let mut clear = true;
         for &sq in &queen_side_squares {
             if !board.empty(sq) {
