@@ -88,6 +88,7 @@ pub struct StateInfo {
     pub captured: [(Square, Piece); 9],
     pub cap_sq: Option<Square>,
     pub cap_piece: Piece,
+    pub cap_pt: PieceType,
 }
 
 impl Default for StateInfo {
@@ -111,6 +112,7 @@ impl StateInfo {
             captured: [(Square::NONE, NO_PIECE); 9],
             cap_sq: None,
             cap_piece: NO_PIECE,
+            cap_pt: PieceType::Pawn,
         }
     }
 }
@@ -219,10 +221,8 @@ impl Board {
         let ep_square = if parts[3] == "-" {
             None
         } else {
-            let sq = crate::types::parse_sq(parts[3]);
-            if sq == Square::A1 && parts[3] != "a1" {
-                return Err(FenError::InvalidEpSquare(parts[3].to_string()));
-            }
+            let sq = crate::types::parse_sq(parts[3])
+                .ok_or_else(|| FenError::InvalidEpSquare(parts[3].to_string()))?;
             Some(sq)
         };
 
@@ -310,7 +310,7 @@ impl Board {
 
         fen.push(' ');
         match self.ep_square {
-            Some(sq) => fen.push_str(&crate::types::sq_str(sq)),
+            Some(sq) => fen.push_str(crate::types::sq_str(sq).unwrap_or("??")),
             None => fen.push('-'),
         }
 
@@ -322,16 +322,25 @@ impl Board {
         fen
     }
 
-    /// Return the piece on a square (or [`NO_PIECE`] if empty).
+    /// Return the piece on a square (or [`NO_PIECE`] if empty or `Square::NONE`).
     #[inline(always)]
     #[must_use]
     pub fn piece_on(&self, sq: Square) -> Piece {
+        if sq == Square::NONE {
+            return NO_PIECE;
+        }
         self.squares[sq as usize]
     }
 
     /// Return `true` if the given square is empty.
+    ///
+    /// Returns `true` for [`Square::NONE`].
+    #[inline]
     #[must_use]
     pub fn empty(&self, sq: Square) -> bool {
+        if sq == Square::NONE {
+            return true;
+        }
         self.squares[sq as usize] == NO_PIECE
     }
 
@@ -361,6 +370,7 @@ impl Board {
     }
 
     /// Return the side to move.
+    #[inline]
     #[must_use]
     pub fn side_to_move(&self) -> Color {
         self.side_to_move
@@ -545,8 +555,20 @@ impl Board {
 
         if m.move_type() == MoveType::Castling {
             let (kfrom, kto, rfrom, rto) = castling_squares(us, to > from);
-            self.move_piece(kfrom, kto);
-            self.move_piece(rfrom, rto);
+            self.move_piece(
+                kfrom,
+                kto,
+                make_piece(us, PieceType::Commoner),
+                us,
+                PieceType::Commoner,
+            );
+            self.move_piece(
+                rfrom,
+                rto,
+                make_piece(us, PieceType::Rook),
+                us,
+                PieceType::Rook,
+            );
             self.castling_rights &= match us {
                 Color::White => !(WK_CASTLE | WQ_CASTLE),
                 Color::Black => !(BK_CASTLE | BQ_CASTLE),
@@ -564,26 +586,26 @@ impl Board {
                 Color::Black => Square::from_index(to as i8 + 8),
             };
             let cap_piece = self.squares[ep_cap as usize];
+            let cap_pt = cap_piece.type_of();
             state.captured[state.captured_count as usize] = (ep_cap, cap_piece);
             state.captured_count += 1;
-            self.remove_piece(ep_cap);
+            self.remove_piece(ep_cap, them, cap_pt);
         } else if is_capture {
             let cap_piece = self.squares[to as usize];
+            let cap_pt = cap_piece.type_of();
             state.cap_sq = Some(to);
             state.cap_piece = cap_piece;
-            self.remove_piece(to);
+            state.cap_pt = cap_pt;
+            self.remove_piece(to, them, cap_pt);
         }
 
         if m.move_type() == MoveType::Promotion {
             let prom_pt = m.promotion_type();
             let prom_piece = make_piece(us, prom_pt);
-            self.remove_piece(from);
-            self.squares[to as usize] = prom_piece;
-            self.by_color[us as usize] = self.by_color[us as usize] | Bitboard::square_bb(to);
-            self.by_type[prom_pt as usize] =
-                self.by_type[prom_pt as usize] | Bitboard::square_bb(to);
+            self.remove_piece(from, us, PieceType::Pawn);
+            self.place_piece(prom_piece, to, us, prom_pt);
         } else {
-            self.move_piece(from, to);
+            self.move_piece(from, to, piece, us, pt);
         }
 
         // Blast on capture
@@ -600,9 +622,11 @@ impl Board {
                 let bsq = b.pop_lsb();
                 let bpiece = self.squares[bsq as usize];
                 if bpiece != NO_PIECE {
+                    let bc = bpiece.color();
+                    let bpt = bpiece.type_of();
                     state.captured[state.captured_count as usize] = (bsq, bpiece);
                     state.captured_count += 1;
-                    self.remove_piece(bsq);
+                    self.remove_piece(bsq, bc, bpt);
                 }
             }
         }
@@ -672,8 +696,20 @@ impl Board {
 
         if m.move_type() == MoveType::Castling {
             let (kfrom, kto, rfrom, rto) = castling_squares(us, to > from);
-            self.move_piece(kto, kfrom);
-            self.move_piece(rto, rfrom);
+            self.move_piece(
+                kto,
+                kfrom,
+                make_piece(us, PieceType::Commoner),
+                us,
+                PieceType::Commoner,
+            );
+            self.move_piece(
+                rto,
+                rfrom,
+                make_piece(us, PieceType::Rook),
+                us,
+                PieceType::Rook,
+            );
             self.game_ply -= 1;
             return;
         }
@@ -682,26 +718,31 @@ impl Board {
         while i > 0 {
             i -= 1;
             let (sq, piece) = state.captured[i as usize];
-            self.place_piece(piece, sq);
+            let c = piece.color();
+            let pt = piece.type_of();
+            self.place_piece(piece, sq, c, pt);
         }
 
         if m.move_type() == MoveType::Promotion {
             let pawn = make_piece(us, PieceType::Pawn);
-            self.remove_piece(to);
-            self.place_piece(pawn, from);
+            self.remove_piece(to, us, m.promotion_type());
+            self.place_piece(pawn, from, us, PieceType::Pawn);
         } else {
-            self.move_piece(to, from);
+            let piece = self.squares[to as usize];
+            let pt = piece.type_of();
+            self.move_piece(to, from, piece, us, pt);
         }
 
         if let Some(sq) = state.cap_sq {
-            self.place_piece(state.cap_piece, sq);
+            let cap_piece = state.cap_piece;
+            self.place_piece(cap_piece, sq, us.flip(), state.cap_pt);
         }
 
         self.game_ply -= 1;
     }
 
-    fn move_piece(&mut self, from: Square, to: Square) {
-        let piece = self.squares[from as usize];
+    #[inline]
+    fn move_piece(&mut self, from: Square, to: Square, piece: Piece, c: Color, pt: PieceType) {
         debug_assert!(piece != NO_PIECE);
         self.squares[to as usize] = piece;
         self.squares[from as usize] = NO_PIECE;
@@ -709,29 +750,26 @@ impl Board {
         let from_bb = Bitboard::square_bb(from);
         let to_bb = Bitboard::square_bb(to);
 
-        let c = piece.color();
-        let pt = piece.type_of();
         self.by_color[c as usize] = (self.by_color[c as usize] ^ from_bb) | to_bb;
         self.by_type[pt as usize] = (self.by_type[pt as usize] ^ from_bb) | to_bb;
     }
 
-    fn remove_piece(&mut self, sq: Square) {
-        let piece = self.squares[sq as usize];
-        if piece == NO_PIECE {
-            return;
-        }
+    #[inline]
+    fn remove_piece(&mut self, sq: Square, c: Color, pt: PieceType) {
+        debug_assert!(self.squares[sq as usize] != NO_PIECE);
         self.squares[sq as usize] = NO_PIECE;
         let sq_bb = Bitboard::square_bb(sq);
-        self.by_color[piece.color() as usize] = self.by_color[piece.color() as usize] ^ sq_bb;
-        self.by_type[piece.type_of() as usize] = self.by_type[piece.type_of() as usize] ^ sq_bb;
+        self.by_color[c as usize] = self.by_color[c as usize] ^ sq_bb;
+        self.by_type[pt as usize] = self.by_type[pt as usize] ^ sq_bb;
     }
 
-    fn place_piece(&mut self, piece: Piece, sq: Square) {
+    #[inline]
+    fn place_piece(&mut self, piece: Piece, sq: Square, c: Color, pt: PieceType) {
         debug_assert!(self.squares[sq as usize] == NO_PIECE);
         self.squares[sq as usize] = piece;
         let sq_bb = Bitboard::square_bb(sq);
-        self.by_color[piece.color() as usize] = self.by_color[piece.color() as usize] | sq_bb;
-        self.by_type[piece.type_of() as usize] = self.by_type[piece.type_of() as usize] | sq_bb;
+        self.by_color[c as usize] = self.by_color[c as usize] | sq_bb;
+        self.by_type[pt as usize] = self.by_type[pt as usize] | sq_bb;
     }
 
     fn update_castling_rights(&mut self, from: Square, to: Square, _us: Color) {
@@ -820,13 +858,8 @@ impl Board {
 
         let mut our_commoners = self.commoners(us) & occupied;
 
-        if m.move_type() == MoveType::Castling {
+        if !is_capture && piece == make_piece(us, PieceType::Commoner) {
             our_commoners = our_commoners | Bitboard::square_bb(kto);
-        } else if !is_capture {
-            let moving_piece = self.piece_on(from);
-            if moving_piece != NO_PIECE && moving_piece.type_of() == PieceType::Commoner {
-                our_commoners = our_commoners | Bitboard::square_bb(kto);
-            }
         }
 
         if our_commoners.is_empty() {
@@ -906,8 +939,8 @@ pub(crate) fn is_move_trivially_legal(board: &Board, m: Move, state: &StateInfo)
     }
 
     let from = m.from_sq();
-    let pt = board.piece_on(from).type_of();
-    if pt == PieceType::Commoner {
+    let us = board.side_to_move();
+    if board.piece_on(from) == make_piece(us, PieceType::Commoner) {
         return false;
     }
 
@@ -987,6 +1020,7 @@ impl fmt::Display for Board {
 impl Square {
     /// Construct a [`Square`] from its 0–63 index. Returns [`Square::NONE`]
     /// for out-of-range values.
+    #[inline]
     pub fn from_index(idx: i8) -> Square {
         if (0..64).contains(&idx) {
             crate::types::SQUARES[idx as usize]
@@ -996,6 +1030,7 @@ impl Square {
     }
 
     /// Construct a [`Square`] from its 0–63 index as a `u8`.
+    #[inline]
     pub fn from_u8(idx: u8) -> Square {
         Square::from_index(idx as i8)
     }

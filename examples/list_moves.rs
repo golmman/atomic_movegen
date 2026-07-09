@@ -26,6 +26,10 @@ fn main() {
 
     println!("Legal moves ({} total):", moves.len());
     for &m in moves.as_slice() {
-        println!("  {}{}", sq_str(m.from_sq()), sq_str(m.to_sq()));
+        println!(
+            "  {}{}",
+            sq_str(m.from_sq()).unwrap_or("??"),
+            sq_str(m.to_sq()).unwrap_or("??")
+        );
     }
 }

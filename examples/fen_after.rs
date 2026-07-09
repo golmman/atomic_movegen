@@ -20,8 +20,14 @@ fn main() {
     let movestr = &args[2];
     let mut board = Board::from_fen(fen).expect("Invalid FEN");
 
-    let from_sq = parse_sq(&movestr[0..2]);
-    let to_sq = parse_sq(&movestr[2..4]);
+    let from_sq = parse_sq(&movestr[0..2]).unwrap_or_else(|| {
+        eprintln!("Invalid from square: {}", &movestr[0..2]);
+        std::process::exit(1);
+    });
+    let to_sq = parse_sq(&movestr[2..4]).unwrap_or_else(|| {
+        eprintln!("Invalid to square: {}", &movestr[2..4]);
+        std::process::exit(1);
+    });
 
     let mut moves = MoveList::new();
     movegen::generate_legal(&board, &mut moves);
@@ -39,7 +45,11 @@ fn main() {
                 .sort_by_key(|m| (m.from_sq() as u16, m.to_sq() as u16));
             println!("Legal moves ({} total):", moves2.len());
             for &m2 in moves2.as_slice() {
-                println!("  {}{}", sq_str(m2.from_sq()), sq_str(m2.to_sq()));
+                println!(
+                    "  {}{}",
+                    sq_str(m2.from_sq()).unwrap_or("??"),
+                    sq_str(m2.to_sq()).unwrap_or("??")
+                );
             }
             return;
         }

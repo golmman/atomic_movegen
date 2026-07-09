@@ -3,19 +3,19 @@ use atomic_movegen::movegen;
 use atomic_movegen::types::{MoveList, MoveType, PieceType, Square, sq_str};
 
 fn uci(m: atomic_movegen::types::Move) -> String {
-    let from = sq_str(m.from_sq());
-    let to = if m.move_type() == MoveType::Castling {
+    let from = sq_str(m.from_sq()).unwrap_or("??");
+    let to: &str = if m.move_type() == MoveType::Castling {
         match (m.from_sq(), m.to_sq()) {
-            (Square::E1, Square::H1) => "g1".to_string(),
-            (Square::E1, Square::A1) => "c1".to_string(),
-            (Square::E8, Square::H8) => "g8".to_string(),
-            (Square::E8, Square::A8) => "c8".to_string(),
-            _ => sq_str(m.to_sq()),
+            (Square::E1, Square::H1) => "g1",
+            (Square::E1, Square::A1) => "c1",
+            (Square::E8, Square::H8) => "g8",
+            (Square::E8, Square::A8) => "c8",
+            _ => sq_str(m.to_sq()).unwrap_or("??"),
         }
     } else {
-        sq_str(m.to_sq())
+        sq_str(m.to_sq()).unwrap_or("??")
     };
-    let mut s = from + &to;
+    let mut s = String::from(from) + to;
     if m.move_type() == MoveType::Promotion {
         let ch = match m.promotion_type() {
             PieceType::Knight => 'n',

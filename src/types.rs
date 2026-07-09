@@ -252,8 +252,9 @@ impl Rank {
 }
 
 /// Return the file of a square.
+#[inline]
 pub fn file_of(s: Square) -> File {
-    static FILES: [File; 8] = [
+    const FILES: [File; 8] = [
         File::A,
         File::B,
         File::C,
@@ -267,8 +268,9 @@ pub fn file_of(s: Square) -> File {
 }
 
 /// Return the rank of a square.
+#[inline]
 pub fn rank_of(s: Square) -> Rank {
-    static RANKS: [Rank; 8] = [
+    const RANKS: [Rank; 8] = [
         Rank::R1,
         Rank::R2,
         Rank::R3,
@@ -282,6 +284,7 @@ pub fn rank_of(s: Square) -> Rank {
 }
 
 /// Construct a square from a file and rank.
+#[inline]
 pub fn make_square(f: File, r: Rank) -> Square {
     let idx = (r as usize) * 8 + (f as usize);
     SQUARES[idx]
@@ -300,6 +303,7 @@ impl Bitboard {
     pub const EMPTY: Bitboard = Bitboard(0);
 
     /// Returns `true` if no squares are set.
+    #[inline]
     #[must_use]
     pub fn is_empty(self) -> bool {
         self.0 == 0
@@ -313,18 +317,19 @@ impl Bitboard {
 
     /// Return the least-significant (lowest-index) set square.
     ///
-    /// # Panics
-    /// Panics in debug mode if the bitboard is empty.
+    /// Returns [`Square::NONE`] if the bitboard is empty.
+    #[inline]
     #[must_use]
     pub fn lsb(self) -> Square {
-        debug_assert!(!self.is_empty());
-        let idx = self.0.trailing_zeros() as u8;
-        // SAFETY: trailing_zeros() returns 0..63 when self is non-empty.
-        // All discriminants 0..63 are valid Square values.
-        unsafe { std::mem::transmute(idx) }
+        if self.is_empty() {
+            return Square::NONE;
+        }
+        let idx = self.0.trailing_zeros() as usize;
+        SQUARES[idx]
     }
 
     /// Extract and remove the least-significant set square.
+    #[inline]
     pub fn pop_lsb(&mut self) -> Square {
         let sq = self.lsb();
         self.0 &= self.0 - 1;
@@ -339,6 +344,7 @@ impl Bitboard {
 
     /// Return a bitboard with only the given square set.
     /// Returns [`EMPTY`](Self::EMPTY) for [`Square::NONE`].
+    #[inline]
     pub fn square_bb(sq: Square) -> Bitboard {
         if sq == Square::NONE {
             return Bitboard::EMPTY;
@@ -443,6 +449,7 @@ impl Color {
     pub const NB: usize = 2;
 
     /// Return the opposite color.
+    #[inline]
     pub fn flip(self) -> Color {
         match self {
             Color::White => Color::Black,
@@ -471,6 +478,15 @@ impl PieceType {
     pub const NB: usize = 6;
 }
 
+pub(crate) const PIECE_TYPES: [PieceType; 6] = [
+    PieceType::Pawn,
+    PieceType::Knight,
+    PieceType::Bishop,
+    PieceType::Rook,
+    PieceType::Queen,
+    PieceType::Commoner,
+];
+
 /// A colored piece, packed into a single byte.
 ///
 /// Encoding: `(color << 3) | (type + 1)` so that `0` can represent
@@ -480,13 +496,19 @@ pub struct Piece(u8);
 
 impl Piece {
     // Encode as (color << 3) | (pt as u8 + 1) to avoid NO_PIECE = 0 conflict
+    #[inline]
     pub const fn from_parts(color: Color, pt: PieceType) -> Piece {
         Piece(((color as u8) << 3) | ((pt as u8) + 1))
     }
 
     /// Return the color of this piece.
+    ///
+    /// # Panics
+    /// Panics in debug builds if called on [`NO_PIECE`].
+    #[inline]
     #[must_use]
     pub fn color(self) -> Color {
+        debug_assert!(self.0 != 0, "Piece::color called on NO_PIECE");
         if self.0 & 8 == 0 {
             Color::White
         } else {
@@ -495,24 +517,27 @@ impl Piece {
     }
 
     /// Return the piece type.
+    ///
+    /// # Panics
+    /// Panics in debug builds if called on [`NO_PIECE`]. In release builds, an
+    /// out-of-bounds `PIECE_TYPES` lookup panics for [`NO_PIECE`].
+    #[inline]
     #[must_use]
     pub fn type_of(self) -> PieceType {
+        debug_assert!(self.0 != 0, "Piece::type_of called on NO_PIECE");
         let inner = (self.0 & 7) - 1;
-        debug_assert!(
-            inner < 6,
-            "Piece::type_of called with invalid Piece encoding: inner={}",
-            inner
-        );
-        // SAFETY: inner is 0..5 after masking and decrementing a valid Piece.
-        // All discriminants 0..5 are valid PieceType values.
-        unsafe { std::mem::transmute(inner) }
+        PIECE_TYPES[inner as usize]
     }
 
     /// Return the ASCII character for this piece.
     ///
     /// Upper-case for white (`P`, `N`, `B`, `R`, `Q`, `C`), lower-case for black.
+    /// Returns `'.'` for [`NO_PIECE`].
     #[must_use]
     pub fn ascii_char(self) -> char {
+        if self.0 == 0 {
+            return '.';
+        }
         let t = match self.type_of() {
             PieceType::Pawn => 'P',
             PieceType::Knight => 'N',
@@ -556,7 +581,8 @@ pub const B_QUEEN: Piece = Piece::from_parts(Color::Black, PieceType::Queen);
 pub const B_COMMONER: Piece = Piece::from_parts(Color::Black, PieceType::Commoner);
 
 /// Construct a [`Piece`] from a color and piece type.
-pub fn make_piece(color: Color, pt: PieceType) -> Piece {
+#[inline]
+pub const fn make_piece(color: Color, pt: PieceType) -> Piece {
     Piece::from_parts(color, pt)
 }
 
@@ -584,24 +610,23 @@ impl Move {
     pub const NULL: Move = Move(1 + (1 << 6));
 
     /// Return the origin square of this move.
+    #[inline]
     #[must_use]
     pub fn from_sq(self) -> Square {
-        let idx = ((self.0 >> 6) & 0x3f) as u8;
-        // SAFETY: (self.0 >> 6) & 0x3f extracts a 6-bit field (0..63).
-        // All discriminants 0..63 are valid Square values.
-        unsafe { std::mem::transmute(idx) }
+        let idx = ((self.0 >> 6) & 0x3f) as usize;
+        SQUARES[idx]
     }
 
     /// Return the destination square of this move.
+    #[inline]
     #[must_use]
     pub fn to_sq(self) -> Square {
-        let idx = (self.0 & 0x3f) as u8;
-        // SAFETY: self.0 & 0x3f extracts a 6-bit field (0..63).
-        // All discriminants 0..63 are valid Square values.
-        unsafe { std::mem::transmute(idx) }
+        let idx = (self.0 & 0x3f) as usize;
+        SQUARES[idx]
     }
 
     /// Return the move type (normal, promotion, en-passant, castling).
+    #[inline]
     #[must_use]
     pub fn move_type(self) -> MoveType {
         match (self.0 >> 12) & 3 {
@@ -613,9 +638,10 @@ impl Move {
     }
 
     /// Return the promotion piece type (valid only for promotion moves).
+    #[inline]
     #[must_use]
     pub fn promotion_type(self) -> PieceType {
-        static TYPES: [PieceType; 4] = [
+        const TYPES: [PieceType; 4] = [
             PieceType::Knight,
             PieceType::Bishop,
             PieceType::Rook,
@@ -625,29 +651,53 @@ impl Move {
     }
 
     /// Construct a normal (non-promotion) move.
+    ///
+    /// # Panics
+    /// Panics in debug builds if `from` or `to` is [`Square::NONE`].
+    #[inline]
     pub fn make_move(from: Square, to: Square) -> Move {
+        debug_assert!(from != Square::NONE && to != Square::NONE);
         Move(((from as u16) << 6) | (to as u16))
     }
 
-    /// Construct a promotion move. `pt` should be a non-pawn piece type.
+    /// Construct a promotion move. `pt` must be a non-pawn piece type.
+    ///
+    /// # Panics
+    /// Panics if `pt` is not a valid promotion piece (`Knight`, `Bishop`, `Rook`,
+    /// or `Queen`). In debug builds, also panics if `from` or `to` is
+    /// [`Square::NONE`].
+    #[inline]
     pub fn make_promotion(from: Square, to: Square, pt: PieceType) -> Move {
+        debug_assert!(from != Square::NONE && to != Square::NONE);
         let pt_bits = match pt {
             PieceType::Knight => 0u16,
             PieceType::Bishop => 1u16,
             PieceType::Rook => 2u16,
             PieceType::Queen => 3u16,
-            _ => 0u16,
+            PieceType::Pawn | PieceType::Commoner => {
+                panic!("invalid promotion piece: {:?}", pt)
+            }
         };
         Move((pt_bits << 14) | (1 << 12) | ((from as u16) << 6) | (to as u16))
     }
 
     /// Construct an en-passant capture move.
+    ///
+    /// # Panics
+    /// Panics in debug builds if `from` or `to` is [`Square::NONE`].
+    #[inline]
     pub fn make_enpassant(from: Square, to: Square) -> Move {
+        debug_assert!(from != Square::NONE && to != Square::NONE);
         Move((2 << 12) | ((from as u16) << 6) | (to as u16))
     }
 
     /// Construct a castling move.
+    ///
+    /// # Panics
+    /// Panics in debug builds if `from` or `to` is [`Square::NONE`].
+    #[inline]
     pub fn make_castling(from: Square, to: Square) -> Move {
+        debug_assert!(from != Square::NONE && to != Square::NONE);
         Move((3 << 12) | ((from as u16) << 6) | (to as u16))
     }
 }
@@ -770,47 +820,58 @@ impl MoveList {
 
 /// Convert a `Square` to its algebraic notation string (e.g. `Square::E2` -> `"e2"`).
 ///
+/// Returns `None` for [`Square::NONE`].
 /// This is a convenience helper exposed for the crate's own example binaries;
 /// downstream consumers should prefer formatting squares via their own display
 /// logic. Not covered by semantic versioning guarantees.
-pub fn sq_str(sq: Square) -> String {
-    let files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
-    let idx = sq as usize;
-    format!("{}{}", files[idx % 8], (idx / 8 + 1))
+pub fn sq_str(sq: Square) -> Option<&'static str> {
+    const STRS: [&str; 64] = [
+        "a1", "b1", "c1", "d1", "e1", "f1", "g1", "h1", "a2", "b2", "c2", "d2", "e2", "f2", "g2",
+        "h2", "a3", "b3", "c3", "d3", "e3", "f3", "g3", "h3", "a4", "b4", "c4", "d4", "e4", "f4",
+        "g4", "h4", "a5", "b5", "c5", "d5", "e5", "f5", "g5", "h5", "a6", "b6", "c6", "d6", "e6",
+        "f6", "g6", "h6", "a7", "b7", "c7", "d7", "e7", "f7", "g7", "h7", "a8", "b8", "c8", "d8",
+        "e8", "f8", "g8", "h8",
+    ];
+    if sq == Square::NONE {
+        return None;
+    }
+    Some(STRS[sq as usize])
 }
 
 /// Parse a square in algebraic notation (e.g. `"e2"`) into a `Square`.
 ///
+/// Returns `None` for malformed input.
 /// This is a convenience helper exposed for the crate's own example binaries;
 /// downstream consumers should prefer more robust parsers. Not covered by
 /// semantic versioning guarantees.
-pub fn parse_sq(s: &str) -> Square {
-    if s.len() < 2 {
-        return Square::A1;
+pub fn parse_sq(s: &str) -> Option<Square> {
+    if s.len() != 2 || !s.is_ascii() {
+        return None;
     }
-    let file = match s.chars().next().unwrap() {
-        'a' => 0,
-        'b' => 1,
-        'c' => 2,
-        'd' => 3,
-        'e' => 4,
-        'f' => 5,
-        'g' => 6,
-        'h' => 7,
-        _ => 0,
+    let bytes = s.as_bytes();
+    let file = match bytes[0] {
+        b'a' => 0,
+        b'b' => 1,
+        b'c' => 2,
+        b'd' => 3,
+        b'e' => 4,
+        b'f' => 5,
+        b'g' => 6,
+        b'h' => 7,
+        _ => return None,
     };
-    let rank = match s.chars().nth(1).unwrap() {
-        '1' => Rank::R1,
-        '2' => Rank::R2,
-        '3' => Rank::R3,
-        '4' => Rank::R4,
-        '5' => Rank::R5,
-        '6' => Rank::R6,
-        '7' => Rank::R7,
-        '8' => Rank::R8,
-        _ => Rank::R1,
+    let rank = match bytes[1] {
+        b'1' => Rank::R1,
+        b'2' => Rank::R2,
+        b'3' => Rank::R3,
+        b'4' => Rank::R4,
+        b'5' => Rank::R5,
+        b'6' => Rank::R6,
+        b'7' => Rank::R7,
+        b'8' => Rank::R8,
+        _ => return None,
     };
-    make_square(
+    Some(make_square(
         match file {
             0 => File::A,
             1 => File::B,
@@ -823,7 +884,7 @@ pub fn parse_sq(s: &str) -> Square {
             _ => unreachable!(),
         },
         rank,
-    )
+    ))
 }
 
 impl Default for MoveList {

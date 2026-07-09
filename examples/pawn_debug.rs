@@ -32,7 +32,7 @@ fn main() {
         let sq = p.pop_lsb();
         println!(
             "  Pawn at {} (idx={}): file={} rank={}",
-            sq_str(sq),
+            sq_str(sq).unwrap_or("??"),
             sq as u8,
             file_of(sq) as u8,
             rank_of(sq) as u8
@@ -52,8 +52,8 @@ fn main() {
             println!(
                 "  Move #{}: from={} to={} type={:?}",
                 i,
-                sq_str(m.from_sq()),
-                sq_str(m.to_sq()),
+                sq_str(m.from_sq()).unwrap_or("??"),
+                sq_str(m.to_sq()).unwrap_or("??"),
                 m.move_type()
             );
         }
@@ -71,8 +71,8 @@ fn main() {
         if *count > 1 {
             println!(
                 "DUPLICATE: {}{} type={:?} appears {} times",
-                sq_str(Square::from_u8(*from as u8)),
-                sq_str(Square::from_u8(*to as u8)),
+                sq_str(Square::from_u8(*from as u8)).unwrap_or("??"),
+                sq_str(Square::from_u8(*to as u8)).unwrap_or("??"),
                 match mt {
                     0 => "Normal",
                     1 => "Promo",

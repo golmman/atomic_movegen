@@ -19,9 +19,11 @@ cargo run --example verify_perft [MAX_DEPTH]     # run all 41 perft_values.md po
 
 - Follow standard Rust 2024 edition idioms.
 - Use `cargo clippy` and `cargo fmt` before committing.
-- Zero `unsafe` — keep the crate entirely safe Rust.
+- Avoid `unsafe` — try to keep the crate entirely safe Rust.
 - Use `thiserror` for error types, `strum` for enums where appropriate.
 - Name public API types and functions clearly; prefer full words over abbreviations.
 - Keep `pub` surface minimal; document all public items with doc comments.
 - Example binaries go under `examples/`.
 - Tests go in a `#[cfg(test)] mod tests` at the bottom of each module.
+- The most important quality attributes for this library are in order from most to least important:
+  - correctness, performance, maintainability, testability, consistency
