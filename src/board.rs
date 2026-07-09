@@ -965,7 +965,7 @@ impl Board {
             }
         }
 
-        let mut occupied = self.occupied() ^ from;
+        let mut occupied = self.occupied() ^ Bitboard::square_bb(from);
         let mut kto = to;
 
         if m.move_type() == MoveType::Castling {
@@ -1148,25 +1148,6 @@ impl fmt::Display for Board {
         writeln!(f, "EP: {:?}", self.ep_square)?;
         writeln!(f, "FEN: {}", self.fen())?;
         Ok(())
-    }
-}
-
-impl Square {
-    /// Construct a [`Square`] from its 0–63 index. Returns [`Square::NONE`]
-    /// for out-of-range values.
-    #[inline]
-    pub fn from_index(idx: i8) -> Square {
-        if (0..64).contains(&idx) {
-            crate::types::SQUARES[idx as usize]
-        } else {
-            Square::NONE
-        }
-    }
-
-    /// Construct a [`Square`] from its 0–63 index as a `u8`.
-    #[inline]
-    pub fn from_u8(idx: u8) -> Square {
-        Square::from_index(idx as i8)
     }
 }
 

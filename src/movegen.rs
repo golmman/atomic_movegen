@@ -4,13 +4,6 @@ use crate::board::{
 };
 use crate::types::*;
 
-const PROMOTION_PIECES: [PieceType; 4] = [
-    PieceType::Queen,
-    PieceType::Rook,
-    PieceType::Bishop,
-    PieceType::Knight,
-];
-
 /// Generate all pseudo-legal moves for the side to move.
 ///
 /// Pseudo-legal means every move that is legal *except* moves that would
@@ -29,63 +22,69 @@ pub fn generate_pseudo_legal(board: &Board, moves: &mut MoveList) {
         generate_pawn_moves_for(board, us, them, from, moves);
     }
 
-    let mut knights = board.pieces_color_pt(us, PieceType::Knight);
-    while !knights.is_empty() {
-        let from = knights.pop_lsb();
-        let attacks = attacks::knight_attacks(from) & target;
-        let mut a = attacks;
-        while !a.is_empty() {
-            let to = a.pop_lsb();
-            moves.push(Move::make_move(from, to));
-        }
-    }
-
-    let mut bishops = board.pieces_color_pt(us, PieceType::Bishop);
-    while !bishops.is_empty() {
-        let from = bishops.pop_lsb();
-        let attacks = attacks::bishop_attacks(from, occupied) & target;
-        let mut a = attacks;
-        while !a.is_empty() {
-            let to = a.pop_lsb();
-            moves.push(Move::make_move(from, to));
-        }
-    }
-
-    let mut rooks = board.pieces_color_pt(us, PieceType::Rook);
-    while !rooks.is_empty() {
-        let from = rooks.pop_lsb();
-        let attacks = attacks::rook_attacks(from, occupied) & target;
-        let mut a = attacks;
-        while !a.is_empty() {
-            let to = a.pop_lsb();
-            moves.push(Move::make_move(from, to));
-        }
-    }
-
-    let mut queens = board.pieces_color_pt(us, PieceType::Queen);
-    while !queens.is_empty() {
-        let from = queens.pop_lsb();
-        let attacks = attacks::queen_attacks(from, occupied) & target;
-        let mut a = attacks;
-        while !a.is_empty() {
-            let to = a.pop_lsb();
-            moves.push(Move::make_move(from, to));
-        }
-    }
-
-    let mut commoners = board.pieces_color_pt(us, PieceType::Commoner);
-    while !commoners.is_empty() {
-        let from = commoners.pop_lsb();
-        let attacks = attacks::king_attacks(from) & target;
-        let mut a = attacks;
-        while !a.is_empty() {
-            let to = a.pop_lsb();
-            moves.push(Move::make_move(from, to));
-        }
-    }
+    generate_piece_moves(
+        board,
+        us,
+        target,
+        PieceType::Knight,
+        attacks::knight_attacks,
+        moves,
+    );
+    generate_piece_moves(
+        board,
+        us,
+        target,
+        PieceType::Bishop,
+        |sq| attacks::bishop_attacks(sq, occupied),
+        moves,
+    );
+    generate_piece_moves(
+        board,
+        us,
+        target,
+        PieceType::Rook,
+        |sq| attacks::rook_attacks(sq, occupied),
+        moves,
+    );
+    generate_piece_moves(
+        board,
+        us,
+        target,
+        PieceType::Queen,
+        |sq| attacks::queen_attacks(sq, occupied),
+        moves,
+    );
+    generate_piece_moves(
+        board,
+        us,
+        target,
+        PieceType::Commoner,
+        attacks::king_attacks,
+        moves,
+    );
 
     // Castling moves
     generate_castling(board, us, moves);
+}
+
+#[inline(always)]
+fn generate_piece_moves(
+    board: &Board,
+    us: Color,
+    target: Bitboard,
+    pt: PieceType,
+    attacks: impl Fn(Square) -> Bitboard,
+    moves: &mut MoveList,
+) {
+    let mut pieces = board.pieces_color_pt(us, pt);
+    while !pieces.is_empty() {
+        let from = pieces.pop_lsb();
+        let mut a = attacks(from) & target;
+        while !a.is_empty() {
+            let to = a.pop_lsb();
+            moves.push(Move::make_move(from, to));
+        }
+    }
 }
 
 fn generate_pawn_moves_for(

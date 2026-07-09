@@ -213,6 +213,25 @@ pub(crate) const SQUARES: [Square; 64] = [
     Square::H8,
 ];
 
+impl Square {
+    /// Construct a [`Square`] from its 0–63 index. Returns [`Square::NONE`]
+    /// for out-of-range values.
+    #[inline]
+    pub fn from_index(idx: i8) -> Square {
+        Square::from_u8(idx as u8)
+    }
+
+    /// Construct a [`Square`] from its 0–63 index as a `u8`.
+    #[inline]
+    pub fn from_u8(idx: u8) -> Square {
+        if (0..64).contains(&idx) {
+            SQUARES[idx as usize]
+        } else {
+            Square::NONE
+        }
+    }
+}
+
 /// A file (column) on a chessboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
@@ -336,12 +355,6 @@ impl Bitboard {
         sq
     }
 
-    /// Returns `true` if more than one square is set.
-    #[must_use]
-    pub fn more_than_one(self) -> bool {
-        self.0 & (self.0 - 1) != 0
-    }
-
     /// Return a bitboard with only the given square set.
     /// Returns [`EMPTY`](Self::EMPTY) for [`Square::NONE`].
     #[inline]
@@ -392,48 +405,6 @@ impl ops::Shr<usize> for Bitboard {
     type Output = Bitboard;
     fn shr(self, rhs: usize) -> Bitboard {
         Bitboard(self.0 >> rhs)
-    }
-}
-
-impl ops::BitAnd<Square> for Bitboard {
-    type Output = Bitboard;
-    fn bitand(self, rhs: Square) -> Bitboard {
-        self & Bitboard::square_bb(rhs)
-    }
-}
-
-impl ops::BitOr<Square> for Bitboard {
-    type Output = Bitboard;
-    fn bitor(self, rhs: Square) -> Bitboard {
-        self | Bitboard::square_bb(rhs)
-    }
-}
-
-impl ops::BitXor<Square> for Bitboard {
-    type Output = Bitboard;
-    fn bitxor(self, rhs: Square) -> Bitboard {
-        self ^ Bitboard::square_bb(rhs)
-    }
-}
-
-impl ops::Sub<Square> for Bitboard {
-    type Output = Bitboard;
-    fn sub(self, rhs: Square) -> Bitboard {
-        self & !Bitboard::square_bb(rhs)
-    }
-}
-
-impl ops::BitAnd<Square> for Square {
-    type Output = Bitboard;
-    fn bitand(self, rhs: Square) -> Bitboard {
-        Bitboard::square_bb(self) & rhs
-    }
-}
-
-impl ops::BitOr<Square> for Square {
-    type Output = Bitboard;
-    fn bitor(self, rhs: Square) -> Bitboard {
-        Bitboard::square_bb(self) | rhs
     }
 }
 
@@ -586,6 +557,14 @@ pub const fn make_piece(color: Color, pt: PieceType) -> Piece {
     Piece::from_parts(color, pt)
 }
 
+/// The piece types a pawn may promote to, ordered by promotion bit encoding.
+pub const PROMOTION_PIECES: [PieceType; 4] = [
+    PieceType::Queen,
+    PieceType::Rook,
+    PieceType::Bishop,
+    PieceType::Knight,
+];
+
 /// The type of a chess move (normal, promotion, en-passant, castling).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -606,8 +585,6 @@ pub struct Move(u16);
 impl Move {
     /// A sentinel value representing "no move".
     pub const NONE: Move = Move(0);
-    /// A sentinel null move (from_sq=1, to_sq=1).
-    pub const NULL: Move = Move(1 + (1 << 6));
 
     /// Return the origin square of this move.
     #[inline]
@@ -641,13 +618,7 @@ impl Move {
     #[inline]
     #[must_use]
     pub fn promotion_type(self) -> PieceType {
-        const TYPES: [PieceType; 4] = [
-            PieceType::Knight,
-            PieceType::Bishop,
-            PieceType::Rook,
-            PieceType::Queen,
-        ];
-        TYPES[((self.0 >> 14) & 3) as usize]
+        PROMOTION_PIECES[((self.0 >> 14) & 3) as usize]
     }
 
     /// Construct a normal (non-promotion) move.
@@ -669,15 +640,11 @@ impl Move {
     #[inline]
     pub fn make_promotion(from: Square, to: Square, pt: PieceType) -> Move {
         debug_assert!(from != Square::NONE && to != Square::NONE);
-        let pt_bits = match pt {
-            PieceType::Knight => 0u16,
-            PieceType::Bishop => 1u16,
-            PieceType::Rook => 2u16,
-            PieceType::Queen => 3u16,
-            PieceType::Pawn | PieceType::Commoner => {
-                panic!("invalid promotion piece: {:?}", pt)
-            }
-        };
+        let pt_bits = PROMOTION_PIECES
+            .iter()
+            .position(|&p| p == pt)
+            .unwrap_or_else(|| panic!("invalid promotion piece: {:?}", pt))
+            as u16;
         Move((pt_bits << 14) | (1 << 12) | ((from as u16) << 6) | (to as u16))
     }
 
@@ -699,43 +666,6 @@ impl Move {
     pub fn make_castling(from: Square, to: Square) -> Move {
         debug_assert!(from != Square::NONE && to != Square::NONE);
         Move((3 << 12) | ((from as u16) << 6) | (to as u16))
-    }
-}
-
-/// A direction on the chessboard (used for stepping computations).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
-    North = 8,
-    East = 1,
-    South = -8,
-    West = -1,
-    NorthEast = 9,
-    NorthWest = 7,
-    SouthEast = -7,
-    SouthWest = -9,
-}
-
-impl ops::Add<Direction> for Square {
-    type Output = Square;
-    fn add(self, rhs: Direction) -> Square {
-        let idx = (self as i16) + (rhs as i16);
-        if (0..64).contains(&idx) {
-            SQUARES[idx as usize]
-        } else {
-            Square::NONE
-        }
-    }
-}
-
-impl ops::Sub<Direction> for Square {
-    type Output = Square;
-    fn sub(self, rhs: Direction) -> Square {
-        let idx = (self as i16) - (rhs as i16);
-        if (0..64).contains(&idx) {
-            SQUARES[idx as usize]
-        } else {
-            Square::NONE
-        }
     }
 }
 
