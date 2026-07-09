@@ -1035,6 +1035,7 @@ mod tests {
 
     #[test]
     fn test_checkers() {
+        crate::attacks::init();
         // Position where white queen gives check to black commoner
         let fen = "4k3/8/8/8/8/8/8/4Q2K b - - 0 1";
         let board = Board::from_fen(fen).unwrap();
@@ -1044,6 +1045,7 @@ mod tests {
 
     #[test]
     fn test_pinned() {
+        crate::attacks::init();
         // Black rook on e4, white pawn on e3, white commoner on e2 - pawn is pinned
         let fen = "4k3/8/8/8/4r3/4P3/4K3/8 w - - 0 1";
         let board = Board::from_fen(fen).unwrap();
@@ -1053,6 +1055,7 @@ mod tests {
 
     #[test]
     fn test_do_undo_restores_state() {
+        crate::attacks::init();
         let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
         let mut board = Board::from_fen(fen).unwrap();
         let orig_fen = board.fen();
@@ -1068,6 +1071,7 @@ mod tests {
 
     #[test]
     fn test_do_undo_capture_restores() {
+        crate::attacks::init();
         let fen2 = "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2";
         let mut board2 = Board::from_fen(fen2).unwrap();
         let orig_fen = board2.fen();
@@ -1082,6 +1086,7 @@ mod tests {
 
     #[test]
     fn test_self_explosion_legal_with_surviving_commoner() {
+        crate::attacks::init();
         // White commoners on d3 AND e1; white rook on d5, black pawn on d4.
         // Rook takes pawn on d4 — blast zone (c3-e5) includes d3, destroying
         // the commoner on d3, but the commoner on e1 survives.
@@ -1104,6 +1109,7 @@ mod tests {
 
     #[test]
     fn test_self_explosion_illegal_last_commoner() {
+        crate::attacks::init();
         // White commoner ONLY on d3; white rook on d5, black pawn on d4.
         // Rook takes pawn on d4 — blast zone includes d3, destroying the
         // LAST (only) commoner → self-explosion, illegal.
@@ -1121,6 +1127,7 @@ mod tests {
 
     #[test]
     fn test_blast_zone_removes_pieces() {
+        crate::attacks::init();
         // White rook on e4, black knight on e5, black pawn on f5
         // Rook captures knight — blast zone around e5 (d4-f4, d5-f5, d6-f6)
         // removes: rook (non-pawn capturer), knight, but NOT the pawn on f5
@@ -1146,6 +1153,7 @@ mod tests {
 
     #[test]
     fn test_pinned_piece_capture_explodes_pinner() {
+        crate::attacks::init();
         // Black rook on e5 (pinning), white rook on e3, black pawn on e4,
         // white commoner on e1. The rook on e3 is pinned by the rook on e5
         // (both on e-file, commoner on e1 behind).
@@ -1167,6 +1175,7 @@ mod tests {
 
     #[test]
     fn test_en_passant_blast() {
+        crate::attacks::init();
         // White pawn on d5, black pawn on c5 (just double-pushed), black knight on d4
         // White plays dxc6 en passant — blast at c6
         let fen2 = "4k3/8/8/2Pp4/8/8/8/4K3 w KQkq d6 0 2";

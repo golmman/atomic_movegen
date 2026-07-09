@@ -263,6 +263,7 @@ mod tests {
 
     #[test]
     fn test_starting_position_move_count() {
+        crate::attacks::init();
         let board = Board::new();
         let mut moves = MoveList::new();
         generate_pseudo_legal(&board, &mut moves);
@@ -274,6 +275,7 @@ mod tests {
 
     #[test]
     fn test_knight_moves_start() {
+        crate::attacks::init();
         let board = Board::new();
         let mut moves = MoveList::new();
         generate_pseudo_legal(&board, &mut moves);
