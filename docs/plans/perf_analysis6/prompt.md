@@ -48,9 +48,10 @@ wait
 
 ---
 
-Create a plan for the implementation of item 1 of `docs/plans/perf_analysis5/analysis.md`.
+Create a plan for the implementation of item 1 of `docs/plans/perf_analysis6/analysis.md`.
 Tests against the baseline should be done via `cargo run --release --example verify_perft`.
-Store the plan in `docs/plans/perf_analysis5/plan1.md`
+The plan should include a final task that documents the things learned during implementation (problems, surprises, workarounds etc.) with a file `report1.md` so the implementation of the next plan can pick up from the previous one.
+Store the plan in `docs/plans/perf_analysis6/plan1.md`.
 
 ---
 
