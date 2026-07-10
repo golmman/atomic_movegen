@@ -3,11 +3,12 @@
 //! Replaces the ray-casting loop with a constant-time table lookup
 //! using precomputed magic multipliers.
 //!
-//! Tables are initialized once at first use via `OnceLock`; masks,
+//! Tables are precomputed as compile-time `static` arrays; masks,
 //! magic numbers, and index bits are `const` arrays (zero indirection).
 
+#![allow(long_running_const_eval)]
+
 use crate::types::*;
-use std::sync::OnceLock;
 
 const ROOK_MAGICS: [u64; 64] = [
     0xa8002c000108020,
@@ -362,16 +363,22 @@ pub(crate) const BISHOP_ENTRIES: [MagicEntry; 64] = compute_bishop_entries();
 /// Walks along each direction from `sq` until hitting the edge of the board
 /// or an occupied square (inclusive). Used as the reference implementation
 /// for building magic bitboard tables.
-pub(crate) fn sliding_attack(directions: &[(i8, i8)], sq: Square, occupied: Bitboard) -> Bitboard {
+pub(crate) const fn sliding_attack(
+    directions: &[(i8, i8)],
+    sq: Square,
+    occupied: Bitboard,
+) -> Bitboard {
     let mut result = 0u64;
     let s_idx = sq as i8;
     let sf = s_idx % 8;
     let sr = s_idx / 8;
 
-    for &(df, dr) in directions {
+    let mut i = 0;
+    while i < directions.len() {
+        let (df, dr) = directions[i];
         let mut f = sf + df;
         let mut r = sr + dr;
-        while (0..8).contains(&f) && (0..8).contains(&r) {
+        while f >= 0 && f < 8 && r >= 0 && r < 8 {
             let idx = (r * 8 + f) as usize;
             result |= 1u64 << idx;
             if occupied.0 & (1u64 << idx) != 0 {
@@ -380,108 +387,98 @@ pub(crate) fn sliding_attack(directions: &[(i8, i8)], sq: Square, occupied: Bitb
             f += df;
             r += dr;
         }
+        i += 1;
     }
     Bitboard(result)
 }
 
-/// Build a magic-bitboard attack table for a given piece type.
-///
-/// Enumerates all occupancy subsets of each square's mask, computes the
-/// reference attack via [`sliding_attack`], and stores the result at the
-/// magic-indexed position in the flat table.
-fn build_magic_table(
-    directions: &[(i8, i8)],
-    masks: &[Bitboard; 64],
-    magics: &[u64; 64],
-    index_bits: &[u32; 64],
-    entries: &[MagicEntry; 64],
-    total_size: usize,
-) -> Box<[Bitboard]> {
-    let mut table = vec![Bitboard::EMPTY; total_size].into_boxed_slice();
+/// Build the precomputed rook attack table at compile time.
+const fn build_rook_table() -> [Bitboard; ROOK_TABLE_SIZE] {
+    let mut table = [Bitboard::EMPTY; ROOK_TABLE_SIZE];
+    let mut sq: usize = 0;
+    while sq < 64 {
+        let e = ROOK_ENTRIES[sq];
+        let mask = e.mask.0;
+        let magic = e.magic;
+        let shift = e.shift;
+        let offset = e.offset as usize;
+        let size = 1usize << (64 - shift);
+        let sq_enum = SQUARES[sq];
 
-    for sq in 0..64 {
-        let mask = masks[sq].0;
-        let magic = magics[sq];
-        let shift = 64 - index_bits[sq];
-        let offset = entries[sq].offset as usize;
-        let size_check = 1usize << index_bits[sq];
-        let sq_enum = Square::from_u8(sq as u8);
-
-        // Enumerate all subsets of the mask using the carry-rippler trick.
-        let mut subset = 0u64;
-        let mut count = 0usize;
+        let mut subset: u64 = 0;
+        let mut count: usize = 0;
         loop {
-            let attacks = sliding_attack(directions, sq_enum, Bitboard(subset));
             let idx = (subset.wrapping_mul(magic) >> shift) as usize;
-            debug_assert!(
-                idx < size_check,
-                "index {} out of bounds for square {}",
-                idx,
-                sq
-            );
-            table[offset + idx] = attacks;
+            assert!(idx < size, "index out of bounds");
+            table[offset + idx] = sliding_attack(&ROOK_DIRS, sq_enum, Bitboard(subset));
             count += 1;
 
-            // Carry-rippler: compute next subset
             subset = subset.wrapping_sub(mask) & mask;
             if subset == 0 {
                 break;
             }
         }
-
-        debug_assert_eq!(
-            count, size_check,
-            "wrong number of subsets for square {}",
-            sq
-        );
+        assert!(count == size, "wrong number of subsets");
+        sq += 1;
     }
-
     table
 }
 
-static ROOK_TABLE: OnceLock<&[Bitboard]> = OnceLock::new();
-static BISHOP_TABLE: OnceLock<&[Bitboard]> = OnceLock::new();
+/// Build the precomputed bishop attack table at compile time.
+const fn build_bishop_table() -> [Bitboard; BISHOP_TABLE_SIZE] {
+    let mut table = [Bitboard::EMPTY; BISHOP_TABLE_SIZE];
+    let mut sq: usize = 0;
+    while sq < 64 {
+        let e = BISHOP_ENTRIES[sq];
+        let mask = e.mask.0;
+        let magic = e.magic;
+        let shift = e.shift;
+        let offset = e.offset as usize;
+        let size = 1usize << (64 - shift);
+        let sq_enum = SQUARES[sq];
 
-/// Initialize the magic attack tables. Must be called before any lookup.
-pub(crate) fn init() {
-    _ = ROOK_TABLE.set(Box::leak(build_magic_table(
-        &ROOK_DIRS,
-        &ROOK_MASKS,
-        &ROOK_MAGICS,
-        &ROOK_INDEX_BITS,
-        &ROOK_ENTRIES,
-        ROOK_TABLE_SIZE,
-    )));
-    _ = BISHOP_TABLE.set(Box::leak(build_magic_table(
-        &BISHOP_DIRS,
-        &BISHOP_MASKS,
-        &BISHOP_MAGICS,
-        &BISHOP_INDEX_BITS,
-        &BISHOP_ENTRIES,
-        BISHOP_TABLE_SIZE,
-    )));
+        let mut subset: u64 = 0;
+        let mut count: usize = 0;
+        loop {
+            let idx = (subset.wrapping_mul(magic) >> shift) as usize;
+            assert!(idx < size, "index out of bounds");
+            table[offset + idx] = sliding_attack(&BISHOP_DIRS, sq_enum, Bitboard(subset));
+            count += 1;
+
+            subset = subset.wrapping_sub(mask) & mask;
+            if subset == 0 {
+                break;
+            }
+        }
+        assert!(count == size, "wrong number of subsets");
+        sq += 1;
+    }
+    table
 }
+
+/// Precomputed rook attack table. Indexed by `ROOK_ENTRIES[sq].offset + magic_index`.
+static ROOK_TABLE: [Bitboard; ROOK_TABLE_SIZE] = build_rook_table();
+
+/// Precomputed bishop attack table. Indexed by `BISHOP_ENTRIES[sq].offset + magic_index`.
+static BISHOP_TABLE: [Bitboard; BISHOP_TABLE_SIZE] = build_bishop_table();
+
+/// No-op; magic tables are precomputed at compile time.
+pub(crate) fn init() {}
 
 /// Return the attack set for a bishop on `sq` given the `occupied` board.
 #[inline(always)]
 pub fn bishop_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
-    let table = BISHOP_TABLE
-        .get()
-        .expect("magic tables not initialized — call attacks::init()");
     let e = &BISHOP_ENTRIES[sq as usize];
     let idx = ((occupied & e.mask).0.wrapping_mul(e.magic)) >> e.shift;
-    table[e.offset as usize + idx as usize]
+    BISHOP_TABLE[e.offset as usize + idx as usize]
 }
 
 /// Return the attack set for a rook on `sq` given the `occupied` board.
 #[inline(always)]
 pub fn rook_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
-    let table = ROOK_TABLE
-        .get()
-        .expect("magic tables not initialized — call attacks::init()");
     let e = &ROOK_ENTRIES[sq as usize];
     let idx = ((occupied & e.mask).0.wrapping_mul(e.magic)) >> e.shift;
-    table[e.offset as usize + idx as usize]
+    ROOK_TABLE[e.offset as usize + idx as usize]
 }
 
 /// Return the attack set for a queen (bishop + rook).

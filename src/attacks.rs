@@ -243,8 +243,8 @@ pub fn pawn_attacks(c: Color, sq: Square) -> Bitboard {
 
 /// Initialize the magic bitboard attack tables.
 ///
-/// Must be called before any call to `bishop_attacks`, `rook_attacks`, or
-/// `queen_attacks`. Safe to call multiple times — subsequent calls are no-ops.
+/// This function is now a no-op; attack tables are precomputed at compile time.
+/// It is kept for backwards compatibility and remains safe to call multiple times.
 pub fn init() {
     crate::magic::init();
 }
