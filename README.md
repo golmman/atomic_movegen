@@ -15,6 +15,13 @@ reference implementation.
 
 ## Usage (library)
 
+Add `atomic-movegen` to your `Cargo.toml`:
+
+```toml
+[dependencies]
+atomic-movegen = "1.0.0"
+```
+
 ```rust
 use atomic_movegen::Board;
 use atomic_movegen::perft;
