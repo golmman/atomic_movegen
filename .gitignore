@@ -17,6 +17,9 @@ target
 perf.data
 perf.data.old
 
+# macos samples
+perft_profile.txt
+
 # Library crate — Cargo.lock should not be committed
 Cargo.lock
 
