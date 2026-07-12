@@ -33,3 +33,4 @@ cargo test --test verify_moves                   # verify generated moves agains
 - The most important quality attributes for this library are in order from most to least important:
   - correctness, performance, maintainability, testability, consistency
 - only use reading `git` commands, never writing ones (no `git add`, `git rm`, `git commit`, etc.)
+- the rules of atomic chess are proven to be correctly implemented by this library, rely on the existing tests
