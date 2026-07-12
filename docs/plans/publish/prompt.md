@@ -21,3 +21,8 @@ My question: i need the different `[profile.*]` sections to distinguish between 
 
 decisions:
 * try to replace the unsafe
+
+---
+
+Review if this lib is ready to be published.
+Note that we bumped the version to 2.0.0 after some breaking changes: `docs/plans/feedback/report.md`
