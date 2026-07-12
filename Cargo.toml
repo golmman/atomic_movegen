@@ -4,11 +4,11 @@ version = "2.0.0"
 edition = "2024"
 description = "Legal move generation for atomic chess."
 readme = "README.md"
-keywords = ["chess"]
+keywords = ["chess", "movegen", "perft"]
 license = "MIT"
 repository = "https://github.com/golmman/atomic_movegen"
 rust-version = "1.85"
-exclude = ["Fairy-Stockfish/**", "docs/**"]
+exclude = ["Fairy-Stockfish/**", "docs/**", "AGENTS.md", ".gitignore", ".gitmodules", "tests/gen_moves.py", "perft_profile.txt"]
 
 [dependencies]
 
