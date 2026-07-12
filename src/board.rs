@@ -113,6 +113,8 @@ pub struct StateInfo {
     pub cap_piece: Piece,
     /// The piece type of the piece captured on `cap_sq`.
     pub cap_pt: PieceType,
+    /// Zobrist hash before the move (undo data).
+    pub hash: u64,
 }
 
 impl Default for StateInfo {
@@ -137,6 +139,7 @@ impl StateInfo {
             cap_sq: None,
             cap_piece: NO_PIECE,
             cap_pt: PieceType::Pawn,
+            hash: 0,
         }
     }
 }
@@ -156,6 +159,7 @@ pub struct Board {
     ep_square: Option<Square>,
     rule50: u16,
     game_ply: u16,
+    hash: u64,
 }
 
 pub(crate) const WK_CASTLE: u8 = 1;
@@ -248,8 +252,10 @@ impl Board {
                     let sq = Square::from_u8(sq_idx as u8);
                     squares[sq_idx] = piece;
                     let bb = Bitboard::square_bb(sq);
-                    by_color[piece.color() as usize] = by_color[piece.color() as usize] | bb;
-                    by_type[piece.type_of() as usize] = by_type[piece.type_of() as usize] | bb;
+                    by_color[piece.color().unwrap() as usize] =
+                        by_color[piece.color().unwrap() as usize] | bb;
+                    by_type[piece.type_of().unwrap() as usize] =
+                        by_type[piece.type_of().unwrap() as usize] | bb;
                     col += 1;
                 } else {
                     return Err(FenError::InvalidPlacement(format!(
@@ -366,14 +372,18 @@ impl Board {
         };
 
         let game_ply = if parts.len() > 5 {
-            parts[5]
+            let fm = parts[5]
                 .parse::<u16>()
-                .map_err(|e| FenError::ParseInt(e.to_string()))?
+                .map_err(|e| FenError::ParseInt(e.to_string()))?;
+            if fm == 0 {
+                return Err(FenError::ParseInt(parts[5].to_string()));
+            }
+            2 * (fm - 1) + if side_to_move == Color::White { 1 } else { 2 }
         } else {
-            1
+            if side_to_move == Color::White { 1 } else { 2 }
         };
 
-        Ok(Board {
+        let mut board = Board {
             squares,
             by_color,
             by_type,
@@ -382,7 +392,10 @@ impl Board {
             ep_square,
             rule50,
             game_ply,
-        })
+            hash: 0,
+        };
+        board.recompute_hash();
+        Ok(board)
     }
 
     /// Serialize the board to a FEN string.
@@ -448,9 +461,34 @@ impl Board {
         fen.push(' ');
         fen.push_str(&self.rule50.to_string());
         fen.push(' ');
-        fen.push_str(&self.game_ply.to_string());
+        fen.push_str(&self.fullmove_number().to_string());
 
         fen
+    }
+
+    /// Compute the Zobrist hash for the current board state without mutating `self`.
+    pub(crate) fn recomputed_hash(&self) -> u64 {
+        let mut h = 0u64;
+        for sq_idx in 0..64 {
+            let piece = self.squares[sq_idx];
+            if piece != NO_PIECE {
+                let raw = piece.raw() as usize;
+                h ^= crate::zobrist::ZOBRIST.piece[sq_idx][raw];
+            }
+        }
+        if self.side_to_move == Color::Black {
+            h ^= crate::zobrist::ZOBRIST.side;
+        }
+        h ^= crate::zobrist::ZOBRIST.castling[self.castling_rights as usize];
+        if let Some(sq) = self.ep_square {
+            h ^= crate::zobrist::ZOBRIST.ep[crate::types::file_of(sq) as usize];
+        }
+        h
+    }
+
+    /// Recompute the Zobrist hash from the current board state.
+    pub(crate) fn recompute_hash(&mut self) {
+        self.hash = self.recomputed_hash();
     }
 
     /// Return the piece on a square (or [`NO_PIECE`] if empty or `Square::NONE`).
@@ -519,11 +557,83 @@ impl Board {
         self.ep_square
     }
 
+    /// Return the half-move clock (plies since the last pawn move or capture).
+    #[inline]
+    #[must_use]
+    pub fn rule50(&self) -> u16 {
+        self.rule50
+    }
+
+    /// Return the raw per-ply move counter (1-based).
+    #[inline]
+    #[must_use]
+    pub fn game_ply(&self) -> u16 {
+        self.game_ply
+    }
+
+    /// Return the fullmove number as it appears in FEN output.
+    #[inline]
+    #[must_use]
+    pub fn fullmove_number(&self) -> u16 {
+        1 + (self.game_ply.saturating_sub(1)) / 2
+    }
+
+    /// Return the current Zobrist hash of the position.
+    ///
+    /// The hash includes pieces, side to move, castling rights, and en-passant
+    /// file, but not the half-move clock or fullmove counter.
+    #[inline]
+    #[must_use]
+    pub fn hash(&self) -> u64 {
+        self.hash
+    }
+
     /// Return the bitboard of commoners (king-like pseudo-royal pieces) for a color.
     #[inline(always)]
     #[must_use]
     pub fn commoners(&self, c: Color) -> Bitboard {
         self.pieces_color_pt(c, PieceType::Commoner)
+    }
+
+    /// Return the game outcome from the side-to-move perspective, if the game
+    /// is over.
+    ///
+    /// Commoner extinction for the side to move is a loss, extinction of the
+    /// opponent is a win, the 50-move rule (100 plies) is a draw, and a position
+    /// with no legal moves is a draw by stalemate.
+    #[must_use]
+    pub fn outcome(&self) -> Option<Outcome> {
+        let us = self.side_to_move;
+        if self.commoners(us).is_empty() {
+            return Some(Outcome::Loss);
+        }
+        if self.commoners(us.flip()).is_empty() {
+            return Some(Outcome::Win);
+        }
+        if self.rule50 >= 100 {
+            return Some(Outcome::Draw);
+        }
+        let mut moves = MoveList::new();
+        crate::movegen::generate_legal(self, &mut moves);
+        if moves.is_empty() {
+            return Some(Outcome::Draw);
+        }
+        None
+    }
+
+    /// Returns `true` if the game is over.
+    #[inline]
+    #[must_use]
+    pub fn is_terminal(&self) -> bool {
+        self.outcome().is_some()
+    }
+
+    /// Return `true` if `m` is a capture on this board.
+    #[inline]
+    #[must_use]
+    pub fn is_capture(&self, m: Move) -> bool {
+        m.move_type() == MoveType::EnPassant
+            || (m.move_type() != MoveType::Castling && self.piece_on(m.to_sq()) != NO_PIECE)
     }
 
     /// Return all pieces that attack `sq` on the given occupancy.
@@ -676,6 +786,7 @@ impl Board {
     /// [`generate_legal`](crate::movegen::generate_legal) which creates its own
     /// populated `StateInfo`.
     pub fn do_move(&mut self, m: Move, state: &mut StateInfo) {
+        state.hash = self.hash;
         state.castling_rights = self.castling_rights;
         state.ep_square = self.ep_square;
         state.rule50 = self.rule50;
@@ -688,7 +799,7 @@ impl Board {
         let from = m.from_sq();
         let to = m.to_sq();
         let piece = self.squares[from as usize];
-        let pt = piece.type_of();
+        let pt = piece.type_of().unwrap();
         let is_capture = !self.empty(to);
         let is_capture_or_ep = is_capture || m.move_type() == MoveType::EnPassant;
 
@@ -716,6 +827,7 @@ impl Board {
             self.rule50 += 1;
             self.side_to_move = them;
             self.game_ply += 1;
+            self.update_hash_state_transition(state);
             return;
         }
 
@@ -725,13 +837,13 @@ impl Board {
                 Color::Black => Square::from_index(to as i8 + 8),
             };
             let cap_piece = self.squares[ep_cap as usize];
-            let cap_pt = cap_piece.type_of();
+            let cap_pt = cap_piece.type_of().unwrap();
             state.captured[state.captured_count as usize] = (ep_cap, cap_piece);
             state.captured_count += 1;
             self.remove_piece(ep_cap, them, cap_pt);
         } else if is_capture {
             let cap_piece = self.squares[to as usize];
-            let cap_pt = cap_piece.type_of();
+            let cap_pt = cap_piece.type_of().unwrap();
             state.cap_sq = Some(to);
             state.cap_piece = cap_piece;
             state.cap_pt = cap_pt;
@@ -761,8 +873,8 @@ impl Board {
                 let bsq = b.pop_lsb();
                 let bpiece = self.squares[bsq as usize];
                 if bpiece != NO_PIECE {
-                    let bc = bpiece.color();
-                    let bpt = bpiece.type_of();
+                    let bc = bpiece.color().unwrap();
+                    let bpt = bpiece.type_of().unwrap();
                     state.captured[state.captured_count as usize] = (bsq, bpiece);
                     state.captured_count += 1;
                     self.remove_piece(bsq, bc, bpt);
@@ -830,6 +942,7 @@ impl Board {
 
         self.side_to_move = them;
         self.game_ply += 1;
+        self.update_hash_state_transition(state);
     }
 
     /// Unmake `m`, restoring the board to its state before [`do_move`](Self::do_move).
@@ -863,6 +976,7 @@ impl Board {
                 PieceType::Rook,
             );
             self.game_ply -= 1;
+            self.hash = state.hash;
             return;
         }
 
@@ -870,8 +984,8 @@ impl Board {
         while i > 0 {
             i -= 1;
             let (sq, piece) = state.captured[i as usize];
-            let c = piece.color();
-            let pt = piece.type_of();
+            let c = piece.color().unwrap();
+            let pt = piece.type_of().unwrap();
             self.place_piece(piece, sq, c, pt);
         }
 
@@ -881,7 +995,7 @@ impl Board {
             self.place_piece(pawn, from, us, PieceType::Pawn);
         } else {
             let piece = self.squares[to as usize];
-            let pt = piece.type_of();
+            let pt = piece.type_of().unwrap();
             self.move_piece(to, from, piece, us, pt);
         }
 
@@ -891,11 +1005,16 @@ impl Board {
         }
 
         self.game_ply -= 1;
+        self.hash = state.hash;
     }
 
     #[inline]
     fn move_piece(&mut self, from: Square, to: Square, piece: Piece, c: Color, pt: PieceType) {
         debug_assert!(piece != NO_PIECE);
+        let raw = piece.raw() as usize;
+        self.hash ^= crate::zobrist::ZOBRIST.piece[from as usize][raw];
+        self.hash ^= crate::zobrist::ZOBRIST.piece[to as usize][raw];
+
         self.squares[to as usize] = piece;
         self.squares[from as usize] = NO_PIECE;
 
@@ -909,6 +1028,10 @@ impl Board {
     #[inline]
     fn remove_piece(&mut self, sq: Square, c: Color, pt: PieceType) {
         debug_assert!(self.squares[sq as usize] != NO_PIECE);
+        let piece = self.squares[sq as usize];
+        let raw = piece.raw() as usize;
+        self.hash ^= crate::zobrist::ZOBRIST.piece[sq as usize][raw];
+
         self.squares[sq as usize] = NO_PIECE;
         let sq_bb = Bitboard::square_bb(sq);
         self.by_color[c as usize] = self.by_color[c as usize] ^ sq_bb;
@@ -918,10 +1041,31 @@ impl Board {
     #[inline]
     fn place_piece(&mut self, piece: Piece, sq: Square, c: Color, pt: PieceType) {
         debug_assert!(self.squares[sq as usize] == NO_PIECE);
+        let raw = piece.raw() as usize;
+        self.hash ^= crate::zobrist::ZOBRIST.piece[sq as usize][raw];
+
         self.squares[sq as usize] = piece;
         let sq_bb = Bitboard::square_bb(sq);
         self.by_color[c as usize] = self.by_color[c as usize] | sq_bb;
         self.by_type[pt as usize] = self.by_type[pt as usize] | sq_bb;
+    }
+
+    /// Toggle the Zobrist hash for a change in side to move, castling rights,
+    /// and en-passant square.
+    ///
+    /// `state` must hold the pre-move values for castling rights and ep square.
+    /// The hash is updated from the state in `state` to the current state in `self`.
+    #[inline]
+    fn update_hash_state_transition(&mut self, state: &StateInfo) {
+        self.hash ^= crate::zobrist::ZOBRIST.side;
+        self.hash ^= crate::zobrist::ZOBRIST.castling[state.castling_rights as usize];
+        self.hash ^= crate::zobrist::ZOBRIST.castling[self.castling_rights as usize];
+        if let Some(sq) = state.ep_square {
+            self.hash ^= crate::zobrist::ZOBRIST.ep[crate::types::file_of(sq) as usize];
+        }
+        if let Some(sq) = self.ep_square {
+            self.hash ^= crate::zobrist::ZOBRIST.ep[crate::types::file_of(sq) as usize];
+        }
     }
 
     fn update_castling_rights(&mut self, from: Square, to: Square, _us: Color, is_capture: bool) {
@@ -955,7 +1099,9 @@ impl Board {
     /// Check whether `m` is legal under atomic chess rules.
     ///
     /// Considers blast-zone effects (self-explosion), castling pass-through
-    /// safety, pseudo-royal adjacency, and commoner extinction.
+    /// safety, and commoner extinction. The last commoner is immune from
+    /// adjacent-commoner checks; touching an enemy commoner is allowed and does
+    /// not count as an attack.
     ///
     /// `state` must contain up-to-date cached fields for the current position.
     #[must_use]
@@ -1215,7 +1361,6 @@ mod tests {
 
     #[test]
     fn test_checkers() {
-        crate::attacks::init();
         // Position where white queen gives check to black commoner
         let fen = "4k3/8/8/8/8/8/8/4Q2K b - - 0 1";
         let board = Board::from_fen(fen).unwrap();
@@ -1225,7 +1370,6 @@ mod tests {
 
     #[test]
     fn test_pinned() {
-        crate::attacks::init();
         // Black rook on e4, white pawn on e3, white commoner on e2 - pawn is pinned
         let fen = "4k3/8/8/8/4r3/4P3/4K3/8 w - - 0 1";
         let board = Board::from_fen(fen).unwrap();
@@ -1235,7 +1379,6 @@ mod tests {
 
     #[test]
     fn test_do_undo_restores_state() {
-        crate::attacks::init();
         let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
         let mut board = Board::from_fen(fen).unwrap();
         let orig_fen = board.fen();
@@ -1251,7 +1394,6 @@ mod tests {
 
     #[test]
     fn test_do_undo_capture_restores() {
-        crate::attacks::init();
         let fen2 = "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2";
         let mut board2 = Board::from_fen(fen2).unwrap();
         let orig_fen = board2.fen();
@@ -1266,7 +1408,6 @@ mod tests {
 
     #[test]
     fn test_self_explosion_legal_with_surviving_commoner() {
-        crate::attacks::init();
         // White commoners on d3 AND e1; white rook on d5, black pawn on d4.
         // Rook takes pawn on d4 — blast zone (c3-e5) includes d3, destroying
         // the commoner on d3, but the commoner on e1 survives.
@@ -1289,7 +1430,6 @@ mod tests {
 
     #[test]
     fn test_self_explosion_illegal_last_commoner() {
-        crate::attacks::init();
         // White commoner ONLY on d3; white rook on d5, black pawn on d4.
         // Rook takes pawn on d4 — blast zone includes d3, destroying the
         // LAST (only) commoner → self-explosion, illegal.
@@ -1307,7 +1447,6 @@ mod tests {
 
     #[test]
     fn test_blast_zone_removes_pieces() {
-        crate::attacks::init();
         // White rook on e4, black knight on e5, black pawn on f5
         // Rook captures knight — blast zone around e5 (d4-f4, d5-f5, d6-f6)
         // removes: rook (non-pawn capturer), knight, but NOT the pawn on f5
@@ -1333,7 +1472,6 @@ mod tests {
 
     #[test]
     fn test_pinned_piece_capture_explodes_pinner() {
-        crate::attacks::init();
         // Black rook on e5 (pinning), white rook on e3, black pawn on e4,
         // white commoner on e1. The rook on e3 is pinned by the rook on e5
         // (both on e-file, commoner on e1 behind).
@@ -1355,7 +1493,6 @@ mod tests {
 
     #[test]
     fn test_en_passant_blast() {
-        crate::attacks::init();
         // White pawn on d5, black pawn on c5 (just double-pushed), black knight on d4
         // White plays dxc6 en passant — blast at c6
         let fen2 = "4k3/8/8/2Pp4/8/8/8/4K3 w - d6 0 2";
@@ -1367,5 +1504,119 @@ mod tests {
         // commoners should remain (out of blast zone)
         assert!(board2.piece_on(Square::C5) == NO_PIECE);
         assert!(board2.piece_on(Square::D5) == NO_PIECE);
+    }
+
+    #[test]
+    fn test_do_undo_restores_hash() {
+        let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+        let mut board = Board::from_fen(fen).unwrap();
+        let orig_hash = board.hash();
+        let mut state = StateInfo::new();
+
+        let m = Move::make_move(Square::E2, Square::E4);
+        board.do_move(m, &mut state);
+        assert_eq!(board.hash(), board.recomputed_hash());
+        board.undo_move(m, &state);
+        assert_eq!(board.hash(), orig_hash);
+        assert_eq!(board.hash(), board.recomputed_hash());
+    }
+
+    #[test]
+    fn test_hash_after_moves() {
+        let mut board = Board::new();
+        let mut states = [StateInfo::new(); 4];
+
+        let moves = [
+            Move::make_move(Square::E2, Square::E4),
+            Move::make_move(Square::E7, Square::E5),
+            Move::make_move(Square::G1, Square::F3),
+            Move::make_move(Square::B8, Square::C6),
+        ];
+        for (i, &m) in moves.iter().enumerate() {
+            board.do_move(m, &mut states[i]);
+            assert_eq!(board.hash(), board.recomputed_hash());
+        }
+        for (i, &m) in moves.iter().enumerate().rev() {
+            board.undo_move(m, &states[i]);
+            assert_eq!(board.hash(), board.recomputed_hash());
+        }
+    }
+
+    #[test]
+    fn test_fen_fullmove_counter() {
+        let mut board = Board::new();
+        // Starting position FEN ends with fullmove 1.
+        assert!(board.fen().ends_with("0 1"));
+        assert_eq!(board.fullmove_number(), 1);
+
+        let mut state = StateInfo::new();
+        let m = Move::make_move(Square::E2, Square::E4);
+        board.do_move(m, &mut state);
+        // After 1. e4 it is still fullmove 1 (Black to move).
+        assert!(board.fen().ends_with("0 1"));
+        assert_eq!(board.fullmove_number(), 1);
+    }
+
+    #[test]
+    fn test_from_fen_fullmove_conversion() {
+        let fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1";
+        let board = Board::from_fen(fen).unwrap();
+        assert_eq!(board.game_ply(), 2);
+        assert_eq!(board.fullmove_number(), 1);
+
+        let fen2 = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 5";
+        let board2 = Board::from_fen(fen2).unwrap();
+        assert_eq!(board2.game_ply(), 9);
+        assert_eq!(board2.fullmove_number(), 5);
+    }
+
+    #[test]
+    fn test_rule50_game_ply_fullmove_getters() {
+        let board = Board::new();
+        assert_eq!(board.rule50(), 0);
+        assert_eq!(board.game_ply(), 1);
+        assert_eq!(board.fullmove_number(), 1);
+    }
+
+    #[test]
+    fn test_outcome_loss() {
+        // White has no commoners: loss for White.
+        let fen = "4k3/8/8/8/8/8/8/8 w - - 0 1";
+        let board = Board::from_fen(fen).unwrap();
+        assert_eq!(board.outcome(), Some(Outcome::Loss));
+    }
+
+    #[test]
+    fn test_outcome_win() {
+        // Black has no commoners: win for White.
+        let fen = "8/8/8/8/8/8/8/4K3 w - - 0 1";
+        let board = Board::from_fen(fen).unwrap();
+        assert_eq!(board.outcome(), Some(Outcome::Win));
+    }
+
+    #[test]
+    fn test_outcome_draw_rule50() {
+        let fen = "4k3/8/8/8/8/8/8/4K3 w - - 100 1";
+        let board = Board::from_fen(fen).unwrap();
+        assert_eq!(board.outcome(), Some(Outcome::Draw));
+    }
+
+    #[test]
+    fn test_outcome_draw_stalemate() {
+        // Black commoner on h8 is boxed in by white pawns on g7 and h7;
+        // g8 is attacked by h7, and capturing either pawn destroys the last commoner.
+        let fen = "7k/6PP/8/8/8/8/8/7K b - - 0 1";
+        let board = Board::from_fen(fen).unwrap();
+        assert_eq!(board.outcome(), Some(Outcome::Draw));
+    }
+
+    #[test]
+    fn test_is_capture() {
+        let fen = "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2";
+        let board = Board::from_fen(fen).unwrap();
+        let capture = Move::make_move(Square::E4, Square::D5);
+        let non_capture = Move::make_move(Square::E4, Square::E5);
+        assert!(board.is_capture(capture));
+        assert!(!board.is_capture(non_capture));
     }
 }

@@ -31,8 +31,6 @@ fn uci(m: atomic_movegen::types::Move) -> String {
 
 #[test]
 fn verify_moves_md() {
-    atomic_movegen::attacks::init();
-
     let data = include_str!("moves.md");
     let mut failed = 0;
     let mut total = 0;

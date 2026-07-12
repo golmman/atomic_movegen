@@ -241,14 +241,6 @@ pub fn pawn_attacks(c: Color, sq: Square) -> Bitboard {
     PAWN_ATTACKS[sq as usize][c as usize]
 }
 
-/// Initialize the magic bitboard attack tables.
-///
-/// This function is now a no-op; attack tables are precomputed at compile time.
-/// It is kept for backwards compatibility and remains safe to call multiple times.
-pub fn init() {
-    crate::magic::init();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,7 +281,6 @@ mod tests {
 
     #[test]
     fn test_bishop_attacks() {
-        crate::attacks::init();
         let atk = bishop_attacks(Square::D4, Bitboard::EMPTY);
         assert!(atk & Bitboard::square_bb(Square::A1) != Bitboard::EMPTY);
         assert!(atk & Bitboard::square_bb(Square::G7) != Bitboard::EMPTY);
@@ -298,7 +289,6 @@ mod tests {
 
     #[test]
     fn test_rook_attacks() {
-        crate::attacks::init();
         let atk = rook_attacks(Square::D4, Bitboard::EMPTY);
         assert!(atk & Bitboard::square_bb(Square::D1) != Bitboard::EMPTY);
         assert!(atk & Bitboard::square_bb(Square::D8) != Bitboard::EMPTY);
@@ -308,7 +298,6 @@ mod tests {
 
     #[test]
     fn test_bishop_blocked() {
-        crate::attacks::init();
         let blocker = Bitboard::square_bb(Square::E5);
         let atk = bishop_attacks(Square::D4, blocker);
         assert!(
@@ -323,7 +312,6 @@ mod tests {
 
     #[test]
     fn test_rook_blocked() {
-        crate::attacks::init();
         let blocker = Bitboard::square_bb(Square::D5);
         let atk = rook_attacks(Square::D4, blocker);
         assert!(atk & Bitboard::square_bb(Square::D5) != Bitboard::EMPTY);
@@ -332,7 +320,6 @@ mod tests {
 
     #[test]
     fn test_queen_equals_bishop_plus_rook() {
-        crate::attacks::init();
         let occ = Bitboard::square_bb(Square::E5);
         let queen = queen_attacks(Square::D4, occ);
         let bishop = bishop_attacks(Square::D4, occ);

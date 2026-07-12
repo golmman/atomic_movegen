@@ -247,6 +247,16 @@ fn generate_castling(board: &Board, us: Color, moves: &mut MoveList) {
 pub fn generate_legal(board: &Board, moves: &mut MoveList) {
     let mut state = StateInfo::new();
     board.populate_state(&mut state);
+    generate_legal_with_state(board, &state, moves);
+}
+
+/// Generate all fully legal moves for the side to move using a pre-populated
+/// [`StateInfo`].
+///
+/// The caller is responsible for ensuring `state` is up to date (e.g. by calling
+/// [`Board::populate_state`]) before invoking this function. It does not call
+/// `populate_state` itself.
+pub fn generate_legal_with_state(board: &Board, state: &StateInfo, moves: &mut MoveList) {
     generate_pseudo_legal(board, moves);
 
     // In-place compaction: fast-path accept without legal() call.
@@ -260,7 +270,7 @@ pub fn generate_legal(board: &Board, moves: &mut MoveList) {
         let mut write_idx = 0;
         for read_idx in 0..orig_len {
             let m = ms[read_idx];
-            if is_move_trivially_legal(board, m, &state) || board.legal(m, &state) {
+            if is_move_trivially_legal(board, m, state) || board.legal(m, state) {
                 ms[write_idx] = m;
                 write_idx += 1;
             }
@@ -277,7 +287,6 @@ mod tests {
 
     #[test]
     fn test_starting_position_move_count() {
-        crate::attacks::init();
         let board = Board::new();
         let mut moves = MoveList::new();
         generate_pseudo_legal(&board, &mut moves);
@@ -289,7 +298,6 @@ mod tests {
 
     #[test]
     fn test_knight_moves_start() {
-        crate::attacks::init();
         let board = Board::new();
         let mut moves = MoveList::new();
         generate_pseudo_legal(&board, &mut moves);
@@ -304,5 +312,25 @@ mod tests {
             .collect();
         // Each knight has 2 moves from starting position
         assert_eq!(knight_moves.len(), 4);
+    }
+
+    #[test]
+    fn test_generate_legal_with_state() {
+        let board = Board::new();
+        let mut state = StateInfo::new();
+        board.populate_state(&mut state);
+
+        let mut moves1 = MoveList::new();
+        generate_legal(&board, &mut moves1);
+
+        let mut moves2 = MoveList::new();
+        generate_legal_with_state(&board, &state, &mut moves2);
+
+        assert_eq!(moves1.len(), moves2.len());
+        let mut v1: Vec<String> = moves1.as_slice().iter().map(|&m| m.to_uci()).collect();
+        let mut v2: Vec<String> = moves2.as_slice().iter().map(|&m| m.to_uci()).collect();
+        v1.sort();
+        v2.sort();
+        assert_eq!(v1, v2);
     }
 }

@@ -462,9 +462,6 @@ static ROOK_TABLE: [Bitboard; ROOK_TABLE_SIZE] = build_rook_table();
 /// Precomputed bishop attack table. Indexed by `BISHOP_ENTRIES[sq].offset + magic_index`.
 static BISHOP_TABLE: [Bitboard; BISHOP_TABLE_SIZE] = build_bishop_table();
 
-/// No-op; magic tables are precomputed at compile time.
-pub(crate) fn init() {}
-
 /// Return the attack set for a bishop on `sq` given the `occupied` board.
 #[inline(always)]
 pub fn bishop_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
@@ -505,7 +502,6 @@ mod tests {
     /// square and every possible occupancy pattern.
     #[test]
     fn test_magic_vs_loop_bishop() {
-        super::init();
         for sq_idx in 0..64 {
             let sq = Square::from_u8(sq_idx as u8);
             let mask = BISHOP_MASKS[sq_idx];
@@ -533,7 +529,6 @@ mod tests {
 
     #[test]
     fn test_magic_vs_loop_rook() {
-        super::init();
         for sq_idx in 0..64 {
             let sq = Square::from_u8(sq_idx as u8);
             let mask = ROOK_MASKS[sq_idx];

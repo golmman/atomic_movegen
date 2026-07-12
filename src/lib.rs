@@ -16,10 +16,11 @@
 //! - **COMMONER replaces KING:** a commoner moves like a king. Losing all of
 //!   your commoners loses the game.
 //! - **Pseudo-royal only for the last commoner:** a commoner is treated as
-//!   pseudo-royal (it cannot be left under attack, cannot move next to an
-//!   enemy commoner, and its loss ends the game) only when it is the side's
-//!   last commoner. This is `extinctionPseudoRoyal` with the default
-//!   `extinctionPieceCount = 0` in Fairy-Stockfish's `atomic` variant.
+//!   pseudo-royal (it cannot be left under attack and its loss ends the game)
+//!   only when it is the side's last commoner. Touching an enemy commoner is
+//!   allowed and does not count as an attack. This is `extinctionPseudoRoyal`
+//!   with the default `extinctionPieceCount = 0` in Fairy-Stockfish's `atomic`
+//!   variant.
 //! - **Not `atomar`:** commoners are not mutually immune and there is no
 //!   `mutuallyImmuneTypes` / `blastImmuneTypes` rule.
 //! - **No check/mate in the usual sense:** the game ends when a side has no
@@ -45,9 +46,10 @@ pub(crate) mod magic;
 pub mod movegen;
 pub mod types;
 pub(crate) mod util;
+pub(crate) mod zobrist;
 
 pub use board::Board;
-pub use types::{Bitboard, Color, Move, MoveList, PieceType, Square};
+pub use types::{Bitboard, Color, Move, MoveList, Outcome, PieceType, Square};
 
 /// Count the number of legal moves at each node to the given depth (perft).
 ///

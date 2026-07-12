@@ -396,6 +396,16 @@ impl Color {
     }
 }
 
+/// The result of a finished game, from the side-to-move perspective.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Outcome {
+    Win,
+    Loss,
+    Draw,
+}
+
 /// A piece type (pawn, knight, bishop, rook, queen, or commoner).
 ///
 /// In atomic chess, a *commoner* moves like a king and is pseudo-royal:
@@ -444,32 +454,37 @@ impl Piece {
         Piece(((color as u8) << 3) | ((pt as u8) + 1))
     }
 
-    /// Return the color of this piece.
+    /// Return the raw internal encoding.
     ///
-    /// # Panics
-    /// Panics in debug builds if called on [`NO_PIECE`].
+    /// The value is `(color << 3) | (piece_type + 1)`, or `0` for [`NO_PIECE`].
     #[inline]
     #[must_use]
-    pub fn color(self) -> Color {
-        debug_assert!(self.0 != 0, "Piece::color called on NO_PIECE");
-        if self.0 & 8 == 0 {
+    pub(crate) const fn raw(self) -> u8 {
+        self.0
+    }
+
+    /// Return the color of this piece, or `None` for [`NO_PIECE`].
+    #[inline]
+    #[must_use]
+    pub fn color(self) -> Option<Color> {
+        if self.0 == 0 {
+            return None;
+        }
+        Some(if self.0 & 8 == 0 {
             Color::White
         } else {
             Color::Black
-        }
+        })
     }
 
-    /// Return the piece type.
-    ///
-    /// # Panics
-    /// Panics in debug builds if called on [`NO_PIECE`]. In release builds, an
-    /// out-of-bounds `PIECE_TYPES` lookup panics for [`NO_PIECE`].
+    /// Return the piece type, or `None` for [`NO_PIECE`].
     #[inline]
     #[must_use]
-    pub fn type_of(self) -> PieceType {
-        debug_assert!(self.0 != 0, "Piece::type_of called on NO_PIECE");
-        let inner = (self.0 & 7) - 1;
-        PIECE_TYPES[inner as usize]
+    pub fn type_of(self) -> Option<PieceType> {
+        if self.0 == 0 {
+            return None;
+        }
+        Some(PIECE_TYPES[((self.0 & 7) - 1) as usize])
     }
 
     /// Return the ASCII character for this piece.
@@ -481,7 +496,7 @@ impl Piece {
         if self.0 == 0 {
             return '.';
         }
-        let t = match self.type_of() {
+        let t = match self.type_of().unwrap() {
             PieceType::Pawn => 'P',
             PieceType::Knight => 'N',
             PieceType::Bishop => 'B',
@@ -489,7 +504,7 @@ impl Piece {
             PieceType::Queen => 'Q',
             PieceType::Commoner => 'C',
         };
-        match self.color() {
+        match self.color().unwrap() {
             Color::White => t,
             Color::Black => t.to_ascii_lowercase(),
         }
@@ -501,7 +516,7 @@ impl fmt::Display for Piece {
         if self.0 == 0 {
             return write!(f, "--");
         }
-        let c = match self.color() {
+        let c = match self.color().unwrap() {
             Color::White => "W",
             Color::Black => "B",
         };
@@ -653,6 +668,62 @@ impl Move {
         debug_assert!(from != Square::NONE && to != Square::NONE);
         Move((3 << 12) | ((from as u16) << 6) | (to as u16))
     }
+
+    /// Returns `true` for castling moves.
+    #[inline]
+    #[must_use]
+    pub fn is_castling(self) -> bool {
+        self.move_type() == MoveType::Castling
+    }
+
+    /// Returns `true` for promotion moves.
+    #[inline]
+    #[must_use]
+    pub fn is_promotion(self) -> bool {
+        self.move_type() == MoveType::Promotion
+    }
+
+    /// Returns `true` for en-passant moves.
+    #[inline]
+    #[must_use]
+    pub fn is_en_passant(self) -> bool {
+        self.move_type() == MoveType::EnPassant
+    }
+
+    /// Returns the UCI representation of this move.
+    ///
+    /// Returns `"0000"` for `Move::NONE`. Castling destinations are mapped to
+    /// `g1`/`c1`/`g8`/`c8`, and promotion moves append `n`/`b`/`r`/`q`.
+    #[must_use]
+    pub fn to_uci(self) -> String {
+        if self.0 == 0 {
+            return "0000".to_string();
+        }
+        let from = sq_str(self.from_sq()).unwrap_or("??");
+        let to = if self.is_castling() {
+            match (self.from_sq(), self.to_sq()) {
+                (Square::E1, Square::H1) => "g1",
+                (Square::E1, Square::A1) => "c1",
+                (Square::E8, Square::H8) => "g8",
+                (Square::E8, Square::A8) => "c8",
+                _ => sq_str(self.to_sq()).unwrap_or("??"),
+            }
+        } else {
+            sq_str(self.to_sq()).unwrap_or("??")
+        };
+        let mut s = String::from(from) + to;
+        if self.is_promotion() {
+            let ch = match self.promotion_type() {
+                PieceType::Knight => 'n',
+                PieceType::Bishop => 'b',
+                PieceType::Rook => 'r',
+                PieceType::Queen => 'q',
+                _ => unreachable!(),
+            };
+            s.push(ch);
+        }
+        s
+    }
 }
 
 /// Maximum number of moves that can be generated for any atomic chess position.
@@ -694,6 +765,12 @@ impl MoveList {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.len == 0
+    }
+
+    /// Clears the list, resetting the length to zero.
+    #[inline]
+    pub fn clear(&mut self) {
+        self.len = 0;
     }
 
     /// Appends a move to the end of the list.
@@ -909,11 +986,54 @@ mod tests {
     #[test]
     fn test_piece() {
         let wp = make_piece(Color::White, PieceType::Pawn);
-        assert_eq!(wp.color(), Color::White);
-        assert_eq!(wp.type_of(), PieceType::Pawn);
+        assert_eq!(wp.color(), Some(Color::White));
+        assert_eq!(wp.type_of(), Some(PieceType::Pawn));
 
         let bk = make_piece(Color::Black, PieceType::Commoner);
-        assert_eq!(bk.color(), Color::Black);
-        assert_eq!(bk.type_of(), PieceType::Commoner);
+        assert_eq!(bk.color(), Some(Color::Black));
+        assert_eq!(bk.type_of(), Some(PieceType::Commoner));
+    }
+
+    #[test]
+    fn test_piece_no_piece() {
+        assert_eq!(NO_PIECE.color(), None);
+        assert_eq!(NO_PIECE.type_of(), None);
+    }
+
+    #[test]
+    fn test_move_helpers() {
+        let m = Move::make_move(Square::A2, Square::A4);
+        assert!(!m.is_castling());
+        assert!(!m.is_promotion());
+        assert!(!m.is_en_passant());
+
+        let m = Move::make_castling(Square::E1, Square::H1);
+        assert!(m.is_castling());
+
+        let m = Move::make_enpassant(Square::C5, Square::D6);
+        assert!(m.is_en_passant());
+
+        let m = Move::make_promotion(Square::A7, Square::A8, PieceType::Queen);
+        assert!(m.is_promotion());
+    }
+
+    #[test]
+    fn test_move_to_uci() {
+        assert_eq!(Move::NONE.to_uci(), "0000");
+
+        let m = Move::make_move(Square::E2, Square::E4);
+        assert_eq!(m.to_uci(), "e2e4");
+
+        let m = Move::make_castling(Square::E1, Square::H1);
+        assert_eq!(m.to_uci(), "e1g1");
+
+        let m = Move::make_castling(Square::E8, Square::A8);
+        assert_eq!(m.to_uci(), "e8c8");
+
+        let m = Move::make_promotion(Square::A7, Square::A8, PieceType::Queen);
+        assert_eq!(m.to_uci(), "a7a8q");
+
+        let m = Move::make_promotion(Square::H2, Square::H1, PieceType::Knight);
+        assert_eq!(m.to_uci(), "h2h1n");
     }
 }
