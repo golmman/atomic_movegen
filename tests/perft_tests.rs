@@ -1,7 +1,7 @@
 use atomic_movegen::board::Board;
 use atomic_movegen::perft;
 
-/// All 12 atomic perft positions from perft_values.md
+/// All 12 atomic perft positions from tests/perft_values.md
 const POSITIONS: &[(&str, &[u64])] = &[
     // Position 1: starting position
     (

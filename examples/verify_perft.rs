@@ -1,4 +1,4 @@
-//! Reads positions and expected node counts from `perft_values.md` and runs a
+//! Reads positions and expected node counts from `tests/perft_values.md` and runs a
 //! perft at each listed depth, reporting which cases pass and which fail.
 //!
 //! Usage:
@@ -8,7 +8,7 @@
 //!
 //! Arguments:
 //! - `max-depth` — maximum depth to test (default: 6, omit or set to 0 to run all)
-//! - `path`      — path to the perft values markdown file (default: `perft_values.md`)
+//! - `path`      — path to the perft values markdown file (default: `tests/perft_values.md`)
 //!
 //! The process exits with code 0 if every test passes, or 1 if any fail.
 
@@ -27,7 +27,7 @@ struct TestCase {
     depths: Vec<(u32, u64)>,
 }
 
-/// Parse the markdown table in `perft_values.md` into a list of test cases.
+/// Parse the markdown table in `tests/perft_values.md` into a list of test cases.
 ///
 /// The expected format (as of this writing):
 ///
@@ -117,7 +117,7 @@ fn main() {
     let path = if args.len() > 2 {
         &args[2]
     } else {
-        "perft_values.md"
+        "tests/perft_values.md"
     };
 
     // Limit to 0 means "no limit".

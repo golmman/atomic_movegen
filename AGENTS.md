@@ -13,7 +13,7 @@ cargo clippy
 cargo fmt
 cargo doc
 cargo run --example perft "FEN" DEPTH
-cargo run --example verify_perft [MAX_DEPTH]     # run all 41 perft_values.md positions (depth 6 needs --release)
+cargo run --example verify_perft [MAX_DEPTH]     # run all 41 tests/perft_values.md positions (depth 6 needs --release)
 cargo test --test verify_moves                   # verify generated moves against tests/moves.md
 ```
 

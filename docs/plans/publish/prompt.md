@@ -1,3 +1,21 @@
+
+To add a git tag retroactively:
+
+Go to
+https://crates.io/crates/atomic-movegen/0.1.0/code/.cargo_vcs_info.json
+
+Add git tag via
+```
+git tag v0.1.0 eb378d3be22b512f2648f5f12cc1d91e18e643e9
+```
+
+Push via
+```
+git push --tags
+```
+
+---
+
 Review if this lib is ready to be published. What's missing? Which best practices are violated? What should be done?
 
 ---

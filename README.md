@@ -42,7 +42,7 @@ Output: `197326`
 ## Verify against known perft values
 
 The repository ships with 41 test positions and their expected node counts at
-depths 1–6 in [`perft_values.md`](./perft_values.md).  Use the `verify_perft`
+depths 1–6 in [`perft_values.md`](./tests/perft_values.md).  Use the `verify_perft`
 example to run all of them:
 
 ```sh
