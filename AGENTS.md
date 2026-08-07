@@ -69,6 +69,16 @@ Example binaries live under `examples/`; integration tests under `tests/`.
 - Enable `#![warn(missing_docs)]` and keep the build warning-free.
 - Example binaries go under `examples/`.
 - Tests go in a `#[cfg(test)] mod tests` at the bottom of each module.
-- The most important quality attributes for this library, in order from most to least important:
-  - correctness, performance, maintainability, testability, consistency.
+- The most important quality attributes for this project are (highest priority first):
+  - correctness
+  - performance
+  - maintainability
+  - testability
+  - consistency
 - Only use reading `git` commands, never writing ones (no `git add`, `git rm`, `git commit`, etc.).
+- `docs/plans/` contains prompts, implementation plans and reports
+  - ignore all `prompt.md` files
+  - implementation plans can be found via `find . -type f -name 'plan*.md'`
+  - implementation reports can be found via `find . -type f -name 'report*.md'`
+  - the final task of an implementation plan is creating the corresponding implementation report
+    - the report should include additional tools/examples used, problems encountered, unresolved parts, missing tests, next steps
