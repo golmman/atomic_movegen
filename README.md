@@ -11,6 +11,8 @@ reference implementation.
 - Perft (performance test) recursion
 - Blast-on-capture, commoner pseudo-royalty (only for the last commoner), pawn
   blast immunity (except for the capturing pawn at the blast square)
+- Incremental Zobrist hashing (`Board::hash()`)
+- Game-over detection (`Board::outcome()`, `Board::is_terminal()`)
 - Pure safe Rust, zero dependencies
 
 ## Usage (library)
@@ -56,6 +58,33 @@ cargo run --release --example verify_perft
 The tool exits with status 0 if every position matches, or 1 on any mismatch.
 Depth 6 traverses billions of nodes; the `--release` flag is essential for a
 timely result at that depth.
+
+## Other CLI tools
+
+All example binaries ship with the repo:
+
+```sh
+cargo run --example perft_divide "FEN" DEPTH   # per-move perft breakdown
+cargo run --example list_moves "FEN"          # list all legal moves
+cargo run --example fen_after "FEN" MOVE      # FEN + moves after playing MOVE (e.g. e2e4)
+cargo run --example debug_moves "FEN"         # pseudo-legal vs. legal counts, duplicates
+cargo run --example pawn_debug "FEN"          # pawn inspections and manual move checks
+cargo run --example test_d5g8                 # attack-table sanity check (hardcoded position)
+```
+
+## Development
+
+```sh
+cargo test        # unit + integration tests (perft assertions, move verification)
+cargo clippy      # lints
+cargo fmt         # formatting
+cargo doc         # API docs
+```
+
+Correctness is verified against the [Fairy-Stockfish](https://github.com/fairy-stockfish/Fairy-Stockfish)
+reference implementation (bundled in this repo as a git submodule) via the
+expected values in [`tests/perft_values.md`](./tests/perft_values.md) and the
+move lists in [`tests/moves.md`](./tests/moves.md).
 
 ## License
 

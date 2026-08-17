@@ -26,9 +26,12 @@ cargo run --example perft "FEN" DEPTH                 # node count at a depth
 cargo run --example perft_divide "FEN" DEPTH          # per-move perft breakdown
 cargo run --example list_moves "FEN"                 # list all legal moves
 cargo run --example fen_after "FEN" MOVE              # FEN + moves after playing MOVE (e.g. e2e4)
+cargo run --example verify_perft [MAX_DEPTH] [PATH]   # check perft values (default MAX_DEPTH=6, PATH=tests/perft_values.md)
+cargo run --example debug_moves "FEN"                 # pseudo-legal vs. legal counts, duplicate detection
+cargo run --example pawn_debug "FEN"                  # pawn inspections and manual move checks
+cargo run --example test_d5g8                         # attack-table sanity check (hardcoded position)
 
 # Verification against the oracle values in tests/perft_values.md
-cargo run --example verify_perft [MAX_DEPTH] [PATH]   # default MAX_DEPTH=6, PATH=tests/perft_values.md
 # Depth 6 traverses billions of nodes — use --release:
 cargo run --release --example verify_perft
 
@@ -54,7 +57,9 @@ Modules under `src/`:
 - `zobrist.rs` — Zobrist hashing.
 - `util.rs` — shared helpers.
 
-Example binaries live under `examples/`; integration tests under `tests/`.
+Example binaries live under `examples/`; integration tests under `tests/`
+(`tests/gen_moves.py` is a helper script for regenerating `tests/moves.md`).
+A performance profiling guide lives at `docs/perf/perf_guide.md`.
 
 ## Conventions
 
