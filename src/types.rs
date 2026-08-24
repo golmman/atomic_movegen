@@ -489,8 +489,9 @@ impl Piece {
 
     /// Return the ASCII character for this piece.
     ///
-    /// Upper-case for white (`P`, `N`, `B`, `R`, `Q`, `C`), lower-case for black.
-    /// Returns `'.'` for [`NO_PIECE`].
+    /// Upper-case for white (`P`, `N`, `B`, `R`, `Q`, `K`), lower-case for black.
+    /// The commoner is serialized with the standard FEN letter `K`/`k` (it is
+    /// the king-like piece of atomic chess). Returns `'.'` for [`NO_PIECE`].
     #[must_use]
     pub fn ascii_char(self) -> char {
         if self.0 == 0 {
@@ -502,7 +503,7 @@ impl Piece {
             PieceType::Bishop => 'B',
             PieceType::Rook => 'R',
             PieceType::Queen => 'Q',
-            PieceType::Commoner => 'C',
+            PieceType::Commoner => 'K',
         };
         match self.color().unwrap() {
             Color::White => t,
@@ -998,6 +999,14 @@ mod tests {
     fn test_piece_no_piece() {
         assert_eq!(NO_PIECE.color(), None);
         assert_eq!(NO_PIECE.type_of(), None);
+    }
+
+    #[test]
+    fn test_commoner_ascii_char_is_standard() {
+        // The commoner is the king-like piece of atomic chess and must use the
+        // standard FEN letter K/k (not the non-standard C/c).
+        assert_eq!(W_COMMONER.ascii_char(), 'K');
+        assert_eq!(B_COMMONER.ascii_char(), 'k');
     }
 
     #[test]

@@ -7,7 +7,7 @@ reference implementation.
 ## Features
 
 - Legal move generation (pseudo-legal + legality filtering)
-- FEN parsing and output
+- FEN parsing and output (standard notation only — `K`/`k` label the commoner)
 - Perft (performance test) recursion
 - Blast-on-capture, commoner pseudo-royalty (only for the last commoner), pawn
   blast immunity (except for the capturing pawn at the blast square)
@@ -21,7 +21,7 @@ Add `atomic-movegen` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-atomic-movegen = "2.0.0"
+atomic-movegen = "2.1.0"
 ```
 
 ```rust

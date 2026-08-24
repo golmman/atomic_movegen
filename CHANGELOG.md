@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-08-24
+
+### Changed
+
+- `Board::fen()` and `Piece::ascii_char()` now serialize the commoner (the
+  king-like pseudo-royal piece of atomic chess) with the standard FEN letter
+  `K`/`k` instead of the non-standard `C`/`c`. This matches Fairy-Stockfish's
+  `atomic` variant and every other standard atomic FEN.
+- `Board::from_fen()` now accepts only the standard piece letters; FENs that
+  label the commoner with `C`/`c` are rejected with `FenError::InvalidPlacement`.
+  Previously both `C`/`c` and `K`/`k` were accepted.
+
+### Added
+
+- Regression tests: `test_fen_uses_standard_commoner_label`,
+  `test_from_fen_rejects_nonstandard_commoner_label` (in `src/board.rs`), and
+  `test_commoner_ascii_char_is_standard` (in `src/types.rs`).
+
 ## [2.0.0] - 2026-07-12
 
 ### Added

@@ -3,16 +3,26 @@ use atomic_movegen::board::Board;
 use atomic_movegen::types::{Bitboard, Move, MoveList, Square};
 
 fn main() {
-    let board = Board::from_fen("rnbqkbnr/ppp1p2p/3p1pp1/3Q4/8/4P3/PPPP1PPP/RNB1KBNR w KQkq - 0 4").unwrap();
+    let board = Board::from_fen("rnbqkbnr/ppp1p2p/3p1pp1/3Q4/8/4P3/PPPP1PPP/RNB1KBNR w KQkq - 0 4")
+        .unwrap();
     let occupied = board.occupied();
     println!("occupied = 0x{:016x}", occupied.0);
     let b = bishop_attacks(Square::D5, occupied);
     println!("bishop_attacks(d5, occ) = 0x{:016x}", b.0);
-    println!("contains g8: {}", (b & Bitboard::square_bb(Square::G8)) != Bitboard::EMPTY);
-    println!("contains f7: {}", (b & Bitboard::square_bb(Square::F7)) != Bitboard::EMPTY);
+    println!(
+        "contains g8: {}",
+        (b & Bitboard::square_bb(Square::G8)) != Bitboard::EMPTY
+    );
+    println!(
+        "contains f7: {}",
+        (b & Bitboard::square_bb(Square::F7)) != Bitboard::EMPTY
+    );
     let q = queen_attacks(Square::D5, occupied);
     println!("queen_attacks(d5, occ) = 0x{:016x}", q.0);
-    println!("queen contains g8: {}", (q & Bitboard::square_bb(Square::G8)) != Bitboard::EMPTY);
+    println!(
+        "queen contains g8: {}",
+        (q & Bitboard::square_bb(Square::G8)) != Bitboard::EMPTY
+    );
 
     // manual ray-cast
     let mut manual = 0u64;
@@ -34,8 +44,14 @@ fn main() {
         }
     }
     println!("manual bishop_attacks(d5, occ) = 0x{:016x}", manual);
-    println!("manual contains g8: {}", (manual & (1u64 << (Square::G8 as usize))) != 0);
-    println!("manual contains f7: {}", (manual & (1u64 << (Square::F7 as usize))) != 0);
+    println!(
+        "manual contains g8: {}",
+        (manual & (1u64 << (Square::G8 as usize))) != 0
+    );
+    println!(
+        "manual contains f7: {}",
+        (manual & (1u64 << (Square::F7 as usize))) != 0
+    );
 
     let mut moves = MoveList::new();
     atomic_movegen::movegen::generate_pseudo_legal(&board, &mut moves);

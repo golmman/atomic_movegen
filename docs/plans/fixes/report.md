@@ -128,13 +128,60 @@ assert_eq!(board.fen(), orig_fen);
 
 ---
 
-## Files modified
+## Items 7–8 (2026-08-24): standard FEN + publish preparation
+
+### 7. FEN parser/exporter: standard `K`/`k` only for the commoner
+
+| Aspect | Detail |
+|--------|--------|
+| **Status** | ✅ Implemented |
+| **Exporter** | `src/types.rs` — `Piece::ascii_char()` now returns `'K'`/`'k'` for `PieceType::Commoner` (was `'C'`/`'c'`). `Board::fen()` therefore emits standard FEN. |
+| **Parser** | `src/board.rs` — `char_to_piece()` no longer maps `'C'`/`'c'`; only standard `K`/`k` are accepted. Non-standard FENs now fail with `FenError::InvalidPlacement`. |
+| **Oracle** | Fairy-Stockfish `atomic` variant registers the commoner as `add_piece(COMMONER, 'k')` (`src/variant.cpp:514`). |
+| **Tests** | 3 regression tests added: `test_fen_uses_standard_commoner_label`, `test_from_fen_rejects_nonstandard_commoner_label` (`src/board.rs`), `test_commoner_ascii_char_is_standard` (`src/types.rs`). 2 unit-test FENs using `3C4` changed to `3K4`. |
+
+### 8. `cargo publish` preparation
+
+| Aspect | Detail |
+|--------|--------|
+| **Version** | `Cargo.toml`: `2.0.0` → `2.1.0` |
+| **Changelog** | `CHANGELOG.md`: new `## [2.1.0] - 2026-08-24` entry (Changed + Added). |
+| **README** | Dependency version `"2.0.0"` → `"2.1.0"`; FEN feature line notes standard notation only. |
+| **Verify** | `cargo test` (49 unit + 4 perft + 1 verify_moves + 1 doctest = 55), `cargo clippy` (0 warnings), `cargo fmt` clean, `cargo publish --dry-run` validates. |
+| **Not done** | No commit, no push, no upload — left to the user. |
+
+## Final verification (updated)
+
+| Check | Result |
+|-------|--------|
+| `cargo build` | ✅ Passes |
+| `cargo test` | ✅ 49 unit + 4 perft + 1 verify_moves + 1 doctest pass |
+| `cargo clippy` | ✅ 0 warnings |
+| `cargo fmt` | ✅ Clean |
+| `cargo run --example fen_after "<startpos>" e2e4` | ✅ Output FEN uses `K`/`k` |
+| `cargo run --example list_moves "<fen with C>"` | ✅ Rejected as `Invalid FEN` |
+| `cargo publish --dry-run` | ✅ Packaging and verification OK |
+
+---
+
+## Files modified (items 7–8)
 
 | Action | File | Description |
 |--------|------|-------------|
-| Edit (pre-existing) | `src/bitboard.rs:106` | `square_bb(s2)` → `Bitboard::EMPTY` |
-| Delete (pre-existing) | `src/main.rs` | Removed stale stub |
-| Edit (pre-existing) | `src/lib.rs` | Added `//!` crate-level doc comment |
-| Edit (pre-existing) | `README.md` | Full library description and examples |
-| Create (pre-existing) | `tests/perft_tests.rs` | Integration tests for perft reference values |
-| Edit (fixed in session) | `src/board.rs` | Fixed 4 test FENs in the `#[cfg(test)] mod tests` block |
+| Edit | `src/types.rs` | `ascii_char()` → `'K'`/`'k'` for commoners; doc comment; `test_commoner_ascii_char_is_standard` |
+| Edit | `src/board.rs` | `char_to_piece()` drops `C`/`c`; `from_fen` doc comment; 2 test FENs `3C4` → `3K4`; 2 regression tests |
+| Edit | `Cargo.toml` | Version `2.0.0` → `2.1.0` |
+| Edit | `CHANGELOG.md` | New `2.1.0` entry |
+| Edit | `README.md` | Dependency version; FEN feature line |
+| Edit | `docs/plans/fixes/plan.md` | Added items 7–8 |
+
+## Unresolved / next steps
+
+- None for the FEN fix. Note: `cargo fmt` reformatted `examples/test_d5g8.rs`
+  (whitespace/line-wrapping only) since it predated the project's fmt style.
+  The user may keep or revert that file.
+- Pre-existing, out of scope: `cargo clippy --all-targets` reports 4
+  `manual_contains` warnings in `examples/test_d5g8.rs` (present before this
+  change; default `cargo clippy` — the project's gate — is clean).
+- For the user: commit the changes, push, and run
+  `cargo publish` (without `--dry-run`) to upload `2.1.0` to the registry.

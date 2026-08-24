@@ -69,14 +69,12 @@ fn char_to_piece(c: char) -> Option<Piece> {
         'B' => Some(W_BISHOP),
         'R' => Some(W_ROOK),
         'Q' => Some(W_QUEEN),
-        'C' => Some(W_COMMONER),
         'K' => Some(W_COMMONER),
         'p' => Some(B_PAWN),
         'n' => Some(B_KNIGHT),
         'b' => Some(B_BISHOP),
         'r' => Some(B_ROOK),
         'q' => Some(B_QUEEN),
-        'c' => Some(B_COMMONER),
         'k' => Some(B_COMMONER),
         _ => None,
     }
@@ -183,8 +181,10 @@ impl Board {
     /// Parse a board from a FEN string.
     ///
     /// Accepts standard FEN with 4 or 6 space-separated fields. The piece
-    /// character set includes standard chess pieces plus `C`/`c` and `K`/`k`
-    /// for commoners (king-like pseudo-royal pieces).
+    /// character set is the standard chess set (`P`, `N`, `B`, `R`, `Q`, `K`
+    /// and their lower-case forms). The commoner — the king-like pseudo-royal
+    /// piece of atomic chess — uses the standard FEN letter `K`/`k`; the
+    /// non-standard `C`/`c` labels are rejected.
     ///
     /// # Errors
     ///
@@ -1360,6 +1360,32 @@ mod tests {
     }
 
     #[test]
+    fn test_fen_uses_standard_commoner_label() {
+        // Standard atomic FEN labels the commoner (king-like piece) as K/k.
+        let fen = Board::new().fen();
+        assert!(
+            fen.contains("K") && fen.contains("k"),
+            "standard FEN should contain 'K' and 'k', got: {fen}"
+        );
+        assert!(
+            !fen.contains('C') && !fen.contains('c'),
+            "non-standard 'C'/'c' labels must not be emitted, got: {fen}"
+        );
+    }
+
+    #[test]
+    fn test_from_fen_rejects_nonstandard_commoner_label() {
+        // C/c are not part of standard FEN; only K/k label the commoner.
+        for fen in ["8/8/8/8/8/8/8/4C3 w - - 0 1", "8/8/8/8/8/8/8/4c3 w - - 0 1"] {
+            let result = Board::from_fen(fen);
+            assert!(
+                result.is_err(),
+                "expected non-standard FEN {fen:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn test_checkers() {
         // Position where white queen gives check to black commoner
         let fen = "4k3/8/8/8/8/8/8/4Q2K b - - 0 1";
@@ -1413,7 +1439,7 @@ mod tests {
         // the commoner on d3, but the commoner on e1 survives.
         // This is NOT self-explosion — only the LAST commoner being destroyed
         // makes a move illegal.
-        let fen = "4k3/8/8/3R4/3p4/3C4/8/4K3 w - - 0 1";
+        let fen = "4k3/8/8/3R4/3p4/3K4/8/4K3 w - - 0 1";
         let board = Board::from_fen(fen).unwrap();
         let mut moves = MoveList::new();
         crate::movegen::generate_legal(&board, &mut moves);
@@ -1433,7 +1459,7 @@ mod tests {
         // White commoner ONLY on d3; white rook on d5, black pawn on d4.
         // Rook takes pawn on d4 — blast zone includes d3, destroying the
         // LAST (only) commoner → self-explosion, illegal.
-        let fen = "4k3/8/8/3R4/3p4/3C4/8/8 w - - 0 1";
+        let fen = "4k3/8/8/3R4/3p4/3K4/8/8 w - - 0 1";
         let board = Board::from_fen(fen).unwrap();
         let mut moves = MoveList::new();
         crate::movegen::generate_legal(&board, &mut moves);

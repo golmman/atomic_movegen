@@ -393,6 +393,89 @@ fn test_en_passant_blast() {
 
 ---
 
+## Item: Use only standard FEN for the commoner (king)
+
+### Description
+
+The FEN parser and exporter use the non-standard `C`/`c` label for the
+commoner (the king-like pseudo-royal piece of atomic chess).
+
+- `Piece::ascii_char()` in `src/types.rs` serializes `PieceType::Commoner` as
+  `'C'` (and `'c'` for black), so `Board::fen()` emits `C`/`c`.
+- `char_to_piece` in `src/board.rs` accepts both `C`/`c` and `K`/`k` for the
+  commoner.
+
+Fairy-Stockfish's `atomic` variant registers the commoner with the letter
+`k` (`v->add_piece(COMMONER, 'k')` in `src/variant.cpp`), and standard atomic
+FENs (Lichess, Chess.com, ICC) always use `K`/`k`. The `C`/`c` labels are
+non-standard and must not be used or accepted.
+
+### Files to modify
+
+- `src/types.rs` — `Piece::ascii_char()`
+- `src/board.rs` — `char_to_piece()`, the `from_fen` doc comment, and the two
+  unit-test FENs containing `3C4`
+- `src/board.rs` / `src/types.rs` — add regression tests
+
+### Changes needed
+
+1. `src/types.rs:505`: `PieceType::Commoner => 'C'` → `'K'` (doc comment on
+   line 492 updated accordingly).
+2. `src/board.rs`: remove `'C' => Some(W_COMMONER)` and
+   `'c' => Some(B_COMMONER)` from `char_to_piece` so non-standard FENs are
+   rejected with `FenError::InvalidPlacement`.
+3. `src/board.rs` doc comment for `from_fen` (line ~186): state that the
+   standard `K`/`k` letters are used and `C`/`c` is rejected.
+4. Test FENs using `3C4` (white commoner on d3) → `3K4`
+   (`test_self_explosion_legal_with_surviving_commoner`,
+   `test_self_explosion_illegal_last_commoner`).
+5. Add regression tests:
+   - `board::tests::test_fen_uses_standard_commoner_label` — `Board::new().fen()`
+     contains `K`/`k` and no `C`/`c`.
+   - `board::tests::test_from_fen_rejects_nonstandard_commoner_label` — FENs
+     with `C`/`c` return an error.
+   - `types::tests::test_commoner_ascii_char_is_standard` — `W_COMMONER`
+     → `'K'`, `B_COMMONER` → `'k'`.
+
+### Verification
+
+- `cargo test` — all tests pass, including the new regression tests.
+- `cargo run --example fen_after "<startpos>" e2e4` prints a FEN with `K`/`k`.
+- `cargo run --example list_moves "<fen with C>"` fails with `Invalid FEN`.
+
+---
+
+## Item: Prepare `cargo publish` (docs + version bump)
+
+### Description
+
+Prepare a `2.1.0` release: update the changelog and README, bump the crate
+version, and validate the package with `cargo publish --dry-run`. Do **not**
+commit or upload.
+
+### Files to modify
+
+- `Cargo.toml` — version `2.0.0` → `2.1.0`
+- `CHANGELOG.md` — add a `2.1.0` entry for the FEN fix
+- `README.md` — update the dependency version string and note standard FEN
+- `docs/plans/fixes/report.md` — record the new items
+
+### Changes needed
+
+1. Bump `version` in `Cargo.toml` to `2.1.0`.
+2. Add a `## [2.1.0]` entry to `CHANGELOG.md` (Changed/Added sections).
+3. Update `README.md` dependency example and the FEN feature line.
+4. Run the full verification battery: `cargo test`, `cargo clippy`,
+   `cargo fmt`, `cargo doc`, and `cargo publish --dry-run`.
+
+### Verification
+
+- `cargo test` — all tests pass.
+- `cargo clippy` — 0 warnings.
+- `cargo publish --dry-run` — packaging and verification OK.
+
+---
+
 ## Summary of all files to create/modify/delete
 
 | Action | File |
@@ -403,3 +486,9 @@ fn test_en_passant_blast() {
 | Edit | `README.md` | Full library description and examples |
 | Create | `tests/perft_tests.rs` | Integration tests for perft reference values |
 | Edit | `src/board.rs` | Add 6 edge case unit tests to `#[cfg(test)] mod tests` |
+| Edit | `src/types.rs` | `ascii_char()` emits `K`/`k` for commoners; regression test |
+| Edit | `src/board.rs` | `char_to_piece()` rejects `C`/`c`; doc comment; 2 test FENs; regression tests |
+| Edit | `Cargo.toml` | Version bump to `2.1.0` |
+| Edit | `CHANGELOG.md` | `2.1.0` entry |
+| Edit | `README.md` | Dependency version + standard FEN feature line |
+| Edit | `docs/plans/fixes/report.md` | Record the new items |
