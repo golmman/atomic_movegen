@@ -72,3 +72,11 @@ Be specific about files, line numbers, and the exact changes needed. The agent r
 | Starting position | 3 | 8902 | 8902 |
 | Starting position | 4 | 197326 | 197326 |
 | Position 2 (`r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1`) | 2 | 1939 | 1939 |
+
+---
+
+Please investigate if the FEN parser or exporter use a non-standard c/C label for the king/commoner.
+
+If so, please fix it: i want that only standard FENs are used.
+Then prepare a `cargo publish`: update docs, bump the version etc. .
+Don't commit or publish though, i'll do it myself.
