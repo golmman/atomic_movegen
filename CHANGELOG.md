@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-09-08
+
+### Added
+
+- `has_legal_move(board: &Board) -> bool` and
+  `has_legal_move_with_state(board: &Board, state: &StateInfo) -> bool` in
+  `movegen`: an early-exit legal-move existence query. Both return at the
+  first legal move and are guaranteed equivalent to
+  `!generate_legal_with_state(board, state, list).is_empty()` on every
+  position (verified by an equivalence property test over ~8,600 randomly
+  played positions plus targeted fixtures). Measured speedup versus
+  `generate_legal` (`--release`, 2M iterations per position):
+
+  | Position          | Legal moves | `generate_legal` | `has_legal_move` | Speedup |
+  |-------------------|------------:|-----------------:|-----------------:|--------:|
+  | Quiet middlegame  | 42          | 87.8 ns          | 8.9 ns           | 9.9×    |
+  | Start position    | 20          | 49.6 ns          | 8.8 ns           | 5.6×    |
+  | In check          | 4           | 38.0 ns          | 12.1 ns          | 3.1×    |
+  | Captures only     | 2           | 40.6 ns          | 12.9 ns          | 3.2×    |
+  | No legal move     | 0           | 125.6 ns         | 125.3 ns         | 1.0×    |
+
+  (A no-legal-move position necessarily costs one full candidate-stream
+  traversal: absence can only be proven by exhausting the stream.)
+
+### Changed
+
+- Internal, behavior-preserving: `generate_pseudo_legal` is now a thin
+  wrapper over a new `for_each_pseudo_legal` candidate stream that walks the
+  same stages in the same order (pawns → knights → bishops → rooks → queens →
+  commoners → castling) and supports early exit. The exact generation order
+  of both `generate_pseudo_legal` and `generate_legal` is pinned by the new
+  `tests/move_order_golden.rs` golden test, generated from the
+  pre-refactor implementation.
+
 ## [2.1.0] - 2026-08-24
 
 ### Changed
