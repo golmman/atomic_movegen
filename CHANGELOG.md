@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-09-10
+
+### Added
+
+- `Board::hash_after(m: Move) -> u64`: the Zobrist hash of the position after
+  `m`, computed without modifying the board. Exactly equal to
+  `{ let mut b = board.clone(); b.do_move(m, &mut st); b.hash() }` for every
+  pseudo-legal move, but with no board, bitboard, or undo-record writes.
+  Intended for consumers that prefetch transposition-table lines before
+  evaluating children.
+- `Board::rule50_after(m: Move) -> u16`: the half-move clock `do_move(m, ..)`
+  would leave, without modifying the board (castling increments; a pawn move
+  or a move onto an occupied square resets to 0; anything else increments).
+- Equivalence tests pinning both functions against `do_move`:
+  a seeded random-playout property test (5 start FENs × 16 seeds × 300-ply
+  walks, exactly 8,592 positions, every pseudo-legal move checked at every
+  position) and deterministic fixtures covering castling (both sides, both
+  colors), en-passant with a blasting capture, promotions (quiet and
+  capturing, all four pieces), blast removals that clear castling rights via
+  the presence cascade (corner rook; e1/e8 commoner), a double push that
+  replaces an existing en-passant square, and rule50 reset/increment cases.
+
+### Changed
+
+- Internal, behavior-preserving: the castling-rights transition (origin/
+  destination clearing plus the post-blast rook/commoner-presence cascade) is
+  now a single pure helper shared by `do_move` and `hash_after`, so the two
+  paths cannot drift. Verified unchanged by the full gate suite, including
+  41/41 perft positions at depth 6 and the move-order goldens.
+
+### Performance
+
+`hash_after` vs a `do_move`/`hash`/`undo_move` round-trip over all legal
+moves (`--release`, fat LTO, 2M timed iterations per position):
+
+| Position | Legal moves | `hash_after` | round-trip | Speedup |
+|---|---:|---:|---:|---:|
+| Quiet middlegame | 42 | 4.5 ns | 12.7 ns | 2.8× |
+| Reference position | 43 | 4.6 ns | 12.4 ns | 2.7× |
+
+Per move class (same code, per-class loops): quiet moves 3.1–3.6 ns
+(≈ 3× the quiet round-trip), captures 8.6–9.0 ns (captures pay for the
+blast-set iteration). The remaining cost on the quiet path is two dependent
+memory loads (piece-on-square, then Zobrist piece key); removing them would
+require an incremental per-square key array on `Board`, which was out of
+scope for this additive-only release.
+
 ## [2.2.0] - 2026-09-08
 
 ### Added

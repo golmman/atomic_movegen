@@ -165,6 +165,24 @@ pub(crate) const WQ_CASTLE: u8 = 2;
 pub(crate) const BK_CASTLE: u8 = 4;
 pub(crate) const BQ_CASTLE: u8 = 8;
 
+/// Squares on rank 1 or rank 8. A quiet move that touches neither rank can
+/// never change the castling rights, which lets [`Board::hash_after`] skip
+/// the rights computation entirely.
+const BB_FIRST_LAST_RANK: Bitboard = Bitboard(0xFF00_0000_0000_00FF);
+
+/// The six castling-relevant home squares A1, E1, H1, A8, E8, H8. A capture
+/// whose blast set (plus origin) touches none of them leaves every piece the
+/// post-blast castling cascade inspects in place, so the rights cannot change
+/// beyond the origin/to-square rule, which the intersection already covers.
+const BB_CASTLE_SQUARES: Bitboard = Bitboard(
+    (1u64 << Square::A1 as u64)
+        | (1u64 << Square::E1 as u64)
+        | (1u64 << Square::H1 as u64)
+        | (1u64 << Square::A8 as u64)
+        | (1u64 << Square::E8 as u64)
+        | (1u64 << Square::H8 as u64),
+);
+
 impl Default for Board {
     fn default() -> Self {
         Self::new()
@@ -588,6 +606,241 @@ impl Board {
         self.hash
     }
 
+    /// Zobrist hash of the position after `m`, without modifying `self`.
+    ///
+    /// Exactly equal to
+    /// `{ let mut b = self.clone(); b.do_move(m, &mut st); b.hash() }` for
+    /// every move `m` that [`do_move`](Self::do_move) accepts in this position
+    /// (every pseudo-legal move). Cheaper than a `do_move`/`undo_move`
+    /// round-trip: no board, bitboard, or undo-record writes.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, panics if `from` holds no piece (i.e. `m` is not a
+    /// move `do_move` would accept).
+    #[must_use]
+    pub fn hash_after(&self, m: Move) -> u64 {
+        let us = self.side_to_move;
+        let from = m.from_sq();
+        let to = m.to_sq();
+
+        if m.move_type() == MoveType::Castling {
+            let (kfrom, kto, rfrom, rto) = castling_squares(us, to > from);
+            let commoner = make_piece(us, PieceType::Commoner);
+            let rook = make_piece(us, PieceType::Rook);
+            let mut h = self.hash
+                ^ crate::zobrist::ZOBRIST.side
+                ^ piece_key(kfrom, commoner)
+                ^ piece_key(kto, commoner)
+                ^ piece_key(rfrom, rook)
+                ^ piece_key(rto, rook);
+            let new_rights = self.castling_rights
+                & match us {
+                    Color::White => !(WK_CASTLE | WQ_CASTLE),
+                    Color::Black => !(BK_CASTLE | BQ_CASTLE),
+                };
+            h ^= crate::zobrist::ZOBRIST.castling[self.castling_rights as usize];
+            h ^= crate::zobrist::ZOBRIST.castling[new_rights as usize];
+            if let Some(sq) = self.ep_square {
+                h ^= crate::zobrist::ZOBRIST.ep[file_of(sq) as usize];
+            }
+            return h;
+        }
+
+        let piece = self.squares[from as usize];
+        debug_assert!(
+            piece != NO_PIECE,
+            "hash_after on a move from an empty square"
+        );
+        // Pawn iff the low three bits of the raw encoding are `Pawn + 1`
+        // (piece types are encoded as `type + 1`, pawn is variant 0). Avoids
+        // the `type_of()` option/table round-trip on the hot quiet path.
+        let is_pawn = piece.raw() & 7 == PieceType::Pawn as u8 + 1;
+        let is_capture = !self.empty(to);
+        let is_capture_or_ep = is_capture || m.move_type() == MoveType::EnPassant;
+
+        let mut h = self.hash ^ crate::zobrist::ZOBRIST.side;
+        // Occupancy and pawn bitboards, mirrored to the exact intermediate
+        // state `do_move` uses when it computes the blast zone: captured
+        // piece removed, capturer relocated. Only capture moves need them.
+        let mut occupied = Bitboard::EMPTY;
+        let mut pawns = Bitboard::EMPTY;
+        let mut ep_cap_sq = Square::NONE;
+
+        if is_capture_or_ep {
+            occupied = self.occupied();
+            pawns = self.by_type[PieceType::Pawn as usize];
+            if m.move_type() == MoveType::EnPassant {
+                let ep_cap = match us {
+                    Color::White => Square::from_index(to as i8 - 8),
+                    Color::Black => Square::from_index(to as i8 + 8),
+                };
+                let cap = self.squares[ep_cap as usize];
+                h ^= piece_key(ep_cap, cap);
+                let cap_bb = Bitboard::square_bb(ep_cap);
+                occupied = occupied ^ cap_bb;
+                pawns = pawns ^ cap_bb;
+                ep_cap_sq = ep_cap;
+            } else {
+                let cap = self.squares[to as usize];
+                h ^= piece_key(to, cap);
+                occupied = occupied ^ Bitboard::square_bb(to);
+                if cap.raw() & 7 == PieceType::Pawn as u8 + 1 {
+                    pawns = pawns ^ Bitboard::square_bb(to);
+                }
+            }
+        }
+
+        let from_bb = Bitboard::square_bb(from);
+        let to_bb = Bitboard::square_bb(to);
+        if m.move_type() == MoveType::Promotion {
+            let prom_piece = make_piece(us, m.promotion_type());
+            h = h ^ piece_key(from, make_piece(us, PieceType::Pawn)) ^ piece_key(to, prom_piece);
+            if is_capture_or_ep {
+                pawns = pawns ^ from_bb;
+            }
+        } else {
+            h = h ^ piece_key(from, piece) ^ piece_key(to, piece);
+            if is_pawn && is_capture_or_ep {
+                pawns = pawns ^ from_bb ^ to_bb;
+            }
+        }
+
+        // Blast zone, identical to `do_move`: pawns (other than at ground
+        // zero) are immune, and empty squares in the ring stay empty. Quiet
+        // moves trigger no blast at all.
+        let mover_raw = if m.move_type() == MoveType::Promotion {
+            make_piece(us, m.promotion_type()).raw()
+        } else {
+            piece.raw()
+        };
+        let mut removed_bb = Bitboard::EMPTY;
+        if is_capture_or_ep {
+            occupied = (occupied ^ from_bb) | to_bb;
+            let blast = (attacks::king_attacks(to) & !pawns & occupied) | to_bb;
+
+            // Pieces vaporized by the blast, capturer at ground zero
+            // included. Squares in the blast zone but outside `occupied`
+            // were already empty before the blast and contribute nothing.
+            let blasted = blast & occupied;
+            // At blast time `to` holds the mover (the captured piece is
+            // already gone), everywhere else the original occupant.
+            let mut b = blasted;
+            while !b.is_empty() {
+                let bsq = b.pop_lsb();
+                let raw = if bsq == to {
+                    mover_raw
+                } else {
+                    self.squares[bsq as usize].raw()
+                };
+                h ^= piece_key_raw(bsq, raw);
+            }
+            // Every square emptied by this capture move: origin, en-passant
+            // victim square, blast set. Used for the post-blast castling
+            // cascade below.
+            removed_bb = blasted | from_bb;
+            if ep_cap_sq != Square::NONE {
+                removed_bb = removed_bb | Bitboard::square_bb(ep_cap_sq);
+            }
+        }
+
+        // Castling rights: the shared pure helper consumes the post-blast
+        // contents of H1/A1/E1/H8/A8/E8 (only needed for captures; every
+        // square emptied by a capture is in `removed_bb` — origin,
+        // en-passant victim square, or blast set — everything else keeps
+        // its piece).
+        let new_rights = if is_capture_or_ep && removed_bb & BB_CASTLE_SQUARES != Bitboard::EMPTY {
+            let post_blast = [
+                if removed_bb & Bitboard::square_bb(Square::H1) != Bitboard::EMPTY {
+                    NO_PIECE
+                } else {
+                    self.squares[Square::H1 as usize]
+                },
+                if removed_bb & Bitboard::square_bb(Square::A1) != Bitboard::EMPTY {
+                    NO_PIECE
+                } else {
+                    self.squares[Square::A1 as usize]
+                },
+                if removed_bb & Bitboard::square_bb(Square::E1) != Bitboard::EMPTY {
+                    NO_PIECE
+                } else {
+                    self.squares[Square::E1 as usize]
+                },
+                if removed_bb & Bitboard::square_bb(Square::H8) != Bitboard::EMPTY {
+                    NO_PIECE
+                } else {
+                    self.squares[Square::H8 as usize]
+                },
+                if removed_bb & Bitboard::square_bb(Square::A8) != Bitboard::EMPTY {
+                    NO_PIECE
+                } else {
+                    self.squares[Square::A8 as usize]
+                },
+                if removed_bb & Bitboard::square_bb(Square::E8) != Bitboard::EMPTY {
+                    NO_PIECE
+                } else {
+                    self.squares[Square::E8 as usize]
+                },
+            ];
+            castling_rights_after(self.castling_rights, from, to, true, &post_blast)
+        } else if is_capture_or_ep {
+            // No castling-relevant square touched: rights unchanged.
+            self.castling_rights
+        } else if (from_bb | to_bb) & BB_FIRST_LAST_RANK == Bitboard::EMPTY {
+            // A quiet move touching neither back rank cannot change rights.
+            self.castling_rights
+        } else {
+            castling_rights_after(self.castling_rights, from, to, false, &[NO_PIECE; 6])
+        };
+        if new_rights != self.castling_rights {
+            h ^= crate::zobrist::ZOBRIST.castling[self.castling_rights as usize];
+            h ^= crate::zobrist::ZOBRIST.castling[new_rights as usize];
+        }
+
+        // En-passant square transition: old file out, new file in.
+        if let Some(sq) = self.ep_square {
+            h ^= crate::zobrist::ZOBRIST.ep[file_of(sq) as usize];
+        }
+        if is_pawn && (to as i8 - from as i8).abs() == 16 {
+            let new_ep = match us {
+                Color::White => Square::from_index(from as i8 + 8),
+                Color::Black => Square::from_index(from as i8 - 8),
+            };
+            h ^= crate::zobrist::ZOBRIST.ep[file_of(new_ep) as usize];
+        }
+
+        h
+    }
+
+    /// Half-move clock after `m`, without modifying `self`.
+    ///
+    /// Exactly equal to the [`rule50()`](Self::rule50) value
+    /// [`do_move`](Self::do_move)`(m, ..)` would leave: castling increments
+    /// it; otherwise a pawn move or a move onto an occupied square resets it
+    /// to 0, and any other move increments it.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, panics if `from` holds no piece (i.e. `m` is not a
+    /// move `do_move` would accept).
+    #[must_use]
+    pub fn rule50_after(&self, m: Move) -> u16 {
+        if m.move_type() == MoveType::Castling {
+            return self.rule50 + 1;
+        }
+        let piece = self.squares[m.from_sq() as usize];
+        debug_assert!(
+            piece != NO_PIECE,
+            "rule50_after on a move from an empty square"
+        );
+        let pt = piece.type_of().unwrap();
+        if pt == PieceType::Pawn || !self.empty(m.to_sq()) {
+            0
+        } else {
+            self.rule50 + 1
+        }
+    }
+
     /// Return the bitboard of commoners (king-like pseudo-royal pieces) for a color.
     #[inline(always)]
     #[must_use]
@@ -882,48 +1135,25 @@ impl Board {
             }
         }
 
-        self.update_castling_rights(from, to, us, is_capture_or_ep);
-
-        if is_capture_or_ep {
-            // Clear white king-side right if the H1 rook is gone.
-            if self.castling_rights & WK_CASTLE != 0
-                && self.squares[Square::H1 as usize] != make_piece(Color::White, PieceType::Rook)
-            {
-                self.castling_rights &= !WK_CASTLE;
-            }
-            // Clear white queen-side right if the A1 rook is gone.
-            if self.castling_rights & WQ_CASTLE != 0
-                && self.squares[Square::A1 as usize] != make_piece(Color::White, PieceType::Rook)
-            {
-                self.castling_rights &= !WQ_CASTLE;
-            }
-            // Clear black king-side right if the H8 rook is gone.
-            if self.castling_rights & BK_CASTLE != 0
-                && self.squares[Square::H8 as usize] != make_piece(Color::Black, PieceType::Rook)
-            {
-                self.castling_rights &= !BK_CASTLE;
-            }
-            // Clear black queen-side right if the A8 rook is gone.
-            if self.castling_rights & BQ_CASTLE != 0
-                && self.squares[Square::A8 as usize] != make_piece(Color::Black, PieceType::Rook)
-            {
-                self.castling_rights &= !BQ_CASTLE;
-            }
-            // Clear all white castling rights if the commoner on E1 is gone.
-            if self.castling_rights & (WK_CASTLE | WQ_CASTLE) != 0
-                && self.squares[Square::E1 as usize]
-                    != make_piece(Color::White, PieceType::Commoner)
-            {
-                self.castling_rights &= !(WK_CASTLE | WQ_CASTLE);
-            }
-            // Clear all black castling rights if the commoner on E8 is gone.
-            if self.castling_rights & (BK_CASTLE | BQ_CASTLE) != 0
-                && self.squares[Square::E8 as usize]
-                    != make_piece(Color::Black, PieceType::Commoner)
-            {
-                self.castling_rights &= !(BK_CASTLE | BQ_CASTLE);
-            }
-        }
+        // Post-blast contents of the castling-relevant squares; the cascade
+        // that drops rights whose rook/commoner vanished lives in the same
+        // pure helper that [`Board::hash_after`] uses, so the two paths
+        // cannot drift.
+        let post_blast = [
+            self.squares[Square::H1 as usize],
+            self.squares[Square::A1 as usize],
+            self.squares[Square::E1 as usize],
+            self.squares[Square::H8 as usize],
+            self.squares[Square::A8 as usize],
+            self.squares[Square::E8 as usize],
+        ];
+        self.castling_rights = castling_rights_after(
+            self.castling_rights,
+            from,
+            to,
+            is_capture_or_ep,
+            &post_blast,
+        );
 
         if pt == PieceType::Pawn && (to as i8 - from as i8).abs() == 16 {
             self.ep_square = Some(match us {
@@ -1068,34 +1298,6 @@ impl Board {
         }
     }
 
-    fn update_castling_rights(&mut self, from: Square, to: Square, _us: Color, is_capture: bool) {
-        // King side
-        if from == Square::E1
-            || from == Square::H1
-            || (is_capture && (to == Square::H1 || to == Square::E1))
-        {
-            self.castling_rights &= !WK_CASTLE;
-        }
-        if from == Square::E1
-            || from == Square::A1
-            || (is_capture && (to == Square::A1 || to == Square::E1))
-        {
-            self.castling_rights &= !WQ_CASTLE;
-        }
-        if from == Square::E8
-            || from == Square::H8
-            || (is_capture && (to == Square::H8 || to == Square::E8))
-        {
-            self.castling_rights &= !BK_CASTLE;
-        }
-        if from == Square::E8
-            || from == Square::A8
-            || (is_capture && (to == Square::A8 || to == Square::E8))
-        {
-            self.castling_rights &= !BQ_CASTLE;
-        }
-    }
-
     /// Check whether `m` is legal under atomic chess rules.
     ///
     /// Considers blast-zone effects (self-explosion), castling pass-through
@@ -1221,6 +1423,112 @@ fn attackers_to(board: &Board, sq: Square, occupied: Bitboard, enemy_bb: Bitboar
         | attacks::pawn_attacks(board.side_to_move, sq)
             & board.by_type[PieceType::Pawn as usize]
             & enemy_bb
+}
+
+/// Return the Zobrist piece key for the piece with raw encoding `raw`
+/// standing on `sq`, skipping the bounds checks the compiler cannot elide.
+///
+/// `ZOBRIST.piece` is `[[-u64; 16]; 64]`. Every `Square` used as a board
+/// index is `< 64` and every piece raw encoding is `< 16` by construction
+/// (see `types.rs`); debug builds assert both, release builds rely on the
+/// invariants. This is confined to `hash_after`, where the extra compare-
+/// and-panic plumbing per table load was a measurable share of the runtime.
+#[inline(always)]
+fn piece_key_raw(sq: Square, raw: u8) -> u64 {
+    debug_assert!((sq as usize) < 64);
+    debug_assert!((raw as usize) < 16);
+    // SAFETY: in-bounds per the invariants above (debug-asserted).
+    unsafe {
+        *crate::zobrist::ZOBRIST
+            .piece
+            .get_unchecked(sq as usize)
+            .get_unchecked(raw as usize)
+    }
+}
+
+/// Same as [`piece_key_raw`] for a full [`Piece`].
+#[inline(always)]
+fn piece_key(sq: Square, piece: Piece) -> u64 {
+    piece_key_raw(sq, piece.raw())
+}
+
+/// Pure castling-rights transition for one move, shared by
+/// [`Board::do_move`] and [`Board::hash_after`] so the mutating and the
+/// speculative paths cannot drift.
+///
+/// `old_rights` are the rights before the move. `is_capture` must be set for
+/// normal *and* en-passant captures (anything that triggers a blast).
+/// `post_blast` holds the piece on H1, A1, E1, H8, A8, E8 *after* the move
+/// (blast removals included); when `is_capture` is set, rights whose rook or
+/// commoner no longer occupies its home square are dropped.
+fn castling_rights_after(
+    old_rights: u8,
+    from: Square,
+    to: Square,
+    is_capture: bool,
+    post_blast: &[Piece; 6],
+) -> u8 {
+    let mut rights = old_rights;
+
+    // King side
+    if from == Square::E1
+        || from == Square::H1
+        || (is_capture && (to == Square::H1 || to == Square::E1))
+    {
+        rights &= !WK_CASTLE;
+    }
+    if from == Square::E1
+        || from == Square::A1
+        || (is_capture && (to == Square::A1 || to == Square::E1))
+    {
+        rights &= !WQ_CASTLE;
+    }
+    if from == Square::E8
+        || from == Square::H8
+        || (is_capture && (to == Square::H8 || to == Square::E8))
+    {
+        rights &= !BK_CASTLE;
+    }
+    if from == Square::E8
+        || from == Square::A8
+        || (is_capture && (to == Square::A8 || to == Square::E8))
+    {
+        rights &= !BQ_CASTLE;
+    }
+
+    if is_capture {
+        let [h1, a1, e1, h8, a8, e8] = *post_blast;
+        // Clear white king-side right if the H1 rook is gone.
+        if rights & WK_CASTLE != 0 && h1 != make_piece(Color::White, PieceType::Rook) {
+            rights &= !WK_CASTLE;
+        }
+        // Clear white queen-side right if the A1 rook is gone.
+        if rights & WQ_CASTLE != 0 && a1 != make_piece(Color::White, PieceType::Rook) {
+            rights &= !WQ_CASTLE;
+        }
+        // Clear black king-side right if the H8 rook is gone.
+        if rights & BK_CASTLE != 0 && h8 != make_piece(Color::Black, PieceType::Rook) {
+            rights &= !BK_CASTLE;
+        }
+        // Clear black queen-side right if the A8 rook is gone.
+        if rights & BQ_CASTLE != 0 && a8 != make_piece(Color::Black, PieceType::Rook) {
+            rights &= !BQ_CASTLE;
+        }
+        // Clear all white castling rights if the commoner on E1 is gone.
+        if rights & (WK_CASTLE | WQ_CASTLE) != 0
+            && e1 != make_piece(Color::White, PieceType::Commoner)
+        {
+            rights &= !(WK_CASTLE | WQ_CASTLE);
+        }
+        // Clear all black castling rights if the commoner on E8 is gone.
+        if rights & (BK_CASTLE | BQ_CASTLE) != 0
+            && e8 != make_piece(Color::Black, PieceType::Commoner)
+        {
+            rights &= !(BK_CASTLE | BQ_CASTLE);
+        }
+    }
+
+    rights
 }
 
 /// Return the castling square data for a given color and side.
@@ -1644,5 +1952,240 @@ mod tests {
         let non_capture = Move::make_move(Square::E4, Square::E5);
         assert!(board.is_capture(capture));
         assert!(!board.is_capture(non_capture));
+    }
+
+    // --- hash_after / rule50_after equivalence tests ---
+
+    /// Assert the `hash_after`/`rule50_after` contract for a single move:
+    /// both must match a cloned board's `do_move` result exactly.
+    fn assert_after_equivalence(board: &Board, m: Move) {
+        let expected_hash = board.hash_after(m);
+        let expected_rule50 = board.rule50_after(m);
+
+        let mut played = board.clone();
+        let mut state = StateInfo::new();
+        played.do_move(m, &mut state);
+
+        assert_eq!(
+            expected_hash,
+            played.hash(),
+            "hash_after mismatch for {} at {}",
+            m.to_uci(),
+            board.fen()
+        );
+        assert_eq!(
+            expected_rule50,
+            played.rule50(),
+            "rule50_after mismatch for {} at {}",
+            m.to_uci(),
+            board.fen()
+        );
+        // The speculative path must not touch `self`.
+        assert_eq!(board.fen(), board.fen()); // sanity; `board` is `&self`
+    }
+
+    /// Deterministic xorshift64 PRNG (mirrors the movegen harness).
+    struct Xorshift2(u64);
+
+    impl Xorshift2 {
+        fn new(seed: u64) -> Self {
+            Xorshift2(seed | 1)
+        }
+
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+    }
+
+    /// At every visited position, check `hash_after`/`rule50_after` for every
+    /// pseudo-legal move against a cloned board's `do_move`, then recurse
+    /// along a random legal move (same walk as the movegen harness).
+    fn check_after_and_playout(
+        board: &mut Board,
+        rng: &mut Xorshift2,
+        depth: u32,
+        visited: &mut u64,
+    ) {
+        *visited += 1;
+
+        let mut pseudo = MoveList::new();
+        crate::movegen::generate_pseudo_legal(board, &mut pseudo);
+        for &m in pseudo.as_slice() {
+            assert_after_equivalence(board, m);
+        }
+
+        let mut state = StateInfo::new();
+        board.populate_state(&mut state);
+
+        let mut list = MoveList::new();
+        crate::movegen::generate_legal_with_state(board, &state, &mut list);
+
+        if depth == 0 || list.is_empty() {
+            return;
+        }
+
+        let idx = (rng.next() % list.len() as u64) as usize;
+        let m = list[idx];
+        board.do_move(m, &mut state);
+        check_after_and_playout(board, rng, depth - 1, visited);
+        board.undo_move(m, &state);
+    }
+
+    #[test]
+    fn hash_after_equivalence_random_playouts() {
+        const START_FENS: &[&str] = &[
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            // Capture-rich middlegame: explosions change occupancy mid-move.
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            // Promotion-heavy position with black pawns about to promote.
+            "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1",
+        ];
+
+        let mut visited = 0u64;
+        for (i, fen) in START_FENS.iter().enumerate() {
+            for seed in 0..16u64 {
+                let mut board = Board::from_fen(fen).expect("start FEN must parse");
+                let mut rng = Xorshift2::new(0x9E37_79B9_7F4A_7C15 ^ ((i as u64) << 32) ^ seed);
+                check_after_and_playout(&mut board, &mut rng, 300, &mut visited);
+            }
+        }
+        assert!(
+            visited > 5000,
+            "expected several thousand positions, got {visited}"
+        );
+        assert_eq!(visited, 8_592);
+    }
+
+    #[test]
+    fn hash_after_deterministic_fixtures() {
+        // (name, fen, moves)
+        let fixtures: &[(&str, &str, &[Move])] = &[
+            (
+                "castling_white_kingside",
+                "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+                &[Move::make_castling(Square::E1, Square::H1)],
+            ),
+            (
+                "castling_white_queenside",
+                "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+                &[Move::make_castling(Square::E1, Square::A1)],
+            ),
+            (
+                "castling_black_kingside",
+                "r3k2r/8/8/8/8/8/8/R3K2R b KQkq - 0 1",
+                &[Move::make_castling(Square::E8, Square::H8)],
+            ),
+            (
+                "castling_black_queenside",
+                "r3k2r/8/8/8/8/8/8/R3K2R b KQkq - 0 1",
+                &[Move::make_castling(Square::E8, Square::A8)],
+            ),
+            (
+                // dxc6 e.p.: the blast at d6 vaporizes the knight on e7.
+                "en_passant_blast_removes_piece",
+                "4k3/4n3/8/2Pp4/8/8/8/4K3 w - d6 0 2",
+                &[Move::make_enpassant(Square::C5, Square::D6)],
+            ),
+            (
+                // Double pawn push b2b4 replaces the existing ep square d6.
+                "double_push_replaces_ep",
+                "4k3/8/8/3p4/8/8/PP6/4K3 w - d6 0 2",
+                &[Move::make_move(Square::B2, Square::B4)],
+            ),
+            (
+                // Quiet promotions b7b8 and capture promotions b7xa8/b7xc8,
+                // all four promotion pieces.
+                "promotions",
+                "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1",
+                &[
+                    Move::make_promotion(Square::B7, Square::B8, PieceType::Queen),
+                    Move::make_promotion(Square::B7, Square::B8, PieceType::Rook),
+                    Move::make_promotion(Square::B7, Square::B8, PieceType::Bishop),
+                    Move::make_promotion(Square::B7, Square::B8, PieceType::Knight),
+                    Move::make_promotion(Square::B7, Square::A8, PieceType::Queen),
+                    Move::make_promotion(Square::B7, Square::A8, PieceType::Rook),
+                    Move::make_promotion(Square::B7, Square::A8, PieceType::Bishop),
+                    Move::make_promotion(Square::B7, Square::A8, PieceType::Knight),
+                    Move::make_promotion(Square::B7, Square::C8, PieceType::Queen),
+                    Move::make_promotion(Square::B7, Square::C8, PieceType::Rook),
+                    Move::make_promotion(Square::B7, Square::C8, PieceType::Bishop),
+                    Move::make_promotion(Square::B7, Square::C8, PieceType::Knight),
+                ],
+            ),
+            (
+                // qxb2: the blast at b2 removes the corner rook on a1, so the
+                // white queen-side right is lost via the presence cascade.
+                "blast_removes_corner_rook",
+                "r3k2r/8/8/8/8/q7/1Q6/R3K3 b Qkq - 0 1",
+                &[Move::make_move(Square::A3, Square::B2)],
+            ),
+            (
+                // qxe2: the blast at e2 removes the commoner on e1, losing
+                // both white rights via the presence cascade.
+                "blast_removes_e1_commoner",
+                "4k3/8/8/8/8/3q4/4P3/4K2R b K - 0 1",
+                &[Move::make_move(Square::D3, Square::E2)],
+            ),
+            (
+                // Qxe7: the blast at e7 removes the commoner on e8, losing
+                // both black rights via the presence cascade.
+                "blast_removes_e8_commoner",
+                "4k3/3Qp3/8/8/8/8/8/4K3 w - - 0 1",
+                &[Move::make_move(Square::D7, Square::E7)],
+            ),
+        ];
+
+        for (name, fen, moves) in fixtures {
+            let board = Board::from_fen(fen).expect("fixture FEN must parse");
+            for &m in *moves {
+                assert_after_equivalence(&board, m);
+            }
+            let _ = name;
+        }
+    }
+
+    #[test]
+    fn rule50_after_fixtures() {
+        // Reset by a pawn move.
+        let board = Board::from_fen("4k3/8/8/8/8/8/4P3/4K3 w - - 23 40").unwrap();
+        assert_eq!(
+            board.rule50_after(Move::make_move(Square::E2, Square::E4)),
+            0
+        );
+
+        // Reset by a capture.
+        let board = Board::from_fen("4k3/8/8/8/8/3q4/4P3/4K2R b K - 41 60").unwrap();
+        assert_eq!(
+            board.rule50_after(Move::make_move(Square::D3, Square::E2)),
+            0
+        );
+
+        // Reset by an en-passant capture (a pawn move).
+        let board = Board::from_fen("4k3/8/8/2Pp4/8/8/8/4K3 w - d6 0 2").unwrap();
+        assert_eq!(
+            board.rule50_after(Move::make_enpassant(Square::C5, Square::D6)),
+            0
+        );
+
+        // Incremented by castling.
+        let board = Board::from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 7 30").unwrap();
+        assert_eq!(
+            board.rule50_after(Move::make_castling(Square::E1, Square::G1)),
+            8
+        );
+
+        // Incremented by a quiet piece move.
+        let board = Board::from_fen("4k3/8/8/8/8/8/8/4K2R w - - 7 30").unwrap();
+        assert_eq!(
+            board.rule50_after(Move::make_move(Square::H1, Square::H2)),
+            8
+        );
     }
 }
