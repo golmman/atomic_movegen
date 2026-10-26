@@ -36,12 +36,14 @@ pub(crate) fn for_each_pseudo_legal<B>(
     let us = board.side_to_move();
     let them = us.flip();
     let occupied = board.occupied();
-    let target = !occupied | board.pieces_color(them);
+    let them_bb = board.pieces_color(them);
+    let ep_square = board.ep_square();
+    let target = !occupied | them_bb;
 
     let mut p = board.pieces_color_pt(us, PieceType::Pawn);
     while !p.is_empty() {
         let from = p.pop_lsb();
-        generate_pawn_moves_for(board, us, them, from, f)?;
+        generate_pawn_moves_for(board, us, occupied, them_bb, ep_square, from, f)?;
     }
 
     generate_piece_moves(
@@ -110,28 +112,35 @@ fn generate_piece_moves<B>(
     ControlFlow::Continue(())
 }
 
+/// Emit the pseudo-legal moves of one pawn in generation order: single push (or
+/// its four promotions), double push, captures (ascending target square, i.e.
+/// west before east), en passant.
+///
+/// `occupied`, `them_bb` and `ep_square` are per-node values hoisted by the
+/// caller; the pawn targets come from the compile-time attack tables.
 fn generate_pawn_moves_for<B>(
     board: &Board,
     us: Color,
-    them: Color,
+    occupied: Bitboard,
+    them_bb: Bitboard,
+    ep_square: Option<Square>,
     from: Square,
     f: &mut impl FnMut(Move) -> ControlFlow<B>,
 ) -> ControlFlow<B> {
-    let from_rank = rank_of(from);
-    let from_f = file_of(from) as i8;
-
-    let (push_dir, push_double, start_rank, promo_rank) = match us {
-        Color::White => (8i8, 16i8, Rank::R2, Rank::R8),
-        Color::Black => (-8i8, -16i8, Rank::R7, Rank::R1),
+    let them = us.flip();
+    let (start_rank, promo_from_rank) = match us {
+        Color::White => (Rank::R2, Rank::R7),
+        Color::Black => (Rank::R7, Rank::R2),
     };
+    let from_rank = rank_of(from);
+    let promoting = from_rank == promo_from_rank;
+    let attacks_bb = attacks::pawn_attacks(us, from);
 
-    let from_idx = from as i8;
-
-    // Single push
-    let to_idx = from_idx + push_dir;
-    let to_sq = Square::from_index(to_idx);
-    if to_sq != Square::NONE && board.empty(to_sq) {
-        if rank_of(to_sq) == promo_rank {
+    // Single push. A promotion push expands to the four promotion moves.
+    let single = attacks::pawn_pushes(us, from) & !occupied;
+    if !single.is_empty() {
+        let to_sq = single.lsb();
+        if promoting {
             for &pt in &PROMOTION_PIECES {
                 f(Move::make_promotion(from, to_sq, pt))?;
             }
@@ -139,58 +148,40 @@ fn generate_pawn_moves_for<B>(
             f(Move::make_move(from, to_sq))?;
         }
 
-        // Double push (only from starting rank)
+        // Double push: only from the start rank, and only when the
+        // intermediate square is empty (implied by the single push being
+        // non-empty) and the destination is empty.
         if from_rank == start_rank {
-            let to_idx2 = from_idx + push_double;
-            let to_sq2 = Square::from_index(to_idx2);
-            if to_sq2 != Square::NONE && board.empty(to_sq2) {
-                f(Move::make_move(from, to_sq2))?;
+            let double = attacks::pawn_double_pushes(us, from) & !occupied;
+            if !double.is_empty() {
+                f(Move::make_move(from, double.lsb()))?;
             }
         }
     }
 
-    // Captures - adjacent files only
-    for df in &[-1i8, 1i8] {
-        let target_f = from_f + df;
-        if !(0..=7).contains(&target_f) {
-            continue;
-        }
-        let to_idx = from_idx + push_dir + df;
-        let to_sq = Square::from_index(to_idx);
-        if to_sq == Square::NONE {
-            continue;
-        }
-        // Verify correct file (guard against wrapping)
-        if file_of(to_sq) as i8 != target_f {
-            continue;
-        }
-        if board.pieces_color(them) & Bitboard::square_bb(to_sq) != Bitboard::EMPTY {
-            if rank_of(to_sq) == promo_rank {
-                for &pt in &PROMOTION_PIECES {
-                    f(Move::make_promotion(from, to_sq, pt))?;
-                }
-            } else {
-                f(Move::make_move(from, to_sq))?;
+    // Captures. `pop_lsb` visits ascending target squares, which is the
+    // required west-before-east order for both colours.
+    let mut captures = attacks_bb & them_bb;
+    while !captures.is_empty() {
+        let to_sq = captures.pop_lsb();
+        if promoting {
+            for &pt in &PROMOTION_PIECES {
+                f(Move::make_promotion(from, to_sq, pt))?;
             }
+        } else {
+            f(Move::make_move(from, to_sq))?;
         }
     }
 
     // En passant
-    if let Some(ep_sq) = board.ep_square() {
-        let ep_f = file_of(ep_sq) as i8;
-        if ep_f == from_f - 1 || ep_f == from_f + 1 {
-            let df = ep_f - from_f;
-            let to_idx = from_idx + push_dir + df;
-            let to_sq = Square::from_index(to_idx);
-            if to_sq == ep_sq {
-                let ep_cap_idx = match us {
-                    Color::White => ep_sq as i8 - 8,
-                    Color::Black => ep_sq as i8 + 8,
-                };
-                let ep_cap = Square::from_index(ep_cap_idx);
-                if board.piece_on(ep_cap) == make_piece(them, PieceType::Pawn) {
-                    f(Move::make_enpassant(from, ep_sq))?;
-                }
+    if let Some(ep_sq) = ep_square {
+        if attacks_bb & Bitboard::square_bb(ep_sq) != Bitboard::EMPTY {
+            let ep_cap = match us {
+                Color::White => Square::from_index(ep_sq as i8 - 8),
+                Color::Black => Square::from_index(ep_sq as i8 + 8),
+            };
+            if board.piece_on(ep_cap) == make_piece(them, PieceType::Pawn) {
+                f(Move::make_enpassant(from, ep_sq))?;
             }
         }
     }

@@ -137,6 +137,69 @@ const GOLDENS: &[(&str, &str, &[&str], &[&str])] = &[
             "f1d3", "f1c4", "f1b5", "f1a6", "d1e2", "d1f3", "d1g4", "d1h5", "e1e2",
         ],
     ),
+    (
+        "perf13",
+        "rnbqkbnr/ppp4p/4p1p1/3pNp2/7Q/4P3/PPPP1PPP/RNB1KB1R b KQkq - 1 5",
+        &[
+            "d5d4", "f5f4", "g6g5", "a7a6", "a7a5", "b7b6", "b7b5", "c7c6", "c7c5", "h7h6", "h7h5",
+            "b8a6", "b8c6", "b8d7", "g8f6", "g8h6", "g8e7", "c8d7", "f8a3", "f8b4", "f8c5", "f8d6",
+            "f8h6", "f8e7", "f8g7", "d8h4", "d8g5", "d8d6", "d8f6", "d8d7", "d8e7", "e8d7", "e8e7",
+            "e8f7",
+        ],
+        &[
+            "d5d4", "f5f4", "g6g5", "a7a6", "a7a5", "b7b6", "b7b5", "c7c6", "c7c5", "h7h6", "h7h5",
+            "b8a6", "b8c6", "b8d7", "g8f6", "g8h6", "g8e7", "c8d7", "f8a3", "f8b4", "f8c5", "f8d6",
+            "f8h6", "f8e7", "f8g7", "d8h4", "d8g5", "d8d6", "d8f6", "d8d7", "d8e7",
+        ],
+    ),
+    (
+        "perf14",
+        "r1b1Brk1/ppp5/6pp/3p4/5p2/P3PP2/1P4PP/R4RK1 b - - 1 15",
+        &[
+            "f4e3", "d5d4", "g6g5", "h6h5", "a7a6", "a7a5", "b7b6", "b7b5", "c7c6", "c7c5", "c8h3",
+            "c8g4", "c8f5", "c8e6", "c8d7", "a8b8", "f8f5", "f8f6", "f8f7", "f8e8", "g8f7", "g8g7",
+            "g8h7", "g8h8",
+        ],
+        &[
+            "f4e3", "d5d4", "g6g5", "h6h5", "a7a6", "a7a5", "b7b6", "b7b5", "c7c6", "c7c5", "c8h3",
+            "c8g4", "c8f5", "c8e6", "c8d7", "a8b8", "f8f5", "f8f6", "f8f7", "f8e8", "g8g7", "g8h7",
+            "g8h8",
+        ],
+    ),
+    (
+        "en_passant_white",
+        "8/8/8/1pP5/8/8/1k6/4K3 w - b6 0 1",
+        &["c5c6", "c5b6", "e1d1", "e1f1", "e1d2", "e1e2", "e1f2"],
+        &["c5c6", "c5b6", "e1d1", "e1f1", "e1d2", "e1e2", "e1f2"],
+    ),
+    (
+        "en_passant_black",
+        "4k3/8/8/8/3pP3/8/8/4K3 b - e3 0 1",
+        &["d4d3", "d4e3", "e8d7", "e8e7", "e8f7", "e8d8", "e8f8"],
+        &["d4d3", "d4e3", "e8d7", "e8e7", "e8f7", "e8d8", "e8f8"],
+    ),
+    (
+        "black_promotion_capture",
+        "4k3/8/8/8/8/8/1p6/R1N1K3 b - - 0 1",
+        &[
+            "b2b1q", "b2b1r", "b2b1b", "b2b1n", "b2a1q", "b2a1r", "b2a1b", "b2a1n", "b2c1q",
+            "b2c1r", "b2c1b", "b2c1n", "e8d7", "e8e7", "e8f7", "e8d8", "e8f8",
+        ],
+        &[
+            "b2b1q", "b2b1r", "b2b1b", "b2b1n", "b2a1q", "b2a1r", "b2a1b", "b2a1n", "b2c1q",
+            "b2c1r", "b2c1b", "b2c1n", "e8d7", "e8e7", "e8f7", "e8d8", "e8f8",
+        ],
+    ),
+    (
+        "pawn_double_capture",
+        "4k3/8/2p1p3/3P4/8/8/8/4K3 w - - 0 1",
+        &[
+            "d5d6", "d5c6", "d5e6", "e1d1", "e1f1", "e1d2", "e1e2", "e1f2",
+        ],
+        &[
+            "d5d6", "d5c6", "d5e6", "e1d1", "e1f1", "e1d2", "e1e2", "e1f2",
+        ],
+    ),
 ];
 
 #[test]

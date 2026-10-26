@@ -138,6 +138,63 @@ const KNIGHT_ATTACKS: [Bitboard; 64] = compute_knight_attacks();
 /// Precomputed pawn attacks for all 64 squares (compile-time constant).
 const PAWN_ATTACKS: [[Bitboard; 2]; 64] = compute_pawn_attacks();
 
+/// Compute single-push targets for all 64 squares at compile time.
+///
+/// Returns a 2D array indexed by `[square][color]`; entries are empty for
+/// pawns that cannot push (a pawn on its last rank).
+const fn compute_pawn_pushes() -> [[Bitboard; 2]; 64] {
+    let mut pushes = [[Bitboard(0); 2]; 64];
+    let mut sq: u8 = 0;
+    while sq < 64 {
+        let r = sq / 8;
+        let mut white = 0u64;
+        let mut black = 0u64;
+
+        // White pawns push north, black pawns push south.
+        if r < 7 {
+            white |= 1u64 << (sq + 8);
+        }
+        if r > 0 {
+            black |= 1u64 << (sq - 8);
+        }
+
+        pushes[sq as usize] = [Bitboard(white), Bitboard(black)];
+        sq += 1;
+    }
+    pushes
+}
+
+/// Compute double-push targets for all 64 squares at compile time.
+///
+/// Returns a 2D array indexed by `[square][color]`; only start-rank squares
+/// have a target, all other entries are empty.
+const fn compute_pawn_double_pushes() -> [[Bitboard; 2]; 64] {
+    let mut pushes = [[Bitboard(0); 2]; 64];
+    let mut sq: u8 = 0;
+    while sq < 64 {
+        let r = sq / 8;
+        let mut value = [Bitboard(0); 2];
+
+        // White pawns start on rank 2 (index 1), black pawns on rank 7 (index 6).
+        if r == 1 {
+            value[Color::White as usize] = Bitboard(1u64 << (sq + 16));
+        }
+        if r == 6 {
+            value[Color::Black as usize] = Bitboard(1u64 << (sq - 16));
+        }
+
+        pushes[sq as usize] = value;
+        sq += 1;
+    }
+    pushes
+}
+
+/// Precomputed pawn single pushes for all 64 squares (compile-time constant).
+const PAWN_PUSHES: [[Bitboard; 2]; 64] = compute_pawn_pushes();
+
+/// Precomputed pawn double pushes for all 64 squares (compile-time constant).
+const PAWN_DOUBLE_PUSHES: [[Bitboard; 2]; 64] = compute_pawn_double_pushes();
+
 /// Compute between-squares table for all 64×64 square pairs at compile time.
 const fn compute_between_bb() -> [[Bitboard; 64]; 64] {
     let mut table = [[Bitboard(0); 64]; 64];
@@ -241,6 +298,23 @@ pub fn pawn_attacks(c: Color, sq: Square) -> Bitboard {
     PAWN_ATTACKS[sq as usize][c as usize]
 }
 
+/// Return the single-push target bitboard for a pawn of the given color.
+///
+/// The result is empty for a pawn that cannot push (a pawn on its last rank).
+#[inline(always)]
+pub(crate) fn pawn_pushes(c: Color, sq: Square) -> Bitboard {
+    PAWN_PUSHES[sq as usize][c as usize]
+}
+
+/// Return the double-push target bitboard for a pawn of the given color.
+///
+/// Only start-rank squares have a target; all other squares return
+/// [`Bitboard::EMPTY`].
+#[inline(always)]
+pub(crate) fn pawn_double_pushes(c: Color, sq: Square) -> Bitboard {
+    PAWN_DOUBLE_PUSHES[sq as usize][c as usize]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,6 +390,115 @@ mod tests {
         let atk = rook_attacks(Square::D4, blocker);
         assert!(atk & Bitboard::square_bb(Square::D5) != Bitboard::EMPTY);
         assert!((atk & Bitboard::square_bb(Square::D6)).is_empty());
+    }
+
+    #[test]
+    fn test_pawn_pushes_start_rank() {
+        // White can push and double push from rank 2.
+        assert_eq!(
+            pawn_pushes(Color::White, Square::D2),
+            Bitboard::square_bb(Square::D3)
+        );
+        assert_eq!(
+            pawn_double_pushes(Color::White, Square::D2),
+            Bitboard::square_bb(Square::D4)
+        );
+
+        // Black can push and double push from rank 7.
+        assert_eq!(
+            pawn_pushes(Color::Black, Square::E7),
+            Bitboard::square_bb(Square::E6)
+        );
+        assert_eq!(
+            pawn_double_pushes(Color::Black, Square::E7),
+            Bitboard::square_bb(Square::E5)
+        );
+
+        // Start-rank squares of the other colour have no double push.
+        assert_eq!(
+            pawn_double_pushes(Color::Black, Square::D2),
+            Bitboard::EMPTY
+        );
+        assert_eq!(
+            pawn_double_pushes(Color::White, Square::E7),
+            Bitboard::EMPTY
+        );
+    }
+
+    #[test]
+    fn test_pawn_pushes_non_start_rank() {
+        // A pawn on its seventh rank has a push but no double push.
+        assert_eq!(
+            pawn_pushes(Color::White, Square::A7),
+            Bitboard::square_bb(Square::A8)
+        );
+        assert_eq!(
+            pawn_double_pushes(Color::White, Square::A7),
+            Bitboard::EMPTY
+        );
+
+        assert_eq!(
+            pawn_pushes(Color::Black, Square::H2),
+            Bitboard::square_bb(Square::H1)
+        );
+        assert_eq!(
+            pawn_double_pushes(Color::Black, Square::H2),
+            Bitboard::EMPTY
+        );
+
+        // Mid-board pawns push one square only.
+        assert_eq!(
+            pawn_pushes(Color::White, Square::C4),
+            Bitboard::square_bb(Square::C5)
+        );
+        assert_eq!(
+            pawn_pushes(Color::Black, Square::C5),
+            Bitboard::square_bb(Square::C4)
+        );
+    }
+
+    #[test]
+    fn test_pawn_pushes_promotion_and_impossible_ranks() {
+        // A pawn cannot push from its last rank.
+        for sq in [Square::A8, Square::D8, Square::H8] {
+            assert_eq!(pawn_pushes(Color::White, sq), Bitboard::EMPTY);
+            assert_eq!(pawn_double_pushes(Color::White, sq), Bitboard::EMPTY);
+        }
+        for sq in [Square::A1, Square::D1, Square::H1] {
+            assert_eq!(pawn_pushes(Color::Black, sq), Bitboard::EMPTY);
+            assert_eq!(pawn_double_pushes(Color::Black, sq), Bitboard::EMPTY);
+        }
+
+        // The push onto the promotion rank is a single push, not a double push.
+        for sq in [Square::A7, Square::D7, Square::H7] {
+            assert_eq!(pawn_pushes(Color::White, sq).count(), 1);
+            assert_eq!(pawn_double_pushes(Color::White, sq), Bitboard::EMPTY);
+        }
+        for sq in [Square::A2, Square::D2, Square::H2] {
+            assert_eq!(pawn_pushes(Color::Black, sq).count(), 1);
+            assert_eq!(pawn_double_pushes(Color::Black, sq), Bitboard::EMPTY);
+        }
+    }
+
+    #[test]
+    fn test_pawn_attacks_table() {
+        assert_eq!(
+            pawn_attacks(Color::White, Square::D4),
+            Bitboard::square_bb(Square::C5) | Bitboard::square_bb(Square::E5)
+        );
+        assert_eq!(
+            pawn_attacks(Color::Black, Square::D4),
+            Bitboard::square_bb(Square::C3) | Bitboard::square_bb(Square::E3)
+        );
+        // Edge pawns do not wrap around the board.
+        assert_eq!(
+            pawn_attacks(Color::White, Square::A2),
+            Bitboard::square_bb(Square::B3)
+        );
+        assert_eq!(
+            pawn_attacks(Color::White, Square::H2),
+            Bitboard::square_bb(Square::G3)
+        );
     }
 
     #[test]
