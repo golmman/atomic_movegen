@@ -1332,11 +1332,12 @@ impl Board {
             for &sq in &pass_through {
                 let adjacent_enemy_commoners = self.commoners(them) & attacks::king_attacks(sq);
                 if adjacent_enemy_commoners.is_empty() {
-                    let atk = attackers_to(self, sq, occupied, self.by_color[them as usize])
-                        | (attacks::king_attacks(sq)
-                            & self.by_type[PieceType::Commoner as usize]
-                            & self.by_color[them as usize]);
-                    if atk != Bitboard::EMPTY {
+                    let enemy_commoner_attack = attacks::king_attacks(sq)
+                        & self.by_type[PieceType::Commoner as usize]
+                        & self.by_color[them as usize];
+                    if square_attacked_by(self, sq, occupied, self.by_color[them as usize])
+                        || !enemy_commoner_attack.is_empty()
+                    {
                         return false;
                     }
                 }
@@ -1394,7 +1395,7 @@ impl Board {
                     let ksq = c.pop_lsb();
                     let adjacent_enemy = them_commoners & attacks::king_attacks(ksq);
                     if adjacent_enemy.is_empty()
-                        && attackers_to(self, ksq, occupied, enemy_survivors) != Bitboard::EMPTY
+                        && square_attacked_by(self, ksq, occupied, enemy_survivors)
                     {
                         return false;
                     }
@@ -1406,23 +1407,50 @@ impl Board {
     }
 }
 
-/// Return the bitboard of enemy sliding/leaper pieces (rook, bishop, queen,
-/// knight, pawn) that attack `sq` on the given `occupied` board, filtered to
-/// the enemy pieces in `enemy_bb`.  Commoner (king) attacks are *not* included
-/// (they are handled separately via adjacency-immunity in the pseudo-royal
-/// rules).
+/// Return `true` if an enemy non-commoner piece attacks `sq` on `occupied`.
+///
+/// Mirrors the attacker categories of the previous private `attackers_to`
+/// helper, but exits at the first matching category. Commoner attacks are
+/// intentionally excluded; callers handle adjacent enemy commoners separately.
 #[inline(always)]
-fn attackers_to(board: &Board, sq: Square, occupied: Bitboard, enemy_bb: Bitboard) -> Bitboard {
-    let rook_atk = attacks::rook_attacks(sq, occupied);
-    let bishop_atk = attacks::bishop_attacks(sq, occupied);
-    let queen_atk = rook_atk | bishop_atk;
-    rook_atk & board.by_type[PieceType::Rook as usize] & enemy_bb
-        | bishop_atk & board.by_type[PieceType::Bishop as usize] & enemy_bb
-        | queen_atk & board.by_type[PieceType::Queen as usize] & enemy_bb
-        | attacks::knight_attacks(sq) & board.by_type[PieceType::Knight as usize] & enemy_bb
-        | attacks::pawn_attacks(board.side_to_move, sq)
-            & board.by_type[PieceType::Pawn as usize]
-            & enemy_bb
+fn square_attacked_by(board: &Board, sq: Square, occupied: Bitboard, enemy_bb: Bitboard) -> bool {
+    // Pawns. `board.side_to_move` is the side whose commoner is being tested,
+    // matching the previous helper's pawn direction.
+    if !(attacks::pawn_attacks(board.side_to_move, sq)
+        & board.by_type[PieceType::Pawn as usize]
+        & enemy_bb)
+        .is_empty()
+    {
+        return true;
+    }
+
+    // Knights.
+    if !(attacks::knight_attacks(sq) & board.by_type[PieceType::Knight as usize] & enemy_bb)
+        .is_empty()
+    {
+        return true;
+    }
+
+    // Bishop/queen sliders.
+    if !(attacks::bishop_attacks(sq, occupied)
+        & (board.by_type[PieceType::Bishop as usize] | board.by_type[PieceType::Queen as usize])
+        & enemy_bb)
+        .is_empty()
+    {
+        return true;
+    }
+
+    // Rook/queen sliders. This is skipped when a pawn, knight, bishop, or
+    // queen already hit.
+    if !(attacks::rook_attacks(sq, occupied)
+        & (board.by_type[PieceType::Rook as usize] | board.by_type[PieceType::Queen as usize])
+        & enemy_bb)
+        .is_empty()
+    {
+        return true;
+    }
+
+    false
 }
 
 /// Return the Zobrist piece key for the piece with raw encoding `raw`
