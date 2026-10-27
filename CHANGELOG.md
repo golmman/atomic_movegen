@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.1] - 2026-10-27
+
+### Changed
+
+- Internal, behavior-preserving performance work; the public API is unchanged.
+- Pawn generation is now table-driven and order-preserving: push, double-push,
+  capture, and en-passant targets come from precomputed attack/push tables,
+  removing per-target square arithmetic, file/wrap guards, and repeated board
+  lookups. Measured about 6.9% faster on both fixed depth-6 perft positions.
+- Attack detection for commoner safety and castling now uses a boolean
+  early-exit probe instead of building an attacker bitboard. Measured about
+  1.3-1.6% faster on the fixed depth-6 positions.
+- The trivial-legality predicate is hoisted per node and classifies candidates
+  from precomputed state, avoiding repeated piece lookups and work that is
+  unnecessary for quiet moves. Measured about 2.2-2.3% faster on the fixed
+  depth-6 positions.
+
+### Added
+
+- Additional move-order golden positions covering pawn-rich and promotion
+  cases, plus unit tests for the new pawn push/double-push tables.
+
 ## [2.3.0] - 2026-09-10
 
 ### Added

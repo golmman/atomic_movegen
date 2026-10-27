@@ -33,7 +33,7 @@ fn main() {
     for (df, dr) in [(1i8, 1i8), (1i8, -1i8), (-1i8, 1i8), (-1i8, -1i8)].iter() {
         let mut f = sf + *df;
         let mut r = sr + *dr;
-        while f >= 0 && f < 8 && r >= 0 && r < 8 {
+        while (0..8).contains(&f) && (0..8).contains(&r) {
             let idx = (r * 8 + f) as usize;
             manual |= 1u64 << idx;
             if occupied.0 & (1u64 << idx) != 0 {
@@ -63,7 +63,7 @@ fn main() {
         }
     }
     let d5g8 = Move::make_move(Square::D5, Square::G8);
-    println!("has d5g8: {}", moves.as_slice().iter().any(|&m| m == d5g8));
+    println!("has d5g8: {}", moves.as_slice().contains(&d5g8));
     let d5g7 = Move::make_move(Square::D5, Square::G7);
-    println!("has d5g7: {}", moves.as_slice().iter().any(|&m| m == d5g7));
+    println!("has d5g7: {}", moves.as_slice().contains(&d5g7));
 }
