@@ -1569,50 +1569,67 @@ fn castling_squares(us: Color, kingside: bool) -> (Square, Square, Square, Squar
     }
 }
 
-/// Returns `true` when `m` is trivially legal — i.e. not a capture, not a
-/// commoner move, not en-passant, the moving piece is unpinned, there are no
-/// checkers, and at least one own commoner still exists.
+/// Node-constant part of the trivial-legality fast path.
 ///
-/// When this returns `true` the move is guaranteed legal without needing the
-/// full `legal()` check (blast, pseudo-royal, castling pass-through).
-#[inline(always)]
-pub(crate) fn is_move_trivially_legal(board: &Board, m: Move, state: &StateInfo) -> bool {
-    if !state.checkers.is_empty() {
-        return false;
-    }
-    if state.commoners_count == 0 {
-        return false;
+/// Build once per node from a populated [`StateInfo`], then call
+/// [`is_trivially_legal`](Self::is_trivially_legal) for every pseudo-legal
+/// candidate. The fast path accepts only moves that are legal without the full
+/// [`Board::legal`] check: no checkers, not en passant, not castling, not a
+/// capture, the origin is not a commoner, the moving piece is unpinned, and at
+/// least one own commoner still exists.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TrivialLegality {
+    /// Enemy pieces giving check to the side to move (`state.checkers`).
+    checkers: Bitboard,
+    /// Squares that are neither own commoners nor pinned, or [`Bitboard::EMPTY`]
+    /// when the side to move has no commoner left.
+    safe_origins: Bitboard,
+}
+
+impl TrivialLegality {
+    /// Derive the node-constant fast-path data from a populated [`StateInfo`].
+    ///
+    /// All inputs are only read, so the resulting value stays valid for every
+    /// candidate move of the node.
+    #[inline(always)]
+    pub(crate) fn new(board: &Board, state: &StateInfo) -> Self {
+        debug_assert!(
+            state.commoners_count == 0 || !board.commoners(board.side_to_move()).is_empty(),
+            "StateInfo.commoners_count disagrees with the board"
+        );
+        let safe_origins = if state.commoners_count == 0 {
+            // No own commoner: every candidate must go through `legal`, which
+            // rejects all of them (matching the old `commoners_count == 0` guard).
+            Bitboard::EMPTY
+        } else {
+            !(board.commoners(board.side_to_move()) | state.pinned)
+        };
+        Self {
+            checkers: state.checkers,
+            safe_origins,
+        }
     }
 
-    let from = m.from_sq();
-    let us = board.side_to_move();
-    if board.piece_on(from) == make_piece(us, PieceType::Commoner) {
-        return false;
+    /// Returns `true` when `m` is trivially legal.
+    ///
+    /// `m` must come from the pseudo-legal generator (valid origin and
+    /// destination squares); this is a crate-private precondition, not an input
+    /// validation point.
+    #[inline(always)]
+    pub(crate) fn is_trivially_legal(&self, board: &Board, m: Move) -> bool {
+        debug_assert!(m != Move::NONE);
+        if !self.checkers.is_empty() {
+            return false; // in check: every move needs the full check
+        }
+        if m.needs_full_legal_check() {
+            return false; // en passant and castling
+        }
+        if board.squares[m.dest_index()] != NO_PIECE {
+            return false; // capture
+        }
+        // Origin must be neither a commoner nor pinned.
+        self.safe_origins.contains(m.origin_index())
     }
-
-    let mt = m.move_type();
-    if mt == MoveType::EnPassant {
-        return false;
-    }
-
-    // A non-Castling move that captures a piece (EnPassant already handled above).
-    let is_capture = mt != MoveType::Castling && board.piece_on(m.to_sq()) != NO_PIECE;
-    if is_capture {
-        return false;
-    }
-
-    // Castling reaches here (not a capture, not en-passant, not a commoner move).
-    // Castling still needs the full pass-through check, so reject fast-path.
-    if mt == MoveType::Castling {
-        return false;
-    }
-
-    // Check pin: a pinned piece might expose a commoner.
-    if (state.pinned & Bitboard::square_bb(from)) != Bitboard::EMPTY {
-        return false;
-    }
-
-    true
 }
 
 impl fmt::Display for Board {
@@ -2214,6 +2231,172 @@ mod tests {
         assert_eq!(
             board.rule50_after(Move::make_move(Square::H1, Square::H2)),
             8
+        );
+    }
+
+    /// Positions covering every branch of the trivial-legality ladder.
+    const TRIVIAL_LEGALITY_CORPUS: &[&str] = &[
+        // Startpos and the `tests/move_order_golden.rs` positions.
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5Q2/PPPP1PPP/RNB1K1NR w KQkq - 4 4",
+        "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+        "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1",
+        // En passant available for the side to move.
+        "8/8/8/8/k2Pp2Q/8/8/3K4 b - d3 0 1",
+        "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1",
+        "4k3/8/8/2Pp4/8/8/8/4K3 w - d6 0 2",
+        // Castling available.
+        "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+        // Side to move in check.
+        "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3",
+        "3k4/8/8/8/8/8/8/3QK3 b - - 0 1",
+        // Pinned pieces (rook and bishop pins).
+        "4k3/8/8/8/8/4r3/4N3/4K3 w - - 0 1",
+        "4k3/8/b7/8/8/3N4/8/5K2 w - - 0 1",
+        // Side to move has no commoner (empty candidate stream).
+        "8/8/8/8/8/8/8/k7 w - - 0 1",
+        // Bare commoners only.
+        "k7/8/8/8/8/8/8/7K w - - 0 1",
+        // The two profiled positions.
+        "rnbqkbnr/ppp4p/4p1p1/3pNp2/7Q/4P3/PPPP1PPP/RNB1KB1R b KQkq - 1 5",
+        "r1b1Brk1/ppp5/6pp/3p4/5p2/P3PP2/1P4PP/R4RK1 b - - 1 15",
+    ];
+
+    /// Verbatim copy of the pre-refactor `is_move_trivially_legal` ladder, used
+    /// as the reference implementation for the equivalence test below.
+    fn is_move_trivially_legal_reference(board: &Board, m: Move, state: &StateInfo) -> bool {
+        if !state.checkers.is_empty() {
+            return false;
+        }
+        if state.commoners_count == 0 {
+            return false;
+        }
+
+        let from = m.from_sq();
+        let us = board.side_to_move();
+        if board.piece_on(from) == make_piece(us, PieceType::Commoner) {
+            return false;
+        }
+
+        let mt = m.move_type();
+        if mt == MoveType::EnPassant {
+            return false;
+        }
+
+        // A non-Castling move that captures a piece (EnPassant already handled above).
+        let is_capture = mt != MoveType::Castling && board.piece_on(m.to_sq()) != NO_PIECE;
+        if is_capture {
+            return false;
+        }
+
+        // Castling reaches here (not a capture, not en-passant, not a commoner move).
+        // Castling still needs the full pass-through check, so reject fast-path.
+        if mt == MoveType::Castling {
+            return false;
+        }
+
+        // Check pin: a pinned piece might expose a commoner.
+        if (state.pinned & Bitboard::square_bb(from)) != Bitboard::EMPTY {
+            return false;
+        }
+
+        true
+    }
+
+    #[test]
+    fn test_trivial_legality_matches_reference_ladder() {
+        for fen in TRIVIAL_LEGALITY_CORPUS {
+            let board = Board::from_fen(fen).unwrap();
+            let mut state = StateInfo::new();
+            board.populate_state(&mut state);
+            let trivial = TrivialLegality::new(&board, &state);
+
+            let mut moves = MoveList::new();
+            crate::movegen::generate_pseudo_legal(&board, &mut moves);
+
+            for &m in moves.as_slice() {
+                assert_eq!(
+                    trivial.is_trivially_legal(&board, m),
+                    is_move_trivially_legal_reference(&board, m, &state),
+                    "fast path diverged on FEN {fen}, move {m:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_trivial_legality_accepts_only_legal_moves() {
+        for fen in TRIVIAL_LEGALITY_CORPUS {
+            let board = Board::from_fen(fen).unwrap();
+            let mut state = StateInfo::new();
+            board.populate_state(&mut state);
+            let trivial = TrivialLegality::new(&board, &state);
+
+            let mut moves = MoveList::new();
+            crate::movegen::generate_pseudo_legal(&board, &mut moves);
+
+            for &m in moves.as_slice() {
+                if trivial.is_trivially_legal(&board, m) {
+                    assert!(
+                        board.legal(m, &state),
+                        "fast path accepted an illegal move on FEN {fen}, move {m:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_trivial_legality_corpus_covers_accept_and_reject() {
+        // Guard against a vacuous equivalence test: the corpus must exercise
+        // both fast-path acceptance and rejection.
+        let mut accepted = 0;
+        let mut rejected = 0;
+        let mut with_checkers = 0;
+        let mut with_pins = 0;
+        let mut with_special_moves = 0;
+        let mut without_commoner = 0;
+        for fen in TRIVIAL_LEGALITY_CORPUS {
+            let board = Board::from_fen(fen).unwrap();
+            let mut state = StateInfo::new();
+            board.populate_state(&mut state);
+            let trivial = TrivialLegality::new(&board, &state);
+            if !state.checkers.is_empty() {
+                with_checkers += 1;
+            }
+            if !state.pinned.is_empty() {
+                with_pins += 1;
+            }
+            if state.commoners_count == 0 {
+                without_commoner += 1;
+            }
+            let mut moves = MoveList::new();
+            crate::movegen::generate_pseudo_legal(&board, &mut moves);
+            if moves.as_slice().iter().any(|m| m.needs_full_legal_check()) {
+                with_special_moves += 1;
+            }
+            for &m in moves.as_slice() {
+                if trivial.is_trivially_legal(&board, m) {
+                    accepted += 1;
+                } else {
+                    rejected += 1;
+                }
+            }
+        }
+        assert!(accepted > 0, "corpus never accepts a move");
+        assert!(rejected > 0, "corpus never rejects a move");
+        assert!(
+            with_checkers > 0,
+            "corpus never exercises the checker guard"
+        );
+        assert!(with_pins > 0, "corpus never exercises the pin guard");
+        assert!(
+            with_special_moves > 0,
+            "corpus never exercises en passant or castling"
+        );
+        assert!(
+            without_commoner > 0,
+            "corpus never exercises the no-commoner guard"
         );
     }
 }

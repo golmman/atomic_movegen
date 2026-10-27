@@ -320,6 +320,15 @@ impl Bitboard {
         sq
     }
 
+    /// Returns `true` if the square at `index` (`0..64`) is set.
+    ///
+    /// This is the raw-index variant of a membership test, avoiding the
+    /// [`SQUARES`] and [`square_bb`](Self::square_bb) table lookups.
+    #[inline(always)]
+    pub(crate) fn contains(self, index: usize) -> bool {
+        (self.0 >> index) & 1 != 0
+    }
+
     /// Return a bitboard with only the given square set.
     /// Returns [`EMPTY`](Self::EMPTY) for [`Square::NONE`].
     #[inline]
@@ -602,6 +611,31 @@ impl Move {
     pub fn to_sq(self) -> Square {
         let idx = (self.0 & 0x3f) as usize;
         SQUARES[idx]
+    }
+
+    /// Raw origin-square index (`0..64`) without the [`SQUARES`] conversion.
+    ///
+    /// Only valid for moves produced by the move generator; [`Move::NONE`]
+    /// would map to index `0` (a1) rather than [`Square::NONE`].
+    #[inline(always)]
+    pub(crate) fn origin_index(self) -> usize {
+        ((self.0 >> 6) & 0x3f) as usize
+    }
+
+    /// Raw destination-square index (`0..64`) without the [`SQUARES`] conversion.
+    ///
+    /// Only valid for moves produced by the move generator; see
+    /// [`origin_index`](Self::origin_index).
+    #[inline(always)]
+    pub(crate) fn dest_index(self) -> usize {
+        (self.0 & 0x3f) as usize
+    }
+
+    /// Returns `true` for en-passant and castling moves, i.e. the two move
+    /// types that always need the full legality check.
+    #[inline(always)]
+    pub(crate) fn needs_full_legal_check(self) -> bool {
+        ((self.0 >> 12) & 3) >= 2
     }
 
     /// Return the move type (normal, promotion, en-passant, castling).

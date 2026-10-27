@@ -1,9 +1,7 @@
 //! Pseudo-legal and legal move generation for atomic chess.
 
 use crate::attacks;
-use crate::board::{
-    BK_CASTLE, BQ_CASTLE, Board, StateInfo, WK_CASTLE, WQ_CASTLE, is_move_trivially_legal,
-};
+use crate::board::{BK_CASTLE, BQ_CASTLE, Board, StateInfo, TrivialLegality, WK_CASTLE, WQ_CASTLE};
 use crate::types::*;
 use std::ops::ControlFlow;
 
@@ -285,12 +283,15 @@ pub fn generate_legal_with_state(board: &Board, state: &StateInfo, moves: &mut M
         return;
     }
 
+    // Node-constant fast-path data, hoisted out of the compaction loop.
+    let trivial = TrivialLegality::new(board, state);
+
     let new_len = {
         let ms = moves.as_mut_slice();
         let mut write_idx = 0;
         for read_idx in 0..orig_len {
             let m = ms[read_idx];
-            if is_move_trivially_legal(board, m, state) || board.legal(m, state) {
+            if trivial.is_trivially_legal(board, m) || board.legal(m, state) {
                 ms[write_idx] = m;
                 write_idx += 1;
             }
@@ -328,8 +329,9 @@ pub fn has_legal_move_with_state(board: &Board, state: &StateInfo) -> bool {
         return false;
     }
 
+    let trivial = TrivialLegality::new(board, state);
     for_each_pseudo_legal::<()>(board, &mut |m| {
-        if is_move_trivially_legal(board, m, state) || board.legal(m, state) {
+        if trivial.is_trivially_legal(board, m) || board.legal(m, state) {
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(())
