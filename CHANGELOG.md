@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `Board::checkers` no longer reports a check when the two commoners touch.
+  Each side has only one commoner, so a capture of either would blast the
+  capturer's own commoner away. Touching therefore makes the commoner immune
+  to every attack. Previously the legal-move generator already applied this
+  immunity, but `checkers()` disagreed with it.
+- `Board::legal` rejects every move that destroys one of the mover's
+  commoners, not just moves that leave the mover with none. In legal atomic
+  positions there is only one, so this is the same self-explosion rule; it also
+  removes the artificial “spare commoner” exception.
+- `generate_legal` and `has_legal_move` return no moves when the game is already
+  over because either side has no commoner left. A board with only one commoner
+  is terminal, matching Fairy-Stockfish's `generate<LEGAL>`.
+- `Board::outcome` now reports a loss (instead of a draw) when the side to move
+  has no legal moves *and* its commoner is attacked. Atomic chess has no
+  checkmate in the usual sense, but an attacked commoner with no escape is lost
+  (Fairy-Stockfish's `stalemate_value` for `extinctionPseudoRoyal`). True
+  stalemates (no legal moves, commoner not attacked) remain draws.
+
+### Changed
+
+- Documented the atomic invariant that each side has at most one commoner:
+  there is no promotion to commoner, a board has one or two commoners, and a
+  board with only one commoner is terminal. Removed regression tests that used
+  impossible multi-commoner FENs.
+
+### Added
+
+- Regression tests for touching-commoner immunity (including castling through
+  an adjacent enemy commoner), terminal positions, and the absence of
+  commoner promotion.
+- Two atomic perft positions from shakmaty's `tests/atomic.perft` suite
+  ("programfox"), verified against Fairy-Stockfish to depth 6.
+
 ## [2.3.1] - 2026-10-27
 
 ### Changed

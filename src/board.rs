@@ -86,13 +86,15 @@ fn char_to_piece(c: char) -> Option<Piece> {
 /// [`Board::legal`] and [`generate_legal`](crate::movegen::generate_legal).
 #[derive(Debug, Clone, Copy)]
 pub struct StateInfo {
-    /// Enemy pieces attacking the side to move's commoners (hot).
+    /// Enemy pieces attacking the side to move's commoner (hot).
     pub checkers: Bitboard,
     /// Pieces of the side to move that are pinned to a commoner (hot).
     pub pinned: Bitboard,
-    /// Number of commoners the side to move has on the board (hot).
+    /// Number of commoners the side to move has on the board (hot). In a legal
+    /// atomic position this is 0 (game over) or 1.
     pub commoners_count: u32,
-    /// Number of commoners the opponent has on the board (hot).
+    /// Number of commoners the opponent has on the board (hot). In a legal
+    /// atomic position this is 0 (game over) or 1.
     pub them_commoners_count: u32,
 
     /// Castling rights before the move (undo data).
@@ -200,9 +202,15 @@ impl Board {
     ///
     /// Accepts standard FEN with 4 or 6 space-separated fields. The piece
     /// character set is the standard chess set (`P`, `N`, `B`, `R`, `Q`, `K`
-    /// and their lower-case forms). The commoner — the king-like pseudo-royal
-    /// piece of atomic chess — uses the standard FEN letter `K`/`k`; the
-    /// non-standard `C`/`c` labels are rejected.
+    /// and their lower-case forms). The commoner — the king-like piece of
+    /// atomic chess — uses the standard FEN letter `K`/`k`; the non-standard
+    /// `C`/`c` labels are rejected.
+    ///
+    /// Parsing is permissive about game-state constraints: it does not reject
+    /// missing commoners, pawns on the back rank, or invalid en-passant
+    /// positions. In particular, atomic chess has at most one commoner per
+    /// side, so FENs with more than one `K` or more than one `k` are not legal
+    /// atomic positions even though this parser accepts them.
     ///
     /// # Errors
     ///
@@ -841,7 +849,10 @@ impl Board {
         }
     }
 
-    /// Return the bitboard of commoners (king-like pseudo-royal pieces) for a color.
+    /// Return the bitboard of commoners (king-like pieces) for a color.
+    ///
+    /// Legal atomic positions contain at most one commoner per color; a board
+    /// with only one commoner in total is terminal.
     #[inline(always)]
     #[must_use]
     pub fn commoners(&self, c: Color) -> Bitboard {
@@ -853,7 +864,10 @@ impl Board {
     ///
     /// Commoner extinction for the side to move is a loss, extinction of the
     /// opponent is a win, the 50-move rule (100 plies) is a draw, and a position
-    /// with no legal moves is a draw by stalemate.
+    /// with no legal moves is a draw by stalemate — unless the side to move's
+    /// commoner is attacked, in which case it is a loss (atomic chess has no
+    /// checkmate in the usual sense, but the commoner cannot escape). A board
+    /// with only one commoner in total is therefore always terminal.
     #[must_use]
     pub fn outcome(&self) -> Option<Outcome> {
         let us = self.side_to_move;
@@ -869,7 +883,10 @@ impl Board {
         let mut moves = MoveList::new();
         crate::movegen::generate_legal(self, &mut moves);
         if moves.is_empty() {
-            return Some(Outcome::Draw);
+            if self.checkers().is_empty() {
+                return Some(Outcome::Draw);
+            }
+            return Some(Outcome::Loss);
         }
         None
     }
@@ -933,45 +950,36 @@ impl Board {
     pub(crate) fn compute_checkers(&self, us: Color) -> Bitboard {
         let them = us.flip();
         let commoners = self.commoners(us);
-        if commoners.is_empty() {
+        let them_commoners = self.commoners(them);
+
+        // Legal atomic positions have at most one commoner per side. If either
+        // side has none, the game is already over, so there is no check.
+        if commoners.is_empty() || them_commoners.is_empty() {
+            return Bitboard::EMPTY;
+        }
+        let ksq = commoners.lsb();
+
+        // The two commoners are the sides' only commoners. If they touch,
+        // neither may capture the other: the blast would destroy the
+        // capturer's own commoner. No other enemy piece can capture ours
+        // either, because that blast would also destroy the enemy's only
+        // commoner. Touching therefore makes our commoner immune to *all*
+        // attacks, so it is not in check.
+        if !(them_commoners & attacks::king_attacks(ksq)).is_empty() {
             return Bitboard::EMPTY;
         }
 
-        let mut checkers = Bitboard::EMPTY;
         let occupied = self.occupied();
-
         let them_bb = self.pieces_color(them);
-        let mut c = commoners;
-        while !c.is_empty() {
-            let ksq = c.pop_lsb();
-            let rook_atk = attacks::rook_attacks(ksq, occupied);
-            let bishop_atk = attacks::bishop_attacks(ksq, occupied);
-            let queen_atk = rook_atk | bishop_atk;
-            checkers = checkers
-                | (rook_atk & self.by_type[PieceType::Rook as usize] & them_bb)
-                | (bishop_atk & self.by_type[PieceType::Bishop as usize] & them_bb)
-                | (queen_atk & self.by_type[PieceType::Queen as usize] & them_bb)
-                | (attacks::knight_attacks(ksq)
-                    & self.by_type[PieceType::Knight as usize]
-                    & them_bb)
-                | (attacks::pawn_attacks(us, ksq)
-                    & self.by_type[PieceType::Pawn as usize]
-                    & them_bb);
-        }
+        let rook_atk = attacks::rook_attacks(ksq, occupied);
+        let bishop_atk = attacks::bishop_attacks(ksq, occupied);
+        let queen_atk = rook_atk | bishop_atk;
 
-        // Adjacent commoner check (extinction pseudo-royal)
-        let them_commoners = self.commoners(them);
-        if !them_commoners.is_empty() && !commoners.is_empty() {
-            let mut tc = them_commoners;
-            while !tc.is_empty() {
-                let tksq = tc.pop_lsb();
-                if attacks::king_attacks(tksq) & commoners != Bitboard::EMPTY {
-                    checkers = checkers | Bitboard::square_bb(tksq);
-                }
-            }
-        }
-
-        checkers
+        (rook_atk & self.by_type[PieceType::Rook as usize] & them_bb)
+            | (bishop_atk & self.by_type[PieceType::Bishop as usize] & them_bb)
+            | (queen_atk & self.by_type[PieceType::Queen as usize] & them_bb)
+            | (attacks::knight_attacks(ksq) & self.by_type[PieceType::Knight as usize] & them_bb)
+            | (attacks::pawn_attacks(us, ksq) & self.by_type[PieceType::Pawn as usize] & them_bb)
     }
 
     /// Return the bitboard of enemy pieces checking the side to move.
@@ -1301,13 +1309,21 @@ impl Board {
     /// Check whether `m` is legal under atomic chess rules.
     ///
     /// Considers blast-zone effects (self-explosion), castling pass-through
-    /// safety, and commoner extinction. The last commoner is immune from
-    /// adjacent-commoner checks; touching an enemy commoner is allowed and does
-    /// not count as an attack.
+    /// safety, and commoner extinction. A move that destroys any of the mover's
+    /// commoners is illegal; in a legal atomic position there is exactly one, so
+    /// there is no spare-commoner exception. Touching the enemy commoner is
+    /// allowed and does not count as an attack: any capture would also blast
+    /// the enemy's only commoner away.
     ///
     /// `state` must contain up-to-date cached fields for the current position.
+    /// A terminal board (either side has no commoner) has no legal moves.
     #[must_use]
     pub fn legal(&self, m: Move, state: &StateInfo) -> bool {
+        // A board with only one commoner is terminal.
+        if state.commoners_count == 0 || state.them_commoners_count == 0 {
+            return false;
+        }
+
         let from = m.from_sq();
         let to = m.to_sq();
         let us = self.side_to_move;
@@ -1329,17 +1345,15 @@ impl Board {
             } else {
                 [Square::from_index(ksq as i8 - 1), ksq]
             };
+            let enemy_commoners = self.commoners(them);
             for &sq in &pass_through {
-                let adjacent_enemy_commoners = self.commoners(them) & attacks::king_attacks(sq);
-                if adjacent_enemy_commoners.is_empty() {
-                    let enemy_commoner_attack = attacks::king_attacks(sq)
-                        & self.by_type[PieceType::Commoner as usize]
-                        & self.by_color[them as usize];
-                    if square_attacked_by(self, sq, occupied, self.by_color[them as usize])
-                        || !enemy_commoner_attack.is_empty()
-                    {
-                        return false;
-                    }
+                // A commoner adjacent to this square makes the commoner
+                // immune to every attack while it stands there.
+                if !(enemy_commoners & attacks::king_attacks(sq)).is_empty() {
+                    continue;
+                }
+                if square_attacked_by(self, sq, occupied, self.by_color[them as usize]) {
+                    return false;
                 }
             }
         }
@@ -1369,41 +1383,33 @@ impl Board {
             occupied = occupied & !(blast_adjacent | Bitboard::square_bb(kto));
         }
 
-        let mut our_commoners = self.commoners(us) & occupied;
+        let pre_commoners = self.commoners(us);
+        let mut our_commoners = pre_commoners & occupied;
 
         if !is_capture && piece == make_piece(us, PieceType::Commoner) {
             our_commoners = our_commoners | Bitboard::square_bb(kto);
         }
 
-        if our_commoners.is_empty() {
+        // A move may not destroy any of our commoners. In a legal position
+        // there is exactly one, so this is the usual self-explosion check.
+        if our_commoners.count() != pre_commoners.count() {
             return false;
         }
 
-        let our_pr_count = state.commoners_count as usize;
-        let them_pr_count = state.them_commoners_count as usize;
-
-        if our_pr_count <= 1 {
-            let enemy_pr_destroyed =
-                them_pr_count <= 1 && (self.commoners(them) & occupied).is_empty();
-
-            if !enemy_pr_destroyed {
-                let them_commoners = self.commoners(them);
-                let enemy_survivors = self.by_color[them as usize] & occupied;
-
-                let mut c = our_commoners;
-                while !c.is_empty() {
-                    let ksq = c.pop_lsb();
-                    let adjacent_enemy = them_commoners & attacks::king_attacks(ksq);
-                    if adjacent_enemy.is_empty()
-                        && square_attacked_by(self, ksq, occupied, enemy_survivors)
-                    {
-                        return false;
-                    }
-                }
-            }
+        // Capturing the enemy's only commoner wins immediately; the mover's
+        // own commoner cannot be in check after the game has ended.
+        let enemy_commoners = self.commoners(them) & occupied;
+        if enemy_commoners.is_empty() {
+            return true;
         }
 
-        true
+        let ksq = our_commoners.lsb();
+        // Touching the enemy commoner grants immunity to every attack.
+        if !(enemy_commoners & attacks::king_attacks(ksq)).is_empty() {
+            return true;
+        }
+
+        !square_attacked_by(self, ksq, occupied, self.by_color[them as usize] & occupied)
     }
 }
 
@@ -1748,6 +1754,35 @@ mod tests {
     }
 
     #[test]
+    fn test_touching_commoners_are_immune() {
+        // Exactly one commoner each, adjacent: neither can capture the other
+        // (the blast would destroy the capturer as well), so adjacency is not
+        // a check and the commoner is immune to *every* attacker.
+        let board = Board::from_fen("8/8/8/8/8/8/4k3/4K3 w - - 0 1").unwrap();
+        assert!(board.checkers().is_empty());
+
+        // The black rook attacks e1 along the first rank, but the white
+        // commoner touches the black one, so it cannot be captured.
+        let board = Board::from_fen("8/8/8/8/8/8/4k3/r3K3 w - - 0 1").unwrap();
+        assert!(board.checkers().is_empty());
+        let mut moves = MoveList::new();
+        crate::movegen::generate_legal(&board, &mut moves);
+        // d1, f1, d2, f2: every destination is still adjacent to the black
+        // commoner, so the rook's attack does not matter.
+        assert_eq!(moves.len(), 4);
+    }
+
+    #[test]
+    fn test_castling_through_square_adjacent_to_commoner() {
+        // White may castle through f1, which the black commoner on f2 attacks.
+        // Touching the enemy commoner makes the white commoner immune there.
+        let board = Board::from_fen("8/8/8/8/8/8/5k2/4K2R w K - 0 1").unwrap();
+        let mut moves = MoveList::new();
+        crate::movegen::generate_legal(&board, &mut moves);
+        assert!(moves.as_slice().iter().any(|&m| m.to_uci() == "e1g1"));
+    }
+
+    #[test]
     fn test_pinned() {
         // Black rook on e4, white pawn on e3, white commoner on e2 - pawn is pinned
         let fen = "4k3/8/8/8/4r3/4P3/4K3/8 w - - 0 1";
@@ -1786,32 +1821,26 @@ mod tests {
     }
 
     #[test]
-    fn test_self_explosion_legal_with_surviving_commoner() {
-        // White commoners on d3 AND e1; white rook on d5, black pawn on d4.
-        // Rook takes pawn on d4 — blast zone (c3-e5) includes d3, destroying
-        // the commoner on d3, but the commoner on e1 survives.
-        // This is NOT self-explosion — only the LAST commoner being destroyed
-        // makes a move illegal.
-        let fen = "4k3/8/8/3R4/3p4/3K4/8/4K3 w - - 0 1";
-        let board = Board::from_fen(fen).unwrap();
+    fn test_legal_rejects_moves_on_terminal_board() {
+        // Only one commoner remains on the board, so the game is over even
+        // though the surviving side has pseudo-legal moves.
+        let board = Board::from_fen("8/8/8/8/8/8/8/K7 w - - 0 1").unwrap();
+        let mut state = StateInfo::new();
+        board.populate_state(&mut state);
         let mut moves = MoveList::new();
-        crate::movegen::generate_legal(&board, &mut moves);
-        // The capture should be LEGAL because e1 survives and is not under attack.
-        let has_rook_d4 = moves
-            .as_slice()
-            .iter()
-            .any(|&m| m.from_sq() == Square::D5 && m.to_sq() == Square::D4);
-        assert!(
-            has_rook_d4,
-            "rook capture on d4 should be legal (e1 commoner survives)"
-        );
+        crate::movegen::generate_pseudo_legal(&board, &mut moves);
+        assert!(!moves.is_empty());
+        for &m in moves.as_slice() {
+            assert!(!board.legal(m, &state), "move {m:?} must not be legal");
+        }
     }
 
     #[test]
-    fn test_self_explosion_illegal_last_commoner() {
-        // White commoner ONLY on d3; white rook on d5, black pawn on d4.
+    fn test_self_explosion_illegal() {
+        // White's only commoner is on d3; white rook on d5, black pawn on d4.
         // Rook takes pawn on d4 — blast zone includes d3, destroying the
-        // LAST (only) commoner → self-explosion, illegal.
+        // commoner → self-explosion, illegal. There is no "spare commoner"
+        // exception in atomic chess.
         let fen = "4k3/8/8/3R4/3p4/3K4/8/8 w - - 0 1";
         let board = Board::from_fen(fen).unwrap();
         let mut moves = MoveList::new();
@@ -1819,7 +1848,7 @@ mod tests {
         for &m in moves.as_slice() {
             assert!(
                 m.from_sq() != Square::D5 || m.to_sq() != Square::D4,
-                "rook capture on d4 should be illegal (last commoner destroyed)"
+                "rook capture on d4 should be illegal (commoner destroyed)"
             );
         }
     }
@@ -1982,11 +2011,23 @@ mod tests {
 
     #[test]
     fn test_outcome_draw_stalemate() {
-        // Black commoner on h8 is boxed in by white pawns on g7 and h7;
-        // g8 is attacked by h7, and capturing either pawn destroys the last commoner.
+        // White's only commoner is enclosed by black knights and not attacked:
+        // every "escape" is a capture that self-destructs it. Stalemate.
+        let fen = "7k/8/8/8/8/8/nn6/Kn6 w - - 0 1";
+        let board = Board::from_fen(fen).unwrap();
+        assert!(board.checkers().is_empty());
+        assert_eq!(board.outcome(), Some(Outcome::Draw));
+    }
+
+    #[test]
+    fn test_outcome_loss_no_moves_in_check() {
+        // Black's commoner on h8 is attacked by the g7 pawn and has no legal
+        // moves (g8 is covered by h7, capturing either pawn self-destructs).
+        // Unlike a true stalemate, this is a loss for the side to move.
         let fen = "7k/6PP/8/8/8/8/8/7K b - - 0 1";
         let board = Board::from_fen(fen).unwrap();
-        assert_eq!(board.outcome(), Some(Outcome::Draw));
+        assert!(!board.checkers().is_empty());
+        assert_eq!(board.outcome(), Some(Outcome::Loss));
     }
 
     #[test]

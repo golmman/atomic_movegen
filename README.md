@@ -9,8 +9,9 @@ reference implementation.
 - Legal move generation (pseudo-legal + legality filtering)
 - FEN parsing and output (standard notation only — `K`/`k` label the commoner)
 - Perft (performance test) recursion
-- Blast-on-capture, commoner pseudo-royalty (only for the last commoner), pawn
-  blast immunity (except for the capturing pawn at the blast square)
+- Blast-on-capture, commoner royalty (one commoner per side, no promotion to
+  commoner), pawn blast immunity (except for the capturing pawn at the blast
+  square)
 - Incremental Zobrist hashing (`Board::hash()`)
 - Game-over detection (`Board::outcome()`, `Board::is_terminal()`)
 - Pure safe Rust, zero dependencies

@@ -13,18 +13,21 @@
 //! - **Pawns and the blast:** pawns are not removed by the blast except when
 //!   a pawn is the capturer at the blast square (`to`). In that case the
 //!   capturing pawn is also destroyed.
-//! - **COMMONER replaces KING:** a commoner moves like a king. Losing all of
-//!   your commoners loses the game.
-//! - **Pseudo-royal only for the last commoner:** a commoner is treated as
-//!   pseudo-royal (it cannot be left under attack and its loss ends the game)
-//!   only when it is the side's last commoner. Touching an enemy commoner is
-//!   allowed and does not count as an attack. This is `extinctionPseudoRoyal`
-//!   with the default `extinctionPieceCount = 0` in Fairy-Stockfish's `atomic`
-//!   variant.
+//! - **COMMONER replaces KING:** each side has exactly one commoner, which
+//!   moves like a king. There is no way to gain another one: pawns promote only
+//!   to knight, bishop, rook, or queen, and there are no drops. A board
+//!   therefore has one or two commoners, and a board with only one commoner is
+//!   terminal.
+//! - **Commoner royalty:** the commoner may not be left under attack and may
+//!   not be destroyed; doing so loses the game. Touching the enemy commoner is
+//!   allowed and does not count as an attack: any capture would also blast the
+//!   enemy's only commoner away. This is `extinctionPseudoRoyal` with the
+//!   default `extinctionPieceCount = 0` in Fairy-Stockfish's `atomic` variant.
 //! - **Not `atomar`:** commoners are not mutually immune and there is no
 //!   `mutuallyImmuneTypes` / `blastImmuneTypes` rule.
 //! - **No check/mate in the usual sense:** the game ends when a side has no
-//!   commoners left.
+//!   commoner left. With no legal moves, an attacked commoner loses and a safe
+//!   commoner is stalemated.
 //!
 //! # Example
 //!

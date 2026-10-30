@@ -1,7 +1,9 @@
 use atomic_movegen::board::Board;
 use atomic_movegen::perft;
 
-/// All 12 atomic perft positions from tests/perft_values.md
+/// Atomic perft positions: the 12 positions from tests/perft_values.md plus two
+/// atomic-specific positions from shakmaty's `tests/atomic.perft` suite
+/// ("programfox"), all verified against Fairy-Stockfish.
 const POSITIONS: &[(&str, &[u64])] = &[
     // Position 1: starting position
     (
@@ -63,9 +65,19 @@ const POSITIONS: &[(&str, &[u64])] = &[
         "8/4N3/8/7p/1r3q1P/6K1/7k/q7 b - - 21 61",
         &[57, 463, 25637, 210798, 11357575, 96323713],
     ),
+    // programfox-1 (shakmaty tests/atomic.perft)
+    (
+        "rn2kb1r/1pp1p2p/p2q1pp1/3P4/2P3b1/4PN2/PP3PPP/R2QKB1R b KQkq - 0 1",
+        &[40, 1238, 45237, 1434825, 50504249, 1625390453],
+    ),
+    // programfox-2 (shakmaty tests/atomic.perft)
+    (
+        "rn1qkb1r/p5pp/2p5/3p4/N3P3/5P2/PPP4P/R1BQK3 w Qkq - 0 1",
+        &[28, 833, 23353, 714499, 21134061, 658055520],
+    ),
 ];
 
-/// Test all 12 positions at depth 1 — all verified to match Fairy-Stockfish.
+/// Test all 14 positions at depth 1 — all verified to match Fairy-Stockfish.
 #[test]
 fn perft_all_positions_depth_1() {
     for (i, (fen, expected)) in POSITIONS.iter().enumerate() {

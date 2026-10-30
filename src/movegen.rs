@@ -8,8 +8,8 @@ use std::ops::ControlFlow;
 /// Generate all pseudo-legal moves for the side to move.
 ///
 /// Pseudo-legal means every move that is legal *except* moves that would
-/// result in self-explosion (losing the last commoner), castling through
-/// check, or leaving a commoner under attack. Use [`generate_legal`] for
+/// result in self-explosion (destroying the commoner), castling through
+/// check, or leaving the commoner under attack. Use [`generate_legal`] for
 /// fully legal moves.
 pub fn generate_pseudo_legal(board: &Board, moves: &mut MoveList) {
     let _ = for_each_pseudo_legal::<core::convert::Infallible>(board, &mut |m| {
@@ -275,6 +275,13 @@ pub fn generate_legal(board: &Board, moves: &mut MoveList) {
 /// [`Board::populate_state`]) before invoking this function. It does not call
 /// `populate_state` itself.
 pub fn generate_legal_with_state(board: &Board, state: &StateInfo, moves: &mut MoveList) {
+    // The game is already over when either side has no commoner left
+    // (extinction). Fairy-Stockfish's `generate<LEGAL>` returns no moves in
+    // that case, so neither do we.
+    if state.commoners_count == 0 || state.them_commoners_count == 0 {
+        return;
+    }
+
     generate_pseudo_legal(board, moves);
 
     // In-place compaction: fast-path accept without legal() call.
@@ -323,9 +330,9 @@ pub fn has_legal_move(board: &Board) -> bool {
 /// For any position and any populated `StateInfo` this returns exactly
 /// `!generate_legal_with_state(board, state, list).is_empty()`.
 pub fn has_legal_move_with_state(board: &Board, state: &StateInfo) -> bool {
-    // Every candidate would be rejected by the `our_commoners.is_empty()`
-    // guard in `Board::legal`, so skip the stream entirely.
-    if board.commoners(board.side_to_move()).is_empty() {
+    // Game already over (extinction): no legal moves, matching
+    // `generate_legal_with_state`.
+    if state.commoners_count == 0 || state.them_commoners_count == 0 {
         return false;
     }
 
@@ -344,6 +351,21 @@ pub fn has_legal_move_with_state(board: &Board, state: &StateInfo) -> bool {
 mod tests {
     use super::*;
     use crate::board::Board;
+
+    #[test]
+    fn test_no_legal_moves_when_game_is_over() {
+        // The opponent has no commoner left, so the game is already over and
+        // no moves are generated. This matches Fairy-Stockfish's
+        // `generate<LEGAL>`, which returns an empty list for an immediate game
+        // end.
+        for fen in ["8/8/8/8/8/8/8/K7 w - - 0 1", "8/8/8/8/8/8/8/KQ6 w - - 0 1"] {
+            let board = Board::from_fen(fen).unwrap();
+            let mut moves = MoveList::new();
+            generate_legal(&board, &mut moves);
+            assert!(moves.is_empty(), "{fen}");
+            assert!(!has_legal_move(&board), "{fen}");
+        }
+    }
 
     #[test]
     fn test_starting_position_move_count() {
@@ -503,7 +525,7 @@ mod tests {
                 fen: "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3",
                 expected: false,
             },
-            // Stalemate: white's last commoner is enclosed by knights; every
+            // Stalemate: white's only commoner is enclosed by knights; every
             // "escape" is a capture that self-destructs it. No check.
             Fixture {
                 name: "stalemate",

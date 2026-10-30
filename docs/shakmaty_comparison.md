@@ -96,7 +96,7 @@ A stronger check was done on the movegen-only corpus: for 1,618 positions the
 **set of legal moves** (as sorted `(from, to, promotion)` triples) was compared
 and was **identical** for both libraries in 1,618/1,618 positions
 (`move-set differences: 0 / 1618`; snippet in §7.4). Both therefore implement the same rules
-(blast on capture, pawn blast immunity, pseudo-royal last commoner), and the
+(blast on capture, pawn blast immunity, one royal commoner per side), and the
 timings measure the same work.
 
 ---

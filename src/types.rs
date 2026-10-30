@@ -417,8 +417,9 @@ pub enum Outcome {
 
 /// A piece type (pawn, knight, bishop, rook, queen, or commoner).
 ///
-/// In atomic chess, a *commoner* moves like a king and is pseudo-royal:
-/// losing all commoners loses the game.
+/// In atomic chess, a *commoner* moves like a king and is royal: losing it
+/// loses the game. Each side has at most one commoner, and pawns cannot
+/// promote to a commoner.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
@@ -568,6 +569,8 @@ pub const fn make_piece(color: Color, pt: PieceType) -> Piece {
 }
 
 /// The piece types a pawn may promote to, ordered by promotion bit encoding.
+///
+/// Atomic chess does not allow promotion to a commoner.
 pub const PROMOTION_PIECES: [PieceType; 4] = [
     PieceType::Queen,
     PieceType::Rook,
@@ -1033,6 +1036,13 @@ mod tests {
     fn test_piece_no_piece() {
         assert_eq!(NO_PIECE.color(), None);
         assert_eq!(NO_PIECE.type_of(), None);
+    }
+
+    #[test]
+    fn test_commoner_is_not_a_promotion_piece() {
+        // Atomic chess has no promotion to commoner; each side keeps its
+        // original commoner for the whole game.
+        assert!(!PROMOTION_PIECES.contains(&PieceType::Commoner));
     }
 
     #[test]
