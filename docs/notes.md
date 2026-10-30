@@ -22,5 +22,9 @@ Please address this.
 
 ---
 
-Last session we finished with
+Last session we finished with `docs/plans/shakmaty/report1.md`
 Please verify: perft-numbers did not change and performance did not regress.
+
+---
+
+`docs/plans/shakmaty/analysis.md`
