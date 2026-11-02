@@ -85,7 +85,7 @@ pub mod types;
 pub(crate) mod util;
 pub(crate) mod zobrist;
 
-pub use board::{Board, FenLoadError, FenPolicy, ValidationErrors};
+pub use board::{BlastCasualties, Board, FenLoadError, FenPolicy, ValidationErrors};
 pub use types::{Bitboard, Color, EnPassantMode, Move, MoveList, Outcome, PieceType, Square};
 
 /// Count the number of legal moves at each node to the given depth (perft).

@@ -22,6 +22,12 @@ reference implementation.
 - Blast-on-capture, commoner royalty (one commoner per side, no promotion to
   commoner), pawn blast immunity (except for the capturing pawn at the blast
   square)
+- Canonical blast helpers: `Board::blast_zone()` for the 3×3 geometry and
+  `Board::blast_casualties()` for the pieces a capture removes, split by color
+  and including the en-passant victim
+- Rule conveniences: `attacks::attacks_from()`,
+  `Board::attackers_to_color()`, board-aware `Board::is_zeroing()` /
+  `Board::is_double_push()`, and order-preserving `MoveList::retain()`
 - Incremental Zobrist hashing (`Board::hash()`) and FSF-compatible FEN output
 - Canonical en-passant keys and FEN output: `Board::legal_ep_square()` and
   `EnPassantMode::Legal` via `hash_with()`, `fen_with()`, and

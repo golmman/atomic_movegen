@@ -33,3 +33,8 @@ Please verify: perft-numbers did not change and performance did not regress.
 
 New feedback from library consumers was added: `docs/plans/feedback/feedback2.md`.
 Draft implementation plans in `docs/plans/feedback/` named `f2_planN.md` which adress the feedback.
+
+---
+
+Last sessions we implemented `docs/plans/feedback/f2_planN.md`.
+Please see the accompanying reports, perform a final check and prepare a cargo publish.

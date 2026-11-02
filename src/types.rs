@@ -904,12 +904,14 @@ impl fmt::Display for Move {
     }
 }
 
-/// Maximum number of moves that can be generated for any atomic chess position.
+/// Capacity of a [`MoveList`], in moves.
 ///
-/// The absolute upper bound is well below 256:
-/// - At most 64 squares with attackers
-/// - Perft at depth 1 on the most complex legal positions yields < 150 moves
-/// - 256 provides a comfortable safety margin.
+/// The largest legal move count observed in this crate's perft-corpus scan
+/// (all 41 test positions, every position reached through depth 4) is 68. For
+/// comparison, standard chess has a known maximum of 218 legal moves. The
+/// value 256 is a deliberately conservative safety margin, not a proven tight
+/// bound for every artificial board; the generator's per-piece target masks
+/// make it comfortably large in practice.
 pub const MAX_MOVES: usize = 256;
 
 /// A fixed-capacity, stack-allocated list of `Move` values.
@@ -953,18 +955,35 @@ impl MoveList {
 
     /// Appends a move to the end of the list.
     ///
-    /// # Panics
-    /// Panics in debug mode if the list is full (`len == MAX_MOVES`).
-    /// In release mode, exceeding the capacity silently overwrites (unreachable
-    /// in practice due to the move-count bound).
+    /// The list keeps at most [`MAX_MOVES`] moves. In debug builds, pushing
+    /// when the list is full (`len == MAX_MOVES`) triggers an assertion. In
+    /// release builds, a push at capacity is silently ignored; it does not
+    /// overwrite an existing move. The generator is expected to stay far below
+    /// the capacity.
     #[inline]
     pub fn push(&mut self, m: Move) {
         debug_assert!(self.len < MAX_MOVES, "MoveList overflow");
-        // Safe: unreachable in practice due to move-count bound.
         if self.len < MAX_MOVES {
             self.moves[self.len] = m;
             self.len += 1;
         }
+    }
+
+    /// Keeps only the moves for which `f` returns `true`, preserving order.
+    ///
+    /// The closure receives each move by value. The list is compacted in place
+    /// and its length is updated to the number of retained moves.
+    #[inline]
+    pub fn retain(&mut self, mut f: impl FnMut(Move) -> bool) {
+        let mut write = 0;
+        for read in 0..self.len {
+            let m = self.moves[read];
+            if f(m) {
+                self.moves[write] = m;
+                write += 1;
+            }
+        }
+        self.len = write;
     }
 
     /// Sets the length directly (caller must ensure `len <= MAX_MOVES` and
@@ -1141,6 +1160,36 @@ mod tests {
         assert_eq!((!b1).0, !0xFFu64);
         assert_eq!(Bitboard::square_bb(Square::A1).0, 1);
         assert_eq!(Bitboard::square_bb(Square::H8).0, 1u64 << 63);
+    }
+
+    #[test]
+    fn move_list_retain_preserves_order() {
+        let moves = [
+            Move::make_move(Square::A1, Square::A2),
+            Move::make_move(Square::B1, Square::B3),
+            Move::make_move(Square::C1, Square::C2),
+            Move::make_move(Square::D1, Square::D4),
+            Move::make_move(Square::E1, Square::E2),
+            Move::make_move(Square::F1, Square::F3),
+        ];
+        let mut list = MoveList::new();
+        for &m in &moves {
+            list.push(m);
+        }
+
+        list.retain(|m| {
+            let index = moves.iter().position(|&candidate| candidate == m).unwrap();
+            index % 2 == 0
+        });
+
+        assert_eq!(list.len(), 3);
+        assert_eq!(list.as_slice(), &[moves[0], moves[2], moves[4]]);
+        assert!(list.as_slice().iter().all(|m| m.to_bits() != 0));
+
+        // A predicate that rejects everything empties the list.
+        list.retain(|_| false);
+        assert!(list.is_empty());
+        assert!(list.as_slice().is_empty());
     }
 
     #[test]

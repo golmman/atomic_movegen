@@ -46,6 +46,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Canonical atomic blast API: `Board::blast_zone(sq)` returns the full 3×3
+  blast geometry (including the center and pawn squares), and
+  `Board::blast_casualties(m)` returns a `BlastCasualties` value with the
+  removed white and black pieces plus the en-passant victim square. The helper
+  mirrors `do_move` without mutation and is covered by a random-playout
+  equivalence test.
+- Convenience helpers for consumers that previously re-derived rules:
+  `attacks::attacks_from(pt, color, sq, occupied)`,
+  `Board::attackers_to_color(sq, color, occupied)`, board-aware
+  `Board::is_zeroing(m)` and `Board::is_double_push(m)`, and
+  `MoveList::retain(f)` with order preservation.
+- Corrected the `MAX_MOVES` and `MoveList::push` documentation: the largest
+  observed count is 68 legal moves (all 41 perft positions through depth 4),
+  256 is a conservative safety margin rather than a proven tight bound, and a
+  release-mode push at capacity is ignored (not an overwrite).
 - Opt-in semantic FEN validation: `Board::validate()` and
   `Board::from_fen_with(fen, policy)` with `FenPolicy::{Strict, AllowTerminal,
   AllowImpossibleCheck, Permissive}` and a `ValidationErrors` bitflags type.
