@@ -46,6 +46,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Opt-in semantic FEN validation: `Board::validate()` and
+  `Board::from_fen_with(fen, policy)` with `FenPolicy::{Strict, AllowTerminal,
+  AllowImpossibleCheck, Permissive}` and a `ValidationErrors` bitflags type.
+  `FenLoadError` keeps syntax failures (`FenError`) separate from
+  `InvalidPosition` failures. The permissive `Board::from_fen()` is unchanged;
+  strict validation checks commoner counts, back-rank pawns, castling and
+  en-passant geometry, a conservative material bound, and opposite check. It
+  deliberately does not reject FSF-style ep targets that have no legal ep
+  capture, and it is not a reachability proof.
 - Canonical en-passant handling for position keys and FEN output.
   `Board::legal_ep_square()` returns the stored target only when at least one
   fully legal en-passant capture exists (pins, self-explosion, and commoner

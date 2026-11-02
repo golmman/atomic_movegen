@@ -6,6 +6,7 @@ use crate::bitboard::*;
 use crate::types::*;
 use std::error::Error;
 use std::fmt;
+use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
 
 /// Errors that can occur when parsing a FEN string.
 #[derive(Debug)]
@@ -61,6 +62,211 @@ impl fmt::Display for FenError {
 }
 
 impl Error for FenError {}
+
+/// Semantic validation failures for a position.
+///
+/// This is a small, dependency-free bitflags type. Multiple problems can be
+/// reported at once; use [`contains`](Self::contains) to test for a specific
+/// flag. The flags describe structural problems, not whether a position is
+/// reachable from the starting position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ValidationErrors(u32);
+
+impl ValidationErrors {
+    /// The board has no pieces at all.
+    pub const EMPTY_BOARD: Self = Self(1 << 0);
+    /// White has no commoner.
+    pub const MISSING_COMMONER_WHITE: Self = Self(1 << 1);
+    /// Black has no commoner.
+    pub const MISSING_COMMONER_BLACK: Self = Self(1 << 2);
+    /// White has more than one commoner.
+    pub const TOO_MANY_COMMONERS_WHITE: Self = Self(1 << 3);
+    /// Black has more than one commoner.
+    pub const TOO_MANY_COMMONERS_BLACK: Self = Self(1 << 4);
+    /// A pawn is on rank 1 or rank 8.
+    pub const PAWNS_ON_BACKRANK: Self = Self(1 << 5);
+    /// The side that just moved is in check.
+    pub const OPPOSITE_CHECK: Self = Self(1 << 6);
+    /// The stored en-passant target is not consistent with a double push.
+    pub const INVALID_EP_SQUARE: Self = Self(1 << 7);
+    /// A castling right is set without the required commoner and rook.
+    pub const INVALID_CASTLING_RIGHTS: Self = Self(1 << 8);
+    /// The material exceeds the conservative legal-start-plus-promotions bound.
+    pub const TOO_MUCH_MATERIAL: Self = Self(1 << 9);
+
+    /// Return an empty error set.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// Return the raw bitmask.
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// Return `true` when no flags are set.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Return `true` when every flag in `other` is set in `self`.
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+
+    /// Return the union of two error sets.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Return the intersection of two error sets.
+    #[must_use]
+    pub const fn intersection(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+
+impl BitOr for ValidationErrors {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        self.union(rhs)
+    }
+}
+
+impl BitAnd for ValidationErrors {
+    type Output = Self;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        self.intersection(rhs)
+    }
+}
+
+impl BitOrAssign for ValidationErrors {
+    fn bitor_assign(&mut self, rhs: Self) {
+        *self = self.union(rhs);
+    }
+}
+
+impl BitAndAssign for ValidationErrors {
+    fn bitand_assign(&mut self, rhs: Self) {
+        *self = self.intersection(rhs);
+    }
+}
+
+impl fmt::Display for ValidationErrors {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const NAMES: [(ValidationErrors, &str); 10] = [
+            (ValidationErrors::EMPTY_BOARD, "EMPTY_BOARD"),
+            (
+                ValidationErrors::MISSING_COMMONER_WHITE,
+                "MISSING_COMMONER_WHITE",
+            ),
+            (
+                ValidationErrors::MISSING_COMMONER_BLACK,
+                "MISSING_COMMONER_BLACK",
+            ),
+            (
+                ValidationErrors::TOO_MANY_COMMONERS_WHITE,
+                "TOO_MANY_COMMONERS_WHITE",
+            ),
+            (
+                ValidationErrors::TOO_MANY_COMMONERS_BLACK,
+                "TOO_MANY_COMMONERS_BLACK",
+            ),
+            (ValidationErrors::PAWNS_ON_BACKRANK, "PAWNS_ON_BACKRANK"),
+            (ValidationErrors::OPPOSITE_CHECK, "OPPOSITE_CHECK"),
+            (ValidationErrors::INVALID_EP_SQUARE, "INVALID_EP_SQUARE"),
+            (
+                ValidationErrors::INVALID_CASTLING_RIGHTS,
+                "INVALID_CASTLING_RIGHTS",
+            ),
+            (ValidationErrors::TOO_MUCH_MATERIAL, "TOO_MUCH_MATERIAL"),
+        ];
+
+        if self.is_empty() {
+            return f.write_str("no validation errors");
+        }
+        let mut first = true;
+        for (flag, name) in NAMES {
+            if self.contains(flag) {
+                if !first {
+                    f.write_str(", ")?;
+                }
+                f.write_str(name)?;
+                first = false;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Error for ValidationErrors {}
+
+/// Policy for semantic validation when loading a FEN with
+/// [`Board::from_fen_with`].
+///
+/// The default [`Board::from_fen`] parser is syntax-only and remains
+/// permissive. These policies add opt-in semantic checks for untrusted input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum FenPolicy {
+    /// All semantic checks; exactly one commoner per side.
+    Strict,
+    /// Permit zero or one commoner per side for artificial terminal fixtures.
+    ///
+    /// Multiple commoners are still rejected, and all other checks still run.
+    AllowTerminal,
+    /// Strict except for the side-not-to-move check.
+    ///
+    /// This permits positions where the side that just moved is in check, which
+    /// can be useful for puzzle or analysis fixtures.
+    AllowImpossibleCheck,
+    /// Syntax only, exactly like [`Board::from_fen`].
+    Permissive,
+}
+
+/// Error returned by [`Board::from_fen_with`].
+///
+/// Syntax errors keep the existing [`FenError`] type; semantic failures are
+/// reported separately so downstream code can distinguish malformed FEN text
+/// from a well-formed but invalid position.
+#[derive(Debug)]
+pub enum FenLoadError {
+    /// The FEN text is malformed.
+    Syntax(FenError),
+    /// The FEN text is well formed, but the position failed validation.
+    InvalidPosition(ValidationErrors),
+}
+
+impl fmt::Display for FenLoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FenLoadError::Syntax(e) => write!(f, "invalid FEN syntax: {e}"),
+            FenLoadError::InvalidPosition(e) => write!(f, "invalid position: {e}"),
+        }
+    }
+}
+
+impl Error for FenLoadError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            FenLoadError::Syntax(e) => Some(e),
+            FenLoadError::InvalidPosition(_) => None,
+        }
+    }
+}
+
+impl From<FenError> for FenLoadError {
+    fn from(value: FenError) -> Self {
+        FenLoadError::Syntax(value)
+    }
+}
 
 fn char_to_piece(c: char) -> Option<Piece> {
     match c {
@@ -211,6 +417,10 @@ impl Board {
     /// positions. In particular, atomic chess has at most one commoner per
     /// side, so FENs with more than one `K` or more than one `k` are not legal
     /// atomic positions even though this parser accepts them.
+    ///
+    /// For untrusted input, use [`Board::from_fen_with`] with
+    /// [`FenPolicy::Strict`], or call [`Board::validate`] after parsing. This
+    /// method's behavior is unchanged and remains permissive.
     ///
     /// # Errors
     ///
@@ -422,6 +632,194 @@ impl Board {
         };
         board.recompute_hash();
         Ok(board)
+    }
+
+    /// Parse a FEN string and apply the given semantic validation policy.
+    ///
+    /// This is the opt-in strict counterpart to [`Board::from_fen`]. The
+    /// permissive parser is still used for syntax; after parsing, the position
+    /// is checked according to `policy`. Use [`FenPolicy::Strict`] for
+    /// untrusted input, [`FenPolicy::AllowTerminal`] for artificial terminal
+    /// fixtures, [`FenPolicy::AllowImpossibleCheck`] to skip only the
+    /// side-not-to-move check, or [`FenPolicy::Permissive`] for behavior
+    /// identical to [`Board::from_fen`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FenLoadError::Syntax`] for malformed FEN text and
+    /// [`FenLoadError::InvalidPosition`] when the parsed position fails the
+    /// selected policy.
+    pub fn from_fen_with(fen: &str, policy: FenPolicy) -> Result<Self, FenLoadError> {
+        let board = Board::from_fen(fen).map_err(FenLoadError::Syntax)?;
+        let errors = board.validation_errors(policy);
+        if errors.is_empty() {
+            Ok(board)
+        } else {
+            Err(FenLoadError::InvalidPosition(errors))
+        }
+    }
+
+    /// Validate this position with [`FenPolicy::Strict`].
+    ///
+    /// The checks are structural and conservative: exactly one commoner per
+    /// side, no pawns on the back ranks, consistent castling rights and
+    /// en-passant geometry, a conservative material bound, and no check against
+    /// the side that just moved. They do **not** prove that the position is
+    /// reachable from the starting position.
+    ///
+    /// # Errors
+    ///
+    /// Returns the accumulated [`ValidationErrors`] when any check fails.
+    pub fn validate(&self) -> Result<(), ValidationErrors> {
+        let errors = self.validation_errors(FenPolicy::Strict);
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// Accumulate semantic validation errors for `policy`.
+    fn validation_errors(&self, policy: FenPolicy) -> ValidationErrors {
+        if policy == FenPolicy::Permissive {
+            return ValidationErrors::empty();
+        }
+
+        let mut errors = ValidationErrors::empty();
+
+        // 1. Board presence and commoner counts.
+        if self.occupied().is_empty() && policy != FenPolicy::AllowTerminal {
+            errors |= ValidationErrors::EMPTY_BOARD;
+        }
+        let white_commoners = self.commoners(Color::White).count();
+        let black_commoners = self.commoners(Color::Black).count();
+        match policy {
+            FenPolicy::Strict | FenPolicy::AllowImpossibleCheck => {
+                if white_commoners == 0 {
+                    errors |= ValidationErrors::MISSING_COMMONER_WHITE;
+                } else if white_commoners > 1 {
+                    errors |= ValidationErrors::TOO_MANY_COMMONERS_WHITE;
+                }
+                if black_commoners == 0 {
+                    errors |= ValidationErrors::MISSING_COMMONER_BLACK;
+                } else if black_commoners > 1 {
+                    errors |= ValidationErrors::TOO_MANY_COMMONERS_BLACK;
+                }
+            }
+            FenPolicy::AllowTerminal => {
+                if white_commoners > 1 {
+                    errors |= ValidationErrors::TOO_MANY_COMMONERS_WHITE;
+                }
+                if black_commoners > 1 {
+                    errors |= ValidationErrors::TOO_MANY_COMMONERS_BLACK;
+                }
+            }
+            FenPolicy::Permissive => unreachable!(),
+        }
+
+        // 2. Pawns on the back ranks.
+        const RANK_1: Bitboard = Bitboard(0x0000_0000_0000_00FF);
+        const RANK_8: Bitboard = Bitboard(0xFF00_0000_0000_0000);
+        if !(self.pieces_pt(PieceType::Pawn) & (RANK_1 | RANK_8)).is_empty() {
+            errors |= ValidationErrors::PAWNS_ON_BACKRANK;
+        }
+
+        // 3. Castling rights must have the required commoner and rook.
+        let white_commoner = make_piece(Color::White, PieceType::Commoner);
+        let white_rook = make_piece(Color::White, PieceType::Rook);
+        let black_commoner = make_piece(Color::Black, PieceType::Commoner);
+        let black_rook = make_piece(Color::Black, PieceType::Rook);
+        if self.castling_rights & WK_CASTLE != 0
+            && (self.squares[Square::E1 as usize] != white_commoner
+                || self.squares[Square::H1 as usize] != white_rook)
+        {
+            errors |= ValidationErrors::INVALID_CASTLING_RIGHTS;
+        }
+        if self.castling_rights & WQ_CASTLE != 0
+            && (self.squares[Square::E1 as usize] != white_commoner
+                || self.squares[Square::A1 as usize] != white_rook)
+        {
+            errors |= ValidationErrors::INVALID_CASTLING_RIGHTS;
+        }
+        if self.castling_rights & BK_CASTLE != 0
+            && (self.squares[Square::E8 as usize] != black_commoner
+                || self.squares[Square::H8 as usize] != black_rook)
+        {
+            errors |= ValidationErrors::INVALID_CASTLING_RIGHTS;
+        }
+        if self.castling_rights & BQ_CASTLE != 0
+            && (self.squares[Square::E8 as usize] != black_commoner
+                || self.squares[Square::A8 as usize] != black_rook)
+        {
+            errors |= ValidationErrors::INVALID_CASTLING_RIGHTS;
+        }
+
+        // 4. Conservative material bounds: a legal start plus promotions.
+        for color in [Color::White, Color::Black] {
+            let pawns = self.pieces_color_pt(color, PieceType::Pawn).count();
+            let total = self.pieces_color(color).count();
+            if pawns > 8 || total > 16 {
+                errors |= ValidationErrors::TOO_MUCH_MATERIAL;
+            }
+            let free = 8u32.saturating_sub(pawns);
+            const INITIAL_COUNTS: [(PieceType, u32); 5] = [
+                (PieceType::Knight, 2),
+                (PieceType::Bishop, 2),
+                (PieceType::Rook, 2),
+                (PieceType::Queen, 1),
+                (PieceType::Commoner, 1),
+            ];
+            for (pt, initial) in INITIAL_COUNTS {
+                if self.pieces_color_pt(color, pt).count() > initial + free {
+                    errors |= ValidationErrors::TOO_MUCH_MATERIAL;
+                }
+            }
+        }
+
+        // 5. En-passant geometry must be consistent with a double push. A
+        // legal ep capture is deliberately not required: FSF records the
+        // target after every double push.
+        if let Some(sq) = self.ep_square {
+            let mut valid = true;
+            let expected_rank = match self.side_to_move {
+                Color::White => Rank::R6,
+                Color::Black => Rank::R3,
+            };
+            if rank_of(sq) != expected_rank {
+                valid = false;
+            } else {
+                let them = self.side_to_move.flip();
+                let (pawn_sq, origin_sq) = match self.side_to_move {
+                    Color::White => (
+                        Square::from_index(sq as i8 - 8),
+                        Square::from_index(sq as i8 + 8),
+                    ),
+                    Color::Black => (
+                        Square::from_index(sq as i8 + 8),
+                        Square::from_index(sq as i8 - 8),
+                    ),
+                };
+                if self.squares[pawn_sq as usize] != make_piece(them, PieceType::Pawn)
+                    || self.squares[origin_sq as usize] != NO_PIECE
+                    || self.squares[sq as usize] != NO_PIECE
+                {
+                    valid = false;
+                }
+            }
+            if !valid {
+                errors |= ValidationErrors::INVALID_EP_SQUARE;
+            }
+        }
+
+        // 6. The side that just moved must not be in check.
+        if policy != FenPolicy::AllowImpossibleCheck {
+            let just_moved = self.side_to_move.flip();
+            if !self.compute_checkers(just_moved).is_empty() {
+                errors |= ValidationErrors::OPPOSITE_CHECK;
+            }
+        }
+
+        errors
     }
 
     /// Serialize the board to a FEN string using the default
@@ -2276,6 +2674,210 @@ mod tests {
                 "expected non-standard FEN {fen:?} to be rejected"
             );
         }
+    }
+
+    #[test]
+    fn validate_accepts_legal_positions() {
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "rnbqkbnr/ppp2pp1/4p2p/3p4/3PP3/7N/PPP2PPP/RNBQKB1R w KQkq - 0 4",
+            "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+            // FSF-style ep target with no legal ep capture.
+            "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2",
+            // Promotion-heavy, with the side to move in check (allowed).
+            "4k3/PPPPPPPP/8/8/8/8/8/4K3 b - - 0 1",
+        ];
+        for fen in fens {
+            let board = Board::from_fen(fen).expect("test FEN must parse");
+            assert_eq!(board.validate(), Ok(()), "unexpected errors for {fen}");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_structural_errors() {
+        let cases: &[(&str, ValidationErrors)] = &[
+            (
+                "8/8/8/8/8/8/8/8 w - - 0 1",
+                ValidationErrors::EMPTY_BOARD
+                    .union(ValidationErrors::MISSING_COMMONER_WHITE)
+                    .union(ValidationErrors::MISSING_COMMONER_BLACK),
+            ),
+            (
+                "4k3/8/8/8/8/8/8/8 w - - 0 1",
+                ValidationErrors::MISSING_COMMONER_WHITE,
+            ),
+            (
+                "8/8/8/8/8/8/8/4K3 w - - 0 1",
+                ValidationErrors::MISSING_COMMONER_BLACK,
+            ),
+            (
+                "4k3/8/8/8/8/8/8/3KK3 w - - 0 1",
+                ValidationErrors::TOO_MANY_COMMONERS_WHITE,
+            ),
+            (
+                "3kk3/8/8/8/8/8/8/4K3 w - - 0 1",
+                ValidationErrors::TOO_MANY_COMMONERS_BLACK,
+            ),
+            (
+                "4k2P/8/8/8/8/8/8/p3K3 w - - 0 1",
+                ValidationErrors::PAWNS_ON_BACKRANK,
+            ),
+            (
+                "4k3/4p3/8/4p3/8/8/8/4K3 w - e6 0 1",
+                ValidationErrors::INVALID_EP_SQUARE,
+            ),
+            (
+                "4k3/8/4n3/4p3/8/8/8/4K3 w - e6 0 1",
+                ValidationErrors::INVALID_EP_SQUARE,
+            ),
+            (
+                "4k3/QQQQQQQQ/QQ2QQQQ/8/8/qq2qqqq/qqqqqqqq/4K3 w - - 0 1",
+                ValidationErrors::TOO_MUCH_MATERIAL,
+            ),
+            (
+                "4k3/4R3/8/8/8/8/8/4K3 w - - 0 1",
+                ValidationErrors::OPPOSITE_CHECK,
+            ),
+        ];
+        for &(fen, expected) in cases {
+            let board = Board::from_fen(fen).expect("test FEN must parse");
+            let errors = board.validate().expect_err("position should be rejected");
+            assert!(
+                errors.contains(expected),
+                "expected {expected} for {fen}, got {errors}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_is_opt_in() {
+        let fens = [
+            "8/8/8/8/8/8/8/8 w - - 0 1",
+            "4k3/8/8/8/8/8/8/8 w - - 0 1",
+            "8/8/8/8/8/8/8/4K3 w - - 0 1",
+            "4k3/8/8/8/8/8/8/3KK3 w - - 0 1",
+            "3kk3/8/8/8/8/8/8/4K3 w - - 0 1",
+            "4k2P/8/8/8/8/8/8/p3K3 w - - 0 1",
+            "4k3/4p3/8/4p3/8/8/8/4K3 w - e6 0 1",
+            "4k3/8/4n3/4p3/8/8/8/4K3 w - e6 0 1",
+            "4k3/QQQQQQQQ/QQ2QQQQ/8/8/qq2qqqq/qqqqqqqq/4K3 w - - 0 1",
+            "4k3/4R3/8/8/8/8/8/4K3 w - - 0 1",
+        ];
+        for fen in fens {
+            assert!(
+                Board::from_fen(fen).is_ok(),
+                "permissive parser must still accept {fen}"
+            );
+        }
+    }
+
+    #[test]
+    fn fen_policy_behavior() {
+        let legal = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+        assert!(Board::from_fen_with(legal, FenPolicy::Strict).is_ok());
+
+        let missing = "4k3/8/8/8/8/8/8/8 w - - 0 1";
+        match Board::from_fen_with(missing, FenPolicy::Strict) {
+            Err(FenLoadError::InvalidPosition(errors)) => {
+                assert!(errors.contains(ValidationErrors::MISSING_COMMONER_WHITE));
+            }
+            other => panic!("expected InvalidPosition, got {other:?}"),
+        }
+
+        let terminal = "8/8/8/8/8/8/8/K7 w - - 0 1";
+        assert!(Board::from_fen_with(terminal, FenPolicy::AllowTerminal).is_ok());
+        let empty = "8/8/8/8/8/8/8/8 w - - 0 1";
+        assert!(Board::from_fen_with(empty, FenPolicy::AllowTerminal).is_ok());
+
+        let two_commoners = "4k3/8/8/8/8/8/8/3KK3 w - - 0 1";
+        match Board::from_fen_with(two_commoners, FenPolicy::AllowTerminal) {
+            Err(FenLoadError::InvalidPosition(errors)) => {
+                assert!(errors.contains(ValidationErrors::TOO_MANY_COMMONERS_WHITE));
+            }
+            other => panic!("expected InvalidPosition, got {other:?}"),
+        }
+
+        let opposite_check = "4k3/4R3/8/8/8/8/8/4K3 w - - 0 1";
+        assert!(Board::from_fen_with(opposite_check, FenPolicy::Strict).is_err());
+        assert!(Board::from_fen_with(opposite_check, FenPolicy::AllowImpossibleCheck).is_ok());
+
+        let all_fens = [
+            legal,
+            missing,
+            terminal,
+            empty,
+            two_commoners,
+            opposite_check,
+            "4k3/4p3/8/4p3/8/8/8/4K3 w - e6 0 1",
+            "4k3/QQQQQQQQ/QQ2QQQQ/8/8/qq2qqqq/qqqqqqqq/4K3 w - - 0 1",
+        ];
+        for fen in all_fens {
+            match (
+                Board::from_fen(fen),
+                Board::from_fen_with(fen, FenPolicy::Permissive),
+            ) {
+                (Ok(a), Ok(b)) => {
+                    assert_eq!(a.fen(), b.fen(), "permissive FEN mismatch for {fen}");
+                    assert_eq!(a.hash(), b.hash(), "permissive hash mismatch for {fen}");
+                }
+                (Err(a), Err(FenLoadError::Syntax(b))) => {
+                    assert_eq!(a.to_string(), b.to_string(), "syntax mismatch for {fen}");
+                }
+                (a, b) => panic!("permissive mismatch for {fen}: {a:?} vs {b:?}"),
+            }
+        }
+
+        assert!(matches!(
+            Board::from_fen_with("not a fen", FenPolicy::Strict),
+            Err(FenLoadError::Syntax(FenError::TooShort { .. }))
+        ));
+    }
+
+    #[test]
+    fn proof_db_workflow() {
+        // A proof-DB style ingestion path: the permissive parser still accepts
+        // artificial fixtures, while the strict loader rejects them unless the
+        // caller explicitly opts into a terminal policy.
+        let malformed = "4k3/8/8/8/8/8/8/3KK3 w - - 0 1";
+        assert!(Board::from_fen(malformed).is_ok());
+        match Board::from_fen_with(malformed, FenPolicy::Strict) {
+            Err(FenLoadError::InvalidPosition(errors)) => {
+                assert!(errors.contains(ValidationErrors::TOO_MANY_COMMONERS_WHITE));
+            }
+            other => panic!("expected InvalidPosition, got {other:?}"),
+        }
+
+        let artificial = "8/8/8/8/8/8/8/K7 w - - 0 1";
+        assert!(Board::from_fen(artificial).is_ok());
+        assert!(Board::from_fen_with(artificial, FenPolicy::AllowTerminal).is_ok());
+    }
+
+    #[test]
+    fn validation_errors_display_and_bits() {
+        let errors = ValidationErrors::EMPTY_BOARD
+            .union(ValidationErrors::MISSING_COMMONER_WHITE)
+            .union(ValidationErrors::PAWNS_ON_BACKRANK);
+        assert!(errors.contains(ValidationErrors::EMPTY_BOARD));
+        assert!(errors.contains(ValidationErrors::MISSING_COMMONER_WHITE));
+        assert!(!errors.contains(ValidationErrors::MISSING_COMMONER_BLACK));
+        assert_eq!(
+            errors.intersection(ValidationErrors::EMPTY_BOARD),
+            ValidationErrors::EMPTY_BOARD
+        );
+        assert_eq!(
+            errors.bits(),
+            ValidationErrors::EMPTY_BOARD.bits()
+                | ValidationErrors::MISSING_COMMONER_WHITE.bits()
+                | ValidationErrors::PAWNS_ON_BACKRANK.bits()
+        );
+        assert!(ValidationErrors::empty().is_empty());
+        assert!(!errors.is_empty());
+
+        let text = errors.to_string();
+        assert!(text.contains("EMPTY_BOARD"), "{text}");
+        assert!(text.contains("MISSING_COMMONER_WHITE"), "{text}");
+        assert!(text.contains("PAWNS_ON_BACKRANK"), "{text}");
+        assert!(!text.contains("MISSING_COMMONER_BLACK"), "{text}");
     }
 
     #[test]

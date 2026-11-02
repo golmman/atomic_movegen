@@ -15,6 +15,9 @@ reference implementation.
   board-aware `Board::move_from_uci()` (resolves castling and en passant),
   allocation-free `Move::write_uci()`, and `Display`
 - FEN parsing and output (standard notation only — `K`/`k` label the commoner)
+- Opt-in semantic validation for untrusted FENs: `Board::validate()`,
+  `Board::from_fen_with()`, `FenPolicy`, and `ValidationErrors`. The default
+  `Board::from_fen()` stays permissive and unchanged.
 - Perft (performance test) recursion
 - Blast-on-capture, commoner royalty (one commoner per side, no promotion to
   commoner), pawn blast immunity (except for the capturing pawn at the blast
@@ -48,6 +51,21 @@ use atomic_movegen::perft;
 let mut board = Board::new();
 let nodes = perft(&mut board, 3);
 assert_eq!(nodes, 8902);
+```
+
+For untrusted FEN input, use the opt-in validation layer:
+
+```rust
+use atomic_movegen::{Board, FenLoadError, FenPolicy};
+
+let board = Board::from_fen_with(
+    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+    FenPolicy::Strict,
+).unwrap();
+assert!(board.validate().is_ok());
+
+let bad = Board::from_fen_with("8/8/8/8/8/8/8/8 w - - 0 1", FenPolicy::Strict);
+assert!(matches!(bad, Err(FenLoadError::InvalidPosition(_))));
 ```
 
 ## Usage (CLI perft)
