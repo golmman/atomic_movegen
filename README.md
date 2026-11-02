@@ -13,7 +13,12 @@ reference implementation.
   commoner), pawn blast immunity (except for the capturing pawn at the blast
   square)
 - Incremental Zobrist hashing (`Board::hash()`)
-- Game-over detection (`Board::outcome()`, `Board::is_terminal()`)
+- Game-over detection (`Board::outcome()`, state-aware `outcome_with_state()` /
+  `outcome_with()`, and the strict `Board::is_terminal()`)
+- Correct terminal precedence: mate outranks the 50-move clock, and only the
+  two commoners remaining is a WDL draw. There is deliberately no
+  insufficient-material table (K+B/K+N/K+R vs K can be an immediate win), and
+  touching commoners are not automatically drawn when other pieces remain.
 - Pure safe Rust, zero dependencies
 
 ## Usage (library)

@@ -218,6 +218,14 @@ add material draws, use FSF's conservative semantics (`src/apiutil.h:366`,
 which never claims a draw when a win might exist) and add tests for the
 disputed endings.
 
+> **Superseded (`feedback2.md` P0-3, follow-up 1):** do **not** port
+> FSF/shakmaty insufficient-material tables. A lone bishop, knight, or rook can
+> win immediately by capturing the enemy commoner when its own commoner is
+> outside the blast, so endings such as K+B vs K are not draws. The only safe
+> material shortcut is the commoner-only position
+> (`Board::is_material_draw`), which is a WDL draw that runs into the 50-move
+> rule. This section is retained for history.
+
 ---
 
 ## 4. Testing lessons
@@ -464,11 +472,11 @@ Verification performed:
 
 ## 8. Recommended follow-ups (priority order)
 
-1. **Material draws in `Board::outcome`** (correctness). Port FSF's
-   `has_insufficient_material` semantics (`src/apiutil.h:366`), use
-   `shakmaty`'s nine atomic test positions as a starting point, and decide the
-   disputed endings explicitly (FSF: K+R vs K and K+NN vs K are sufficient;
-   `shakmaty`: a lone rook / two knights cannot mate).
+1. **Material draws in `Board::outcome`** — **superseded by `feedback2.md`
+   P0-3; do not implement the FSF/shakmaty table.** The only safe material
+   shortcut is the commoner-only WDL draw (`Board::is_material_draw`). A lone
+   bishop, knight, or rook with commoner support can capture the enemy
+   commoner immediately, so K+B/K+N/K+R vs K are not draws.
 2. **`Board::validate()` / strict FEN loading** (correctness/API). Return a
    bitflags-style set of problems, keep `from_fen` permissive, and include the
    atomic-specific checks: at most one commoner per side, no commoner promotion

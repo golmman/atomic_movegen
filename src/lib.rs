@@ -28,6 +28,16 @@
 //! - **No check/mate in the usual sense:** the game ends when a side has no
 //!   commoner left. With no legal moves, an attacked commoner loses and a safe
 //!   commoner is stalemated.
+//! - **Terminal precedence:** commoner extinction, then the commoner-only WDL
+//!   draw, then no legal moves (attacked → loss, safe → draw), then the
+//!   50-move rule. Mate outranks the clock: a checkmate on the 100th half-move
+//!   is a loss, not a draw.
+//! - **No insufficient-material draw:** there is no FIDE-style material table.
+//!   A board with only the two commoners is a WDL draw and runs into the
+//!   50-move rule. Endings such as K+B vs K, K+N vs K, and K+R vs K are not
+//!   draws: the piece can capture the enemy commoner when its own commoner is
+//!   outside the blast. Touching commoners are not automatically a draw when
+//!   other pieces remain.
 //!
 //! # Example
 //!

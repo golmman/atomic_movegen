@@ -26,8 +26,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checkmate in the usual sense, but an attacked commoner with no escape is lost
   (Fairy-Stockfish's `stalemate_value` for `extinctionPseudoRoyal`). True
   stalemates (no legal moves, commoner not attacked) remain draws.
+- Mate now outranks the 50-move clock in `Board::outcome`: a checkmate on the
+  100th half-move is a loss, not a draw (Fairy-Stockfish's
+  `rule50 > 99 && (!checkers() || MoveList<LEGAL>(pos).size())` ordering).
+- `Board::outcome` now reports the commoner-only K-vs-K position as a WDL draw,
+  even before the 50-move rule expires. Such a board with a fresh clock is
+  still not literal game over (`is_terminal() == false`).
 
 ### Changed
+
+- `Board::is_terminal` is now the strict, literal game-over predicate:
+  extinction, no legal moves, or `rule50 >= 100`. It deliberately excludes the
+  commoner-only WDL shortcut used by `outcome()`.
 
 - Documented the atomic invariant that each side has at most one commoner:
   there is no promotion to commoner, a board has one or two commoners, and a
@@ -36,6 +46,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Board::outcome_with_state(&StateInfo)` and
+  `Board::outcome_with(&StateInfo, moves_exist: bool)`: the same precedence as
+  `outcome()`, reusing a populated state and optionally a caller-known
+  legal-move-existence answer. `outcome()` now uses this path and no longer
+  builds a `MoveList`.
+- `Board::is_material_draw()`: true only when both colors have exactly one
+  commoner and nothing else. This is intentionally the only material draw;
+  there is no insufficient-material table. K+B/K+N/K+R vs K counterexamples
+  pin that a lone piece can win immediately by capturing the enemy commoner.
+- A single `terminal_precedence_table` regression test covering touching
+  commoners, checkmate, mate on the 50-move clock, extinction, K vs K (fresh
+  and expired clock), and the artificial empty board; plus state-aware outcome
+  equivalence tests over fixtures and seeded random playouts.
 - Regression tests for touching-commoner immunity (including castling through
   an adjacent enemy commoner), terminal positions, and the absence of
   commoner promotion.

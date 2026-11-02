@@ -859,43 +859,147 @@ impl Board {
         self.pieces_color_pt(c, PieceType::Commoner)
     }
 
-    /// Return the game outcome from the side-to-move perspective, if the game
-    /// is over.
+    /// Return the game outcome from the side-to-move perspective, if the
+    /// position is decided under the atomic rules/WDL view.
     ///
-    /// Commoner extinction for the side to move is a loss, extinction of the
-    /// opponent is a win, the 50-move rule (100 plies) is a draw, and a position
-    /// with no legal moves is a draw by stalemate — unless the side to move's
-    /// commoner is attacked, in which case it is a loss (atomic chess has no
-    /// checkmate in the usual sense, but the commoner cannot escape). A board
-    /// with only one commoner in total is therefore always terminal.
+    /// Branches are evaluated in this order:
+    ///
+    /// 1. the side to move has no commoner → [`Outcome::Loss`];
+    /// 2. the opponent has no commoner → [`Outcome::Win`];
+    /// 3. only the two commoners remain → [`Outcome::Draw`] (the
+    ///    [`is_material_draw`](Self::is_material_draw) WDL shortcut);
+    /// 4. no legal moves: the commoner is attacked → `Loss`, otherwise
+    ///    `Draw` (stalemate);
+    /// 5. the 50-move rule (`rule50 >= 100`) → `Draw`.
+    ///
+    /// Mate outranks the clock: branch 4 is resolved before branch 5 when the
+    /// side to move is in check, so checkmate on the clock's last ply is a
+    /// loss, not a draw. This matches Fairy-Stockfish's
+    /// `rule50 > 99 && (!checkers() || MoveList<LEGAL>(pos).size())` ordering.
+    /// When the side to move is not in check, the 50-move branch is decided
+    /// without running move generation.
+    ///
+    /// This method populates one temporary [`StateInfo`] and uses the
+    /// existence query, but never builds a [`MoveList`].
+    ///
+    /// # WDL view versus literal game over
+    ///
+    /// [`Outcome`] is the WDL view. A commoner-only board is reported as a
+    /// draw here even before the 50-move rule has elapsed, because no legal
+    /// move can change the material. Use [`is_terminal`](Self::is_terminal)
+    /// for the literal rules/game-over predicate, which does not include that
+    /// shortcut.
     #[must_use]
     pub fn outcome(&self) -> Option<Outcome> {
-        let us = self.side_to_move;
-        if self.commoners(us).is_empty() {
+        let mut state = StateInfo::new();
+        self.populate_state(&mut state);
+        self.outcome_with_state(&state)
+    }
+
+    /// Same as [`outcome`](Self::outcome), reusing a populated [`StateInfo`].
+    ///
+    /// `state` must have been populated by
+    /// [`populate_state`](Self::populate_state) for this board. A stale
+    /// `StateInfo` can change extinction, check, and stalemate results.
+    ///
+    /// This may run
+    /// [`has_legal_move_with_state`](crate::movegen::has_legal_move_with_state)
+    /// when the answer depends on whether a legal move exists.
+    #[must_use]
+    pub fn outcome_with_state(&self, state: &StateInfo) -> Option<Outcome> {
+        self.outcome_impl(state, None)
+    }
+
+    /// Hot-path form of [`outcome_with_state`](Self::outcome_with_state) when
+    /// the caller already knows whether a legal move exists.
+    ///
+    /// `moves_exist` must be the result of
+    /// [`has_legal_move_with_state(self, state)`](crate::movegen::has_legal_move_with_state).
+    /// It is authoritative: passing `false` for a non-terminal position
+    /// reports `Draw` or `Loss` according to
+    /// [`StateInfo::checkers`], even though no move generation was run. The
+    /// value is not consulted when extinction, the material shortcut, or the
+    /// non-check 50-move branch already decides the position.
+    #[must_use]
+    pub fn outcome_with(&self, state: &StateInfo, moves_exist: bool) -> Option<Outcome> {
+        self.outcome_impl(state, Some(moves_exist))
+    }
+
+    /// One precedence implementation shared by every `outcome*` query.
+    fn outcome_impl(&self, state: &StateInfo, moves_exist: Option<bool>) -> Option<Outcome> {
+        if state.commoners_count == 0 {
             return Some(Outcome::Loss);
         }
-        if self.commoners(us.flip()).is_empty() {
+        if state.them_commoners_count == 0 {
             return Some(Outcome::Win);
+        }
+        if self.is_material_draw() {
+            return Some(Outcome::Draw);
+        }
+
+        // The clock is a draw without movegen when there is no check. When the
+        // side to move is in check, mate outranks the clock, so resolve the
+        // existence question first (Fairy-Stockfish's `!checkers() || legal`
+        // guard).
+        if self.rule50 >= 100 && state.checkers.is_empty() {
+            return Some(Outcome::Draw);
+        }
+
+        let moves_exist =
+            moves_exist.unwrap_or_else(|| crate::movegen::has_legal_move_with_state(self, state));
+
+        if !moves_exist {
+            return Some(if state.checkers.is_empty() {
+                Outcome::Draw
+            } else {
+                Outcome::Loss
+            });
         }
         if self.rule50 >= 100 {
             return Some(Outcome::Draw);
         }
-        let mut moves = MoveList::new();
-        crate::movegen::generate_legal(self, &mut moves);
-        if moves.is_empty() {
-            if self.checkers().is_empty() {
-                return Some(Outcome::Draw);
-            }
-            return Some(Outcome::Loss);
-        }
         None
     }
 
-    /// Returns `true` if the game is over.
-    #[inline]
+    /// Return `true` if both colors have exactly one commoner and no other
+    /// pieces (an atomic K-vs-K position).
+    ///
+    /// This is the only material draw in atomic chess. It is deliberately
+    /// **not** a general “insufficient material” test: a lone bishop, knight,
+    /// or rook can win immediately by capturing the enemy commoner when its own
+    /// commoner is outside the blast, so endings such as K+B vs K, K+N vs K,
+    /// and K+R vs K are not draws. There is no K+B/K+N/K+R table here.
+    ///
+    /// The color checks exclude artificial boards with two commoners of one
+    /// color, which are not atomic positions. Adjacency is irrelevant: touching
+    /// commoners alone satisfy this predicate, but touching commoners with any
+    /// other piece on the board do not.
+    #[must_use]
+    pub fn is_material_draw(&self) -> bool {
+        self.occupied().count() == 2
+            && self.commoners(Color::White).count() == 1
+            && self.commoners(Color::Black).count() == 1
+    }
+
+    /// Return `true` if the game is literally over.
+    ///
+    /// This is extinction (either side has no commoner), the 50-move rule
+    /// (`rule50 >= 100`), or no legal moves. It deliberately does **not**
+    /// include the commoner-only material shortcut from
+    /// [`outcome`](Self::outcome): a K-vs-K position with `rule50 < 100` is a
+    /// WDL draw, but the game has not ended and may still reach the 50-move
+    /// rule.
+    ///
+    /// This method populates a temporary [`StateInfo`] and uses the
+    /// move-existence query. It never calls [`outcome`](Self::outcome).
     #[must_use]
     pub fn is_terminal(&self) -> bool {
-        self.outcome().is_some()
+        let mut state = StateInfo::new();
+        self.populate_state(&mut state);
+        self.commoners(self.side_to_move).is_empty()
+            || self.commoners(self.side_to_move.flip()).is_empty()
+            || self.rule50 >= 100
+            || !crate::movegen::has_legal_move_with_state(self, &state)
     }
 
     /// Return `true` if `m` is a capture on this board.
@@ -2004,9 +2108,12 @@ mod tests {
 
     #[test]
     fn test_outcome_draw_rule50() {
-        let fen = "4k3/8/8/8/8/8/8/4K3 w - - 100 1";
+        // Not commoner-only: the clock, not the material shortcut, decides.
+        let fen = "4k3/8/8/8/8/8/8/4K2R w - - 100 1";
         let board = Board::from_fen(fen).unwrap();
+        assert!(!board.is_material_draw());
         assert_eq!(board.outcome(), Some(Outcome::Draw));
+        assert!(board.is_terminal());
     }
 
     #[test]
@@ -2028,6 +2135,245 @@ mod tests {
         let board = Board::from_fen(fen).unwrap();
         assert!(!board.checkers().is_empty());
         assert_eq!(board.outcome(), Some(Outcome::Loss));
+    }
+
+    #[test]
+    fn terminal_precedence_table() {
+        // One table pins every feedback FEN and the full precedence order.
+        // (fen, outcome, legal moves, checkers, is_terminal)
+        let cases: &[(&str, Option<Outcome>, usize, u32, bool)] = &[
+            // Touching commoners: no check, ordinary moves remain. This is
+            // also K vs K, so the WDL shortcut applies; the game is not over
+            // before the 50-move rule.
+            (
+                "8/8/8/8/8/8/4k3/4K3 w - - 0 1",
+                Some(Outcome::Draw),
+                4,
+                0,
+                false,
+            ),
+            // Checkmate, mate must outrank the material/clock branches.
+            (
+                "7K/8/8/8/8/8/1Q6/k7 b - - 0 1",
+                Some(Outcome::Loss),
+                0,
+                1,
+                true,
+            ),
+            // Checkmate on the clock's last ply is still a loss.
+            (
+                "7K/8/8/8/8/8/1Q6/k7 b - - 100 1",
+                Some(Outcome::Loss),
+                0,
+                1,
+                true,
+            ),
+            // Opponent already extinct: win and terminal, no legal moves.
+            ("8/8/8/8/8/8/8/K7 w - - 0 1", Some(Outcome::Win), 0, 0, true),
+            // K vs K is a WDL draw, but the game has not ended yet.
+            (
+                "4k3/8/8/8/8/8/8/4K3 w - - 0 1",
+                Some(Outcome::Draw),
+                5,
+                0,
+                false,
+            ),
+            // K vs K on the clock is both a WDL draw and literally over.
+            (
+                "4k3/8/8/8/8/8/8/4K3 w - - 100 1",
+                Some(Outcome::Draw),
+                5,
+                0,
+                true,
+            ),
+            // Artificial both-extinct board: own extinction wins the tie.
+            ("8/8/8/8/8/8/8/8 w - - 0 1", Some(Outcome::Loss), 0, 0, true),
+        ];
+
+        for &(fen, expected_outcome, legal, checkers, terminal) in cases {
+            let board = Board::from_fen(fen).expect("precedence FEN must parse");
+            let mut moves = MoveList::new();
+            crate::movegen::generate_legal(&board, &mut moves);
+
+            assert_eq!(board.outcome(), expected_outcome, "outcome for {fen}");
+            assert_eq!(moves.len(), legal, "legal move count for {fen}");
+            assert_eq!(
+                board.checkers().count(),
+                checkers,
+                "checker count for {fen}"
+            );
+            assert_eq!(
+                crate::movegen::has_legal_move(&board),
+                legal != 0,
+                "has_legal_move for {fen}"
+            );
+            assert_eq!(board.is_terminal(), terminal, "is_terminal for {fen}");
+        }
+    }
+
+    fn assert_outcome_equivalence(board: &Board) {
+        let mut state = StateInfo::new();
+        board.populate_state(&mut state);
+
+        let expected = board.outcome();
+        assert_eq!(
+            expected,
+            board.outcome_with_state(&state),
+            "outcome_with_state mismatch at {}",
+            board.fen()
+        );
+
+        let moves_exist = crate::movegen::has_legal_move_with_state(board, &state);
+        assert_eq!(
+            expected,
+            board.outcome_with(&state, moves_exist),
+            "outcome_with mismatch at {}",
+            board.fen()
+        );
+    }
+
+    fn check_outcome_and_playout(
+        board: &mut Board,
+        rng: &mut Xorshift2,
+        depth: u32,
+        visited: &mut u64,
+    ) {
+        *visited += 1;
+        assert_outcome_equivalence(board);
+
+        let mut state = StateInfo::new();
+        board.populate_state(&mut state);
+
+        let mut list = MoveList::new();
+        crate::movegen::generate_legal_with_state(board, &state, &mut list);
+        if depth == 0 || list.is_empty() {
+            return;
+        }
+
+        let idx = (rng.next() % list.len() as u64) as usize;
+        let m = list[idx];
+        board.do_move(m, &mut state);
+        check_outcome_and_playout(board, rng, depth - 1, visited);
+        board.undo_move(m, &state);
+    }
+
+    #[test]
+    fn outcome_state_aware_equivalence() {
+        const FIXTURES: &[&str] = &[
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1",
+            "3k4/8/8/8/8/8/8/3QK3 b - - 0 1",
+            "7k/6PP/8/8/8/8/8/7K b - - 0 1",
+            "7k/8/8/8/8/8/nn6/Kn6 w - - 0 1",
+            "4k3/8/8/8/8/8/8/4K3 w - - 0 1",
+            "4k3/8/8/8/8/8/8/4K2R w - - 100 1",
+            "8/8/8/8/8/8/8/8 w - - 0 1",
+        ];
+        for fen in FIXTURES {
+            let board = Board::from_fen(fen).expect("fixture FEN must parse");
+            assert_outcome_equivalence(&board);
+        }
+
+        const START_FENS: &[&str] = &[
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2",
+            "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1",
+            "3k4/8/8/8/8/8/8/3QK3 b - - 0 1",
+        ];
+
+        let mut visited = 0u64;
+        for (i, fen) in START_FENS.iter().enumerate() {
+            for seed in 0..8u64 {
+                let mut board = Board::from_fen(fen).expect("start FEN must parse");
+                let mut rng = Xorshift2::new(0xA076_1D64_78BD_642F ^ ((i as u64) << 32) ^ seed);
+                check_outcome_and_playout(&mut board, &mut rng, 200, &mut visited);
+            }
+        }
+        assert!(
+            visited > 2_000,
+            "expected a few thousand positions, got {visited}"
+        );
+    }
+
+    #[test]
+    fn outcome_with_known_move() {
+        // Not in check: a caller-supplied `false` is the stalemate branch.
+        let board =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+        let mut state = StateInfo::new();
+        board.populate_state(&mut state);
+        assert!(crate::movegen::has_legal_move_with_state(&board, &state));
+        assert_eq!(board.outcome_with(&state, true), None);
+        assert_eq!(board.outcome_with(&state, false), Some(Outcome::Draw));
+
+        // In check with escapes: a caller-supplied `false` is the mate branch.
+        let board = Board::from_fen("3k4/8/8/8/8/8/8/3QK3 b - - 0 1").unwrap();
+        let mut state = StateInfo::new();
+        board.populate_state(&mut state);
+        assert!(!state.checkers.is_empty());
+        assert!(crate::movegen::has_legal_move_with_state(&board, &state));
+        assert_eq!(board.outcome_with(&state, true), None);
+        assert_eq!(board.outcome_with(&state, false), Some(Outcome::Loss));
+    }
+
+    #[test]
+    fn material_draw_is_commoner_only() {
+        for fen in [
+            "4k3/8/8/8/8/8/8/4K3 w - - 0 1",
+            // Touching commoners are still bare K vs K.
+            "8/8/8/8/8/8/4k3/4K3 w - - 0 1",
+        ] {
+            let board = Board::from_fen(fen).unwrap();
+            assert!(board.is_material_draw(), "{fen}");
+            assert_eq!(board.outcome(), Some(Outcome::Draw), "{fen}");
+        }
+
+        // Touching commoners are *not* automatically a draw: the shortcut is
+        // bare K vs K, not adjacency. Here a black rook remains, so the
+        // position is WDL-undecided even though the commoners touch.
+        let touching_with_rook = Board::from_fen("8/8/8/8/8/8/4k3/r3K3 w - - 0 1").unwrap();
+        assert!(!touching_with_rook.is_material_draw());
+        assert_eq!(touching_with_rook.outcome(), None);
+        assert!(!touching_with_rook.is_terminal());
+
+        // There is deliberately no insufficient-material table: every one of
+        // these positions is an immediate win by capturing the enemy commoner,
+        // so `outcome` must stay `None` (WDL undecided) before the capture.
+        let counterexamples: &[(&str, Move)] = &[
+            (
+                "8/8/8/8/8/3B4/4k3/K7 w - - 0 1",
+                Move::make_move(Square::D3, Square::E2),
+            ),
+            (
+                "8/8/8/8/3N4/8/4k3/K7 w - - 0 1",
+                Move::make_move(Square::D4, Square::E2),
+            ),
+            (
+                "8/8/8/8/8/8/4k3/K3R3 w - - 0 1",
+                Move::make_move(Square::E1, Square::E2),
+            ),
+        ];
+
+        for &(fen, capture) in counterexamples {
+            let mut board = Board::from_fen(fen).expect("counterexample FEN must parse");
+            assert!(!board.is_material_draw(), "{fen}");
+            assert_eq!(board.outcome(), None, "{fen}");
+
+            let mut state = StateInfo::new();
+            board.populate_state(&mut state);
+            assert!(board.legal(capture, &state), "{fen}: {capture:?}");
+
+            board.do_move(capture, &mut state);
+            assert!(board.commoners(Color::Black).is_empty(), "{fen}");
+            assert_eq!(board.outcome(), Some(Outcome::Loss), "{fen}");
+
+            let mut moves = MoveList::new();
+            crate::movegen::generate_legal(&board, &mut moves);
+            assert!(moves.is_empty(), "{fen}");
+        }
     }
 
     #[test]
