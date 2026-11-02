@@ -1160,43 +1160,97 @@ impl Board {
     /// move `do_move` would accept).
     #[must_use]
     pub fn hash_after(&self, m: Move) -> u64 {
+        if m.move_type() == MoveType::Castling {
+            return self.hash_after_castling(m);
+        }
+        self.hash_after_classified(m, self.classify_move(m))
+    }
+
+    /// Zobrist hash and half-move clock of the position after `m`, computed
+    /// together, without modifying `self`.
+    ///
+    /// Exactly equal to `(self.hash_after(m), self.rule50_after(m))`, and to
+    /// the `(hash(), rule50())` pair of a cloned board after
+    /// [`do_move`](Self::do_move). It exists so that a consumer building child
+    /// keys can classify `m` once instead of twice; it does **not** replace
+    /// [`hash_after`](Self::hash_after) or
+    /// [`rule50_after`](Self::rule50_after). The hash uses the default
+    /// [`EnPassantMode::Always`] policy, like `hash_after`.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, panics if `from` holds no piece (i.e. `m` is not a
+    /// move `do_move` would accept).
+    #[must_use]
+    pub fn hash_and_rule50_after(&self, m: Move) -> (u64, u16) {
+        if m.move_type() == MoveType::Castling {
+            return (self.hash_after_castling(m), self.rule50 + 1);
+        }
+        let class = self.classify_move(m);
+        (
+            self.hash_after_classified(m, class),
+            self.rule50_after_classified(class),
+        )
+    }
+
+    /// Castling branch of [`hash_after`](Self::hash_after); castling never
+    /// captures and never changes the en-passant file.
+    fn hash_after_castling(&self, m: Move) -> u64 {
         let us = self.side_to_move;
         let from = m.from_sq();
         let to = m.to_sq();
 
-        if m.move_type() == MoveType::Castling {
-            let (kfrom, kto, rfrom, rto) = castling_squares(us, to > from);
-            let commoner = make_piece(us, PieceType::Commoner);
-            let rook = make_piece(us, PieceType::Rook);
-            let mut h = self.hash
-                ^ crate::zobrist::ZOBRIST.side
-                ^ piece_key(kfrom, commoner)
-                ^ piece_key(kto, commoner)
-                ^ piece_key(rfrom, rook)
-                ^ piece_key(rto, rook);
-            let new_rights = self.castling_rights
-                & match us {
-                    Color::White => !(WK_CASTLE | WQ_CASTLE),
-                    Color::Black => !(BK_CASTLE | BQ_CASTLE),
-                };
-            h ^= crate::zobrist::ZOBRIST.castling[self.castling_rights as usize];
-            h ^= crate::zobrist::ZOBRIST.castling[new_rights as usize];
-            if let Some(sq) = self.ep_square {
-                h ^= crate::zobrist::ZOBRIST.ep[file_of(sq) as usize];
-            }
-            return h;
+        let (kfrom, kto, rfrom, rto) = castling_squares(us, to > from);
+        let commoner = make_piece(us, PieceType::Commoner);
+        let rook = make_piece(us, PieceType::Rook);
+        let mut h = self.hash
+            ^ crate::zobrist::ZOBRIST.side
+            ^ piece_key(kfrom, commoner)
+            ^ piece_key(kto, commoner)
+            ^ piece_key(rfrom, rook)
+            ^ piece_key(rto, rook);
+        let new_rights = self.castling_rights
+            & match us {
+                Color::White => !(WK_CASTLE | WQ_CASTLE),
+                Color::Black => !(BK_CASTLE | BQ_CASTLE),
+            };
+        h ^= crate::zobrist::ZOBRIST.castling[self.castling_rights as usize];
+        h ^= crate::zobrist::ZOBRIST.castling[new_rights as usize];
+        if let Some(sq) = self.ep_square {
+            h ^= crate::zobrist::ZOBRIST.ep[file_of(sq) as usize];
         }
+        h
+    }
 
-        let piece = self.squares[from as usize];
+    /// Classify the non-castling move `m` once for the child-key helpers.
+    ///
+    /// Panics in debug builds when the origin square is empty.
+    fn classify_move(&self, m: Move) -> MoveClass {
+        let piece = self.squares[m.from_sq() as usize];
         debug_assert!(
             piece != NO_PIECE,
-            "hash_after on a move from an empty square"
+            "hash_after/rule50_after on a move from an empty square"
         );
-        // Pawn iff the low three bits of the raw encoding are `Pawn + 1`
-        // (piece types are encoded as `type + 1`, pawn is variant 0). Avoids
-        // the `type_of()` option/table round-trip on the hot quiet path.
-        let is_pawn = piece.raw() & 7 == PieceType::Pawn as u8 + 1;
-        let is_capture = !self.empty(to);
+        MoveClass {
+            piece,
+            // Pawn iff the low three bits of the raw encoding are `Pawn + 1`
+            // (piece types are encoded as `type + 1`, pawn is variant 0).
+            // Avoids the `type_of()` option/table round-trip on the hot
+            // quiet path.
+            is_pawn: piece.raw() & 7 == PieceType::Pawn as u8 + 1,
+            is_capture: !self.empty(m.to_sq()),
+        }
+    }
+
+    /// Hash branch of [`hash_after`](Self::hash_after) for an already
+    /// classified non-castling move.
+    fn hash_after_classified(&self, m: Move, class: MoveClass) -> u64 {
+        let us = self.side_to_move;
+        let from = m.from_sq();
+        let to = m.to_sq();
+        let piece = class.piece;
+        let is_pawn = class.is_pawn;
+        let is_capture = class.is_capture;
         let is_capture_or_ep = is_capture || m.move_type() == MoveType::EnPassant;
 
         let mut h = self.hash ^ crate::zobrist::ZOBRIST.side;
@@ -1408,13 +1462,13 @@ impl Board {
         if m.move_type() == MoveType::Castling {
             return self.rule50 + 1;
         }
-        let piece = self.squares[m.from_sq() as usize];
-        debug_assert!(
-            piece != NO_PIECE,
-            "rule50_after on a move from an empty square"
-        );
-        let pt = piece.type_of().unwrap();
-        if pt == PieceType::Pawn || !self.empty(m.to_sq()) {
+        self.rule50_after_classified(self.classify_move(m))
+    }
+
+    /// Rule50 branch of [`rule50_after`](Self::rule50_after) for an already
+    /// classified non-castling move.
+    fn rule50_after_classified(&self, class: MoveClass) -> u16 {
+        if class.is_pawn || class.is_capture {
             0
         } else {
             self.rule50 + 1
@@ -2594,6 +2648,24 @@ fn square_attacked_by(board: &Board, sq: Square, occupied: Bitboard, enemy_bb: B
     false
 }
 
+/// One-shot classification of a non-castling move for the child-key helpers
+/// ([`Board::hash_after`], [`Board::rule50_after`], and
+/// [`Board::hash_and_rule50_after`]).
+///
+/// Both child-key quantities need the moving piece and whether the move is a
+/// pawn move or a capture; computing them once lets
+/// [`Board::hash_and_rule50_after`] avoid a second origin lookup.
+#[derive(Debug, Clone, Copy)]
+struct MoveClass {
+    /// Piece standing on the move's origin square (never [`NO_PIECE`] for a
+    /// move `do_move` accepts).
+    piece: Piece,
+    /// The moving piece is a pawn (a promotion still moves a pawn).
+    is_pawn: bool,
+    /// The destination square is occupied (not true for en passant).
+    is_capture: bool,
+}
+
 /// Return the Zobrist piece key for the piece with raw encoding `raw`
 /// standing on `sq`, skipping the bounds checks the compiler cannot elide.
 ///
@@ -3714,6 +3786,15 @@ mod tests {
         let expected_hash = board.hash_after(m);
         let expected_rule50 = board.rule50_after(m);
 
+        // The combined accessor must agree with both separate functions.
+        assert_eq!(
+            board.hash_and_rule50_after(m),
+            (expected_hash, expected_rule50),
+            "hash_and_rule50_after mismatch for {} at {}",
+            m.to_uci(),
+            board.fen()
+        );
+
         let mut played = board.clone();
         let mut state = StateInfo::new();
         played.do_move(m, &mut state);
@@ -3894,6 +3975,33 @@ mod tests {
         board.do_move(m, &mut state);
         check_after_and_playout(board, rng, depth - 1, visited);
         board.undo_move(m, &state);
+    }
+
+    /// Dedicated check for the combined child-key accessor: over seeded random
+    /// playouts it must equal `(hash_after, rule50_after)` for every
+    /// pseudo-legal move (the helper also compares that pair with a cloned
+    /// board's `do_move` result).
+    #[test]
+    fn hash_and_rule50_after_matches_separate() {
+        const START_FENS: &[&str] = &[
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1",
+        ];
+
+        let mut visited = 0u64;
+        for (i, fen) in START_FENS.iter().enumerate() {
+            for seed in 0..8u64 {
+                let mut board = Board::from_fen(fen).expect("start FEN must parse");
+                let mut rng = Xorshift2::new(0xB502_6F5A_A2C3_5C01 ^ ((i as u64) << 32) ^ seed);
+                check_after_and_playout(&mut board, &mut rng, 100, &mut visited);
+            }
+        }
+        assert!(
+            visited > 500,
+            "expected several hundred positions, got {visited}"
+        );
     }
 
     #[test]

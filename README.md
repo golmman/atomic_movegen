@@ -39,7 +39,9 @@ reference implementation.
   two commoners remaining is a WDL draw. There is deliberately no
   insufficient-material table (K+B/K+N/K+R vs K can be an immediate win), and
   touching commoners are not automatically drawn when other pieces remain.
-- Pure safe Rust, zero dependencies
+- Pure safe Rust by default, zero dependencies. The opt-in
+  `unsafe-optimizations` feature removes bounds checks from the magic
+  bitboard lookup; see [Feature flags](#feature-flags).
 
 ## Usage (library)
 
@@ -111,6 +113,22 @@ cargo run --example fen_after "FEN" MOVE      # FEN + moves after playing MOVE (
 cargo run --example debug_moves "FEN"         # pseudo-legal vs. legal counts, duplicates
 cargo run --example pawn_debug "FEN"          # pawn inspections and manual move checks
 cargo run --example test_d5g8                 # attack-table sanity check (hardcoded position)
+```
+
+## Feature flags
+
+- `unsafe-optimizations` (off by default): removes the bounds check from the
+  magic-bitboard table lookup. All indices remain provably in bounds under
+  the magic-table construction invariants; enable it only if you audit that
+  argument. It does not change any public API or move-generation semantics.
+
+The combined child-key accessor `Board::hash_and_rule50_after(m)` returns
+`(hash_after(m), rule50_after(m))` while classifying the move once, which is
+useful when prefetching child keys for every candidate move.
+
+```sh
+cargo build --features unsafe-optimizations
+cargo test --features unsafe-optimizations
 ```
 
 ## Development

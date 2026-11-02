@@ -46,6 +46,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Combined child-key accessor `Board::hash_and_rule50_after(m)`: returns
+  `(hash_after(m), rule50_after(m))` from a single move classification. It is
+  a consumer convenience for child-key prefetch and does not replace either
+  separate function; `hash_after` and `rule50_after` are unchanged.
+- Opt-in `unsafe-optimizations` cargo feature (off by default) that removes the
+  bounds check from the magic-bitboard table lookup. Indices remain provably
+  in bounds by the magic-table construction invariants; the feature changes no
+  public API and no move-generation semantics.
 - Canonical atomic blast API: `Board::blast_zone(sq)` returns the full 3×3
   blast geometry (including the center and pawn squares), and
   `Board::blast_casualties(m)` returns a `BlastCasualties` value with the

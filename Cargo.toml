@@ -10,6 +10,10 @@ repository = "https://github.com/golmman/atomic_movegen"
 rust-version = "1.85"
 exclude = ["Fairy-Stockfish/**", "docs/**", "AGENTS.md", ".gitignore", ".gitmodules", "tests/gen_moves.py", "perft_profile.txt"]
 
+[features]
+default = []
+unsafe-optimizations = []
+
 [dependencies]
 
 [profile.release]

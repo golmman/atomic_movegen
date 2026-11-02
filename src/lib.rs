@@ -63,6 +63,14 @@
 //! Positions that differ only by a non-capturable ep target then share a key
 //! and a FEN while the default `Always` behavior stays unchanged.
 //!
+//! # Feature flags
+//!
+//! - `unsafe-optimizations` (off by default): removes the bounds check from
+//!   the magic-bitboard table lookup. Every index stays provably in bounds by
+//!   the magic-table construction invariants (see the `magic` module safety
+//!   note); enable it only if you are willing to audit that argument. It
+//!   changes no public API and no move-generation semantics.
+//!
 //! # Example
 //!
 //! ```rust
