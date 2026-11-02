@@ -46,6 +46,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Stable `Move` wire encoding: `Move::to_bits()` and `Move::from_bits()`. The
+  packing (`to:6 | from:6 | type:2 | promotion_type:2`), `Move::NONE == 0`,
+  and the `PROMOTION_PIECES` order (queen, rook, bishop, knight) are now
+  semver-stable and can only change in a major release. `from_bits` validates
+  structure only: `0` is `Move::NONE`, equal origin/destination is rejected,
+  and all other 16-bit patterns decode. `Move` now also derives `Hash`,
+  `PartialOrd`, and `Ord`; ordering follows the wire encoding.
+- UCI move helpers: syntax-only `Move::from_uci()` (no board needed, `0000` is
+  `Move::NONE`, castling text decodes as a normal two-square move),
+  allocation-free `Move::write_uci()`, and `Display` for `Move`.
+  `to_uci()` now allocates once and delegates to `write_uci`.
+- `Board::move_from_uci()`: board-aware UCI lookup that resolves the four
+  castling destinations and en-passant targets to the internal encodings and
+  returns the move only if it is fully legal. If no special encoding is legal,
+  the ordinary parsed move is checked last, so a rook move such as `e8g8`
+  still resolves when castling is unavailable.
+- Single-move legality queries without building or cloning a `MoveList`:
+  `Board::is_pseudo_legal()` (equivalent to membership in
+  `generate_pseudo_legal`), `Board::is_legal()`, and
+  `Board::is_legal_with_state()` (equivalent to membership in
+  `generate_legal_with_state`).
 - `Board::outcome_with_state(&StateInfo)` and
   `Board::outcome_with(&StateInfo, moves_exist: bool)`: the same precedence as
   `outcome()`, reusing a populated state and optionally a caller-known

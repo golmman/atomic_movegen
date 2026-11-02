@@ -39,6 +39,20 @@
 //!   outside the blast. Touching commoners are not automatically a draw when
 //!   other pieces remain.
 //!
+//! # Move API
+//!
+//! [`Move`] has a stable 16-bit wire encoding via [`Move::to_bits`] and
+//! [`Move::from_bits`], and implements `Hash` and `Ord`, so consumers can key
+//! collections by move. [`Move::from_uci`] is a syntax-only parser (castling
+//! text becomes a normal two-square move); [`Board::move_from_uci`] is the
+//! board-aware lookup that resolves castling and en-passant encodings and
+//! requires full legality. [`Move::write_uci`] formats without allocating, and
+//! `Display` delegates to it.
+//!
+//! For untrusted single moves, use [`Board::is_legal`] or
+//! [`Board::is_legal_with_state`]; [`Board::is_pseudo_legal`] mirrors the
+//! pseudo-legal generator. None of these builds a [`MoveList`].
+//!
 //! # Example
 //!
 //! ```rust

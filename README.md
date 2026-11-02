@@ -7,6 +7,13 @@ reference implementation.
 ## Features
 
 - Legal move generation (pseudo-legal + legality filtering)
+- Single-move queries without building a move list: `Board::is_pseudo_legal()`,
+  `Board::is_legal()`, and state-aware `Board::is_legal_with_state()`
+- Stable 16-bit `Move` wire encoding (`Move::to_bits()` / `Move::from_bits()`),
+  plus `Hash`/`Ord` for use as a map or set key
+- UCI move parsing and formatting: syntax-only `Move::from_uci()`,
+  board-aware `Board::move_from_uci()` (resolves castling and en passant),
+  allocation-free `Move::write_uci()`, and `Display`
 - FEN parsing and output (standard notation only — `K`/`k` label the commoner)
 - Perft (performance test) recursion
 - Blast-on-capture, commoner royalty (one commoner per side, no promotion to
