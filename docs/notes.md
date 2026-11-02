@@ -28,3 +28,8 @@ Please verify: perft-numbers did not change and performance did not regress.
 ---
 
 `docs/plans/shakmaty/analysis.md`
+
+---
+
+New feedback from library consumers was added: `docs/plans/feedback/feedback2.md`.
+Draft implementation plans in `docs/plans/feedback/` named `f2_planN.md` which adress the feedback.
