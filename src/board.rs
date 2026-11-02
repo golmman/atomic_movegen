@@ -424,9 +424,33 @@ impl Board {
         Ok(board)
     }
 
-    /// Serialize the board to a FEN string.
+    /// Serialize the board to a FEN string using the default
+    /// [`EnPassantMode::Always`] policy.
+    ///
+    /// This matches Fairy-Stockfish and prints the stored en-passant target
+    /// after every double push, even when no legal en-passant capture exists.
+    /// Use [`fen_with`](Self::fen_with) for canonicalized output.
     #[must_use]
     pub fn fen(&self) -> String {
+        self.write_fen(self.ep_square)
+    }
+
+    /// Serialize the board to a FEN string with the selected en-passant policy.
+    ///
+    /// [`EnPassantMode::Always`] is identical to [`fen`](Self::fen) and prints
+    /// the stored target. [`EnPassantMode::Legal`] prints `-` unless at least
+    /// one fully legal en-passant capture exists, which makes positions reached
+    /// by different move orders serialize identically.
+    #[must_use]
+    pub fn fen_with(&self, mode: EnPassantMode) -> String {
+        match mode {
+            EnPassantMode::Always => self.write_fen(self.ep_square),
+            EnPassantMode::Legal => self.write_fen(self.legal_ep_square()),
+        }
+    }
+
+    /// Shared FEN writer; `ep_square` is the policy-resolved target field.
+    fn write_fen(&self, ep_square: Option<Square>) -> String {
         let mut fen = String::new();
         for rank in (0..8).rev() {
             let mut empty = 0;
@@ -479,7 +503,7 @@ impl Board {
         }
 
         fen.push(' ');
-        match self.ep_square {
+        match ep_square {
             Some(sq) => fen.push_str(crate::types::sq_str(sq).unwrap_or("??")),
             None => fen.push('-'),
         }
@@ -577,10 +601,53 @@ impl Board {
         self.castling_rights
     }
 
-    /// Return the en-passant target square, if any.
+    /// Return the stored en-passant target square, if any.
+    ///
+    /// This is the Fairy-Stockfish-style target recorded after every double
+    /// pawn push. It does not imply that an en-passant capture is legal; use
+    /// [`legal_ep_square`](Self::legal_ep_square) for a target that at least
+    /// one legal en-passant capture actually attacks.
     #[must_use]
     pub fn ep_square(&self) -> Option<Square> {
         self.ep_square
+    }
+
+    /// Return the stored en-passant target, but only when at least one fully
+    /// legal en-passant capture exists.
+    ///
+    /// This checks the mover's own pawns that attack the stored target and
+    /// validates each candidate with [`legal`](Self::legal), so pins,
+    /// self-explosion, and commoner attacks are all respected. It does not
+    /// build a [`MoveList`]. Terminal boards and positions
+    /// without an en-passant target return `None`.
+    #[must_use]
+    pub fn legal_ep_square(&self) -> Option<Square> {
+        let ep = self.ep_square?;
+        let mut state = StateInfo::new();
+        self.populate_state(&mut state);
+        if state.commoners_count == 0 || state.them_commoners_count == 0 {
+            return None;
+        }
+
+        let us = self.side_to_move;
+        let them = us.flip();
+        // Attack tables are symmetric, so this is the set of squares from which
+        // one of our pawns attacks the ep target.
+        let mut origins =
+            attacks::pawn_attacks(them, ep) & self.pieces_color_pt(us, PieceType::Pawn);
+        while !origins.is_empty() {
+            let from = origins.pop_lsb();
+            let victim = match us {
+                Color::White => Square::from_index(ep as i8 - 8),
+                Color::Black => Square::from_index(ep as i8 + 8),
+            };
+            if self.piece_on(victim) == make_piece(them, PieceType::Pawn)
+                && self.legal(Move::make_enpassant(from, ep), &state)
+            {
+                return Some(ep);
+            }
+        }
+        None
     }
 
     /// Return the half-move clock (plies since the last pawn move or capture).
@@ -606,12 +673,36 @@ impl Board {
 
     /// Return the current Zobrist hash of the position.
     ///
-    /// The hash includes pieces, side to move, castling rights, and en-passant
-    /// file, but not the half-move clock or fullmove counter.
+    /// The hash includes pieces, side to move, castling rights, and the stored
+    /// en-passant file, but not the half-move clock or fullmove counter. This
+    /// is the [`EnPassantMode::Always`] policy, identical to
+    /// [`hash_with(EnPassantMode::Always)`](Self::hash_with).
     #[inline]
     #[must_use]
     pub fn hash(&self) -> u64 {
         self.hash
+    }
+
+    /// Return the Zobrist hash with the selected en-passant policy.
+    ///
+    /// [`EnPassantMode::Always`] is identical to [`hash`](Self::hash).
+    /// [`EnPassantMode::Legal`] removes the stored en-passant file key unless
+    /// [`legal_ep_square`](Self::legal_ep_square) is `Some`, so positions that
+    /// differ only by a non-capturable ep target share a key. Evaluating the
+    /// legal policy is more expensive because it validates the candidate
+    /// captures; the default [`hash`](Self::hash) stays a field read.
+    #[inline]
+    #[must_use]
+    pub fn hash_with(&self, mode: EnPassantMode) -> u64 {
+        match mode {
+            EnPassantMode::Always => self.hash,
+            EnPassantMode::Legal => match self.ep_square {
+                Some(sq) if self.legal_ep_square().is_none() => {
+                    self.hash ^ crate::zobrist::ZOBRIST.ep[file_of(sq) as usize]
+                }
+                _ => self.hash,
+            },
+        }
     }
 
     /// Zobrist hash of the position after `m`, without modifying `self`.
@@ -620,7 +711,9 @@ impl Board {
     /// `{ let mut b = self.clone(); b.do_move(m, &mut st); b.hash() }` for
     /// every move `m` that [`do_move`](Self::do_move) accepts in this position
     /// (every pseudo-legal move). Cheaper than a `do_move`/`undo_move`
-    /// round-trip: no board, bitboard, or undo-record writes.
+    /// round-trip: no board, bitboard, or undo-record writes. This uses the
+    /// default [`EnPassantMode::Always`] policy; use
+    /// [`hash_after_with`](Self::hash_after_with) to select a policy.
     ///
     /// # Panics
     ///
@@ -818,6 +911,46 @@ impl Board {
         }
 
         h
+    }
+
+    /// Zobrist hash of the position after `m` with the selected en-passant
+    /// policy, without modifying `self`.
+    ///
+    /// Exactly equal to
+    /// `{ let mut b = self.clone(); b.do_move(m, &mut st); b.hash_with(mode) }`
+    /// for every move `m` that [`do_move`](Self::do_move) accepts. With
+    /// [`EnPassantMode::Always`] this delegates to [`hash_after`](Self::hash_after)
+    /// and keeps its fast path. With [`EnPassantMode::Legal`] a double pawn
+    /// push clones and plays the move to evaluate the child's legal ep square;
+    /// this is a convenience, not a hot-loop substitute for the default pair.
+    /// Consumers that need normalized keys in a tight loop should use
+    /// [`legal_ep_square`](Self::legal_ep_square) directly.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, panics if `from` holds no piece (i.e. `m` is not a
+    /// move `do_move` would accept).
+    #[must_use]
+    pub fn hash_after_with(&self, m: Move, mode: EnPassantMode) -> u64 {
+        match mode {
+            EnPassantMode::Always => self.hash_after(m),
+            EnPassantMode::Legal => {
+                // Only a double pawn push can create an ep target.
+                let is_double_push = m.move_type() == MoveType::Normal
+                    && (m.to_sq() as i8 - m.from_sq() as i8).abs() == 16
+                    && self
+                        .piece_on(m.from_sq())
+                        .type_of()
+                        .is_some_and(|pt| pt == PieceType::Pawn);
+                if !is_double_push {
+                    return self.hash_after(m);
+                }
+                let mut child = self.clone();
+                let mut state = StateInfo::new();
+                child.do_move(m, &mut state);
+                child.hash_with(EnPassantMode::Legal)
+            }
+        }
     }
 
     /// Half-move clock after `m`, without modifying `self`.
@@ -2683,6 +2816,91 @@ mod tests {
         assert!(!board.is_capture(non_capture));
     }
 
+    #[test]
+    fn legal_ep_square_detects_legal_capture() {
+        let board = Board::from_fen("8/8/8/PP6/kP1Pp3/PN2P3/8/6K1 b - d3 0 1").unwrap();
+        assert_eq!(board.ep_square(), Some(Square::D3));
+        assert_eq!(board.legal_ep_square(), Some(Square::D3));
+        assert!(board.is_legal(Move::make_enpassant(Square::E4, Square::D3)));
+
+        // A double push records an ep target even when no legal capture exists.
+        let board =
+            Board::from_fen("rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2")
+                .unwrap();
+        assert_eq!(board.ep_square(), Some(Square::D6));
+        assert_eq!(board.legal_ep_square(), None);
+
+        let board = Board::from_fen("8/8/8/8/8/8/8/4K2k w - - 0 1").unwrap();
+        assert_eq!(board.ep_square(), None);
+        assert_eq!(board.legal_ep_square(), None);
+    }
+
+    #[test]
+    fn ep_transposition_hash() {
+        let ep = Board::from_fen("r1bqkbnr/pppppppp/2n5/8/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq e3 0 3")
+            .unwrap();
+        let plain =
+            Board::from_fen("r1bqkbnr/pppppppp/2n5/8/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 0 3")
+                .unwrap();
+
+        for idx in 0..64 {
+            let sq = Square::from_u8(idx);
+            assert_eq!(
+                ep.piece_on(sq),
+                plain.piece_on(sq),
+                "placement differs at {sq:?}"
+            );
+        }
+        assert_eq!(ep.side_to_move(), plain.side_to_move());
+        assert_eq!(ep.castling_rights(), plain.castling_rights());
+
+        assert_ne!(ep.hash(), plain.hash());
+        assert_ne!(ep.fen(), plain.fen());
+        assert!(ep.fen().ends_with("b KQkq e3 0 3"));
+
+        assert_eq!(ep.legal_ep_square(), None);
+        assert_eq!(
+            ep.hash_with(EnPassantMode::Legal),
+            plain.hash_with(EnPassantMode::Legal)
+        );
+        assert_eq!(
+            ep.fen_with(EnPassantMode::Legal),
+            plain.fen_with(EnPassantMode::Legal)
+        );
+        assert!(ep.fen_with(EnPassantMode::Legal).ends_with("b KQkq - 0 3"));
+    }
+
+    #[test]
+    fn legal_ep_square_respects_pins_and_blast() {
+        // e5xd6 would open the e-file from the rook on e8 to the commoner on
+        // e1. The blast at d6 does not reach e8, so the pinned pawn cannot
+        // capture even though the target and victim pawn are present.
+        let pinned = Board::from_fen("4r2k/8/8/3pP3/8/8/8/4K3 w - d6 0 2").unwrap();
+        // e5xd6 blasts e7, which holds the mover's own commoner.
+        let self_blast = Board::from_fen("7k/4K3/8/3pP3/8/8/8/8 w - d6 0 2").unwrap();
+
+        for board in [pinned, self_blast] {
+            assert_eq!(board.ep_square(), Some(Square::D6));
+            assert_eq!(board.legal_ep_square(), None);
+            assert!(!board.is_legal(Move::make_enpassant(Square::E5, Square::D6)));
+        }
+    }
+
+    #[test]
+    fn ep_default_behavior_unchanged() {
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2",
+            "r1bqkbnr/pppppppp/2n5/8/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq e3 0 3",
+            "8/8/8/PP6/kP1Pp3/PN2P3/8/6K1 b - d3 0 1",
+        ];
+        for fen in fens {
+            let board = Board::from_fen(fen).unwrap();
+            assert_eq!(board.hash(), board.hash_with(EnPassantMode::Always));
+            assert_eq!(board.fen(), board.fen_with(EnPassantMode::Always));
+        }
+    }
+
     // --- hash_after / rule50_after equivalence tests ---
 
     /// Assert the `hash_after`/`rule50_after` contract for a single move:
@@ -2711,6 +2929,23 @@ mod tests {
         );
         // The speculative path must not touch `self`.
         assert_eq!(board.fen(), board.fen()); // sanity; `board` is `&self`
+    }
+
+    /// Assert the `hash_after_with` contract for both en-passant policies.
+    fn assert_after_with_equivalence(board: &Board, m: Move) {
+        for mode in [EnPassantMode::Always, EnPassantMode::Legal] {
+            let expected = board.hash_after_with(m, mode);
+            let mut played = board.clone();
+            let mut state = StateInfo::new();
+            played.do_move(m, &mut state);
+            assert_eq!(
+                expected,
+                played.hash_with(mode),
+                "hash_after_with({mode:?}) mismatch for {} at {}",
+                m.to_uci(),
+                board.fen()
+            );
+        }
     }
 
     /// Deterministic xorshift64 PRNG (mirrors the movegen harness).
@@ -2746,6 +2981,7 @@ mod tests {
         crate::movegen::generate_pseudo_legal(board, &mut pseudo);
         for &m in pseudo.as_slice() {
             assert_after_equivalence(board, m);
+            assert_after_with_equivalence(board, m);
         }
 
         let mut state = StateInfo::new();

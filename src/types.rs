@@ -415,6 +415,24 @@ pub enum Outcome {
     Draw,
 }
 
+/// How an en-passant target participates in a position key or FEN.
+///
+/// The stored en-passant target follows Fairy-Stockfish: a double pawn push
+/// always records one, even when no legal en-passant capture exists. The
+/// default [`Board::hash`](crate::Board::hash) and
+/// [`Board::fen`](crate::Board::fen) use [`Always`](Self::Always); the
+/// `_with` variants accept this mode explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum EnPassantMode {
+    /// Include the stored ep square after every double push (FSF-compatible,
+    /// the default for `hash()` and `fen()`).
+    Always,
+    /// Include the ep square only when at least one fully legal ep capture
+    /// exists.
+    Legal,
+}
+
 /// A piece type (pawn, knight, bishop, rook, queen, or commoner).
 ///
 /// In atomic chess, a *commoner* moves like a king and is royal: losing it

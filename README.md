@@ -19,7 +19,11 @@ reference implementation.
 - Blast-on-capture, commoner royalty (one commoner per side, no promotion to
   commoner), pawn blast immunity (except for the capturing pawn at the blast
   square)
-- Incremental Zobrist hashing (`Board::hash()`)
+- Incremental Zobrist hashing (`Board::hash()`) and FSF-compatible FEN output
+- Canonical en-passant keys and FEN output: `Board::legal_ep_square()` and
+  `EnPassantMode::Legal` via `hash_with()`, `fen_with()`, and
+  `hash_after_with()`. The default `hash()`/`fen()`/`hash_after()` keep the
+  Fairy-Stockfish `Always` policy, so existing keys and output are unchanged.
 - Game-over detection (`Board::outcome()`, state-aware `outcome_with_state()` /
   `outcome_with()`, and the strict `Board::is_terminal()`)
 - Correct terminal precedence: mate outranks the 50-move clock, and only the

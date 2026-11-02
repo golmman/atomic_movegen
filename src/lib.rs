@@ -53,6 +53,16 @@
 //! [`Board::is_legal_with_state`]; [`Board::is_pseudo_legal`] mirrors the
 //! pseudo-legal generator. None of these builds a [`MoveList`].
 //!
+//! # Position keys and en passant
+//!
+//! [`Board::hash`] and [`Board::fen`] follow Fairy-Stockfish and include the
+//! stored en-passant target after every double pawn push, even when no legal
+//! en-passant capture exists. For canonicalized keys, use
+//! [`Board::legal_ep_square`] with [`EnPassantMode::Legal`] via
+//! [`Board::hash_with`], [`Board::fen_with`], or [`Board::hash_after_with`].
+//! Positions that differ only by a non-capturable ep target then share a key
+//! and a FEN while the default `Always` behavior stays unchanged.
+//!
 //! # Example
 //!
 //! ```rust
@@ -76,7 +86,7 @@ pub(crate) mod util;
 pub(crate) mod zobrist;
 
 pub use board::Board;
-pub use types::{Bitboard, Color, Move, MoveList, Outcome, PieceType, Square};
+pub use types::{Bitboard, Color, EnPassantMode, Move, MoveList, Outcome, PieceType, Square};
 
 /// Count the number of legal moves at each node to the given depth (perft).
 ///

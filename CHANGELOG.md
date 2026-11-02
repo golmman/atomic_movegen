@@ -46,6 +46,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Canonical en-passant handling for position keys and FEN output.
+  `Board::legal_ep_square()` returns the stored target only when at least one
+  fully legal en-passant capture exists (pins, self-explosion, and commoner
+  attacks are respected). The new `EnPassantMode` enum selects between
+  `Always` (the FSF-compatible default) and `Legal` in `Board::hash_with()`,
+  `Board::fen_with()`, and `Board::hash_after_with()`. `hash()`, `fen()`, and
+  `hash_after()` are unchanged and remain `Always`, so existing stored keys
+  and FEN output keep their current values. With `Legal`, positions that
+  differ only by a non-capturable ep target share a key and a FEN.
 - Stable `Move` wire encoding: `Move::to_bits()` and `Move::from_bits()`. The
   packing (`to:6 | from:6 | type:2 | promotion_type:2`), `Move::NONE == 0`,
   and the `PROMOTION_PIECES` order (queen, rook, bishop, knight) are now
