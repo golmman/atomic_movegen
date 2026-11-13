@@ -109,6 +109,16 @@
 //! the summary together with the child's Zobrist key (exactly
 //! [`Board::hash_after`]) from that same derivation.
 //!
+//! Cost is measured, not promised: `cargo run --release --example effect_bench`
+//! prints the child rows and, per child class (`quiet`, `capture`, `promotion`,
+//! `en-passant`, `castling`, `commoner-move`, the aggregate `built-ish` and
+//! `all`), the same questions asked of a built child. On the machine the 2.8.0
+//! notes were measured on, deriving the summary costs about what
+//! `clone` + `do_move` costs, and the summary answers terminality plus the key
+//! more cheaply than two effect queries but not more cheaply than a child board
+//! the caller would build anyway — take the summary when the child's *facts*
+//! are the question, not as a faster [`Board::do_move`].
+//!
 //! [`MoveClassification`] is [`MoveEffect`] without the legality verdict: the
 //! same five rules fields, derived by
 //! [`EffectContext::classification`] without running the legality ladder, for

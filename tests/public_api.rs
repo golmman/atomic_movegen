@@ -1,10 +1,12 @@
 //! The released public API surface, pinned by name.
 //!
-//! Every item the 2.7.0 release notes name must exist and resolve from the
+//! Every item the 2.8.0 release notes name must exist and resolve from the
 //! crate root, so the notes cannot drift from the code. This test says nothing
 //! about behaviour — the differential suites do that; it only fails when an
 //! item promised in `CHANGELOG.md` / `README.md` is missing, renamed, or no
-//! longer re-exported.
+//! longer re-exported. The last test is the composite shape the `README.md`
+//! advertises (summary + key + terminality from one derivation), so that
+//! snippet cannot rot.
 
 use atomic_movegen::movegen::{generate_legal_with_state, generate_pseudo_legal};
 use atomic_movegen::{
@@ -15,7 +17,7 @@ use atomic_movegen::{
 
 #[test]
 fn crate_root_reexports_resolve() {
-    // Types named in the 2.7.0 notes.
+    // Types named in the 2.8.0 notes.
     let _: fn(&Board) -> Color = BoardRoot::side_to_move;
     let _: EffectContext = Board::new().effect_context();
     let _: Outcome = Outcome::Draw;
@@ -104,6 +106,40 @@ fn classification_is_usable_from_a_legal_list() {
             "{m}"
         );
     }
+}
+
+#[test]
+fn readme_composite_shape_compiles_and_answers() {
+    // The exact shape the README advertises: one derivation yields the child's
+    // key and its terminal state, and the key is `Board::hash_after`.
+    fn child_key_and_terminal(board: &Board, m: Move) -> Option<(u64, Option<Outcome>)> {
+        let ctx = board.effect_context();
+        let (post, key) = ctx.post_move_and_key(board, m)?;
+        Some((key, post.terminal().map(|t| t.outcome)))
+    }
+
+    let board = Board::from_fen("7k/8/8/5N2/3K4/8/8/R6R w - - 0 1").unwrap();
+    let mate = Move::from_uci("a1g1").unwrap();
+    assert_eq!(
+        child_key_and_terminal(&board, mate),
+        Some((board.hash_after(mate), Some(Outcome::Loss)))
+    );
+
+    let quiet = Move::from_uci("h1h2").unwrap();
+    assert_eq!(
+        child_key_and_terminal(&board, quiet),
+        Some((board.hash_after(quiet), None))
+    );
+
+    // Same answer as the separate query the composite replaces.
+    let ctx = board.effect_context();
+    assert_eq!(
+        child_key_and_terminal(&board, mate).unwrap().1,
+        ctx.terminal_after(&board, mate).map(|t| t.outcome)
+    );
+
+    // Malformed input stays `None` (the sentinel included).
+    assert_eq!(child_key_and_terminal(&board, Move::NONE), None);
 }
 
 #[test]

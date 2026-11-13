@@ -23,6 +23,9 @@ Before reaching for a profiler, the relevant code is small enough to name:
   `classification` (rules fields, no legality ladder) and `is_legal_from`
   (the ladder on the child view). The child path of the effect context is the
   place to look when a consumer reports time spent on “is this child over?”.
+  The child-side terminal precedence is `position::terminal_in_view_light`
+  (reached through `PostMove::terminal`), and the child key is `child_key`
+  (reached through `EffectContext::post_move_and_key`).
 - `src/magic.rs` / `src/attacks.rs` — slider tables and leaper attacks.
 
 Measured starting points (see `cargo run --release --example effect_bench`,
@@ -34,14 +37,34 @@ Measured starting points (see `cargo run --release --example effect_bench`,
 - `generate_legal_with_state` ≈ 100–115 ns per node at the bench positions;
   `for_each_legal` ≈ 70–80 ns; `has_legal_move` ≈ 2–3 ns (first legal move —
   the existence screen usually proves one before the ladder starts).
-- The child path (`post_move` ≈ 20 ns per child, `terminal_after` /
-  `child_outcome` ≈ 30–40 ns, `has_legal_move_after` ≈ 25–30 ns) on those
-  positions. The existence part of those rows is the last ~8–10 ns: one pass
+- The child path (`post_move` ≈ 17–21 ns per child, `terminal_after` /
+  `child_outcome` ≈ 30–35 ns, `has_legal_move_after` ≈ 25–30 ns) on those
+  positions; across the classes of the table below `post_move` ranges from
+  ≈ 15 ns (castling children) to ≈ 36 ns (captures). The existence part of
+  those rows is the last ~8–10 ns: one pass
   over the child's aligned enemy sliders (`checking_pieces_and_pinned`) plus
   the search for one quiet move that the proof admits. The child path
   deliberately does **not** populate a `StateInfo` unless the screen fails, so
   a profiling hotspot inside `populate_state` on the child path would be a
   regression, not the baseline.
+- The per-class table the 2.8.0 notes quote (49,338 children of seeded
+  play-outs over the 41-position perft corpus and the bench positions, ns per
+  child, `build` = `clone` + `do_move`):
+
+  | class | children | `clone`+`do_move`+`outcome()`+key | build | `post_move` | `post_move`+`terminal()` | `post_move_and_key`+`terminal()` |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | quiet | 35,412 | 37.9 | 15.9 | 17.8 | 32.1 | 43.5 |
+  | capture | 3,972 | 54.3 | 29.2 | 36.4 | 49.7 | 63.0 |
+  | built-ish | 13,926 | 42.5 | 20.1 | 23.6 | 39.7 | 52.8 |
+  | all | 49,338 | 39.5 | 16.9 | 19.4 | 32.8 | 44.6 |
+
+  The summary is *not* a cheaper child board on this machine: `analyze`
+  (≈ 20 ns) costs what `clone` + `do_move` costs (≈ 17 ns), and the child-side
+  existence question (≈ 10 ns from the placement view) is more expensive than
+  the board-side `has_legal_move` (≈ 2–3 ns) that runs on a populated
+  `StateInfo`. Anything that removes a derivation still has to beat the board
+  write, not just the previous effect query — that is where a future plan
+  would have to start.
 
 If a change makes any of these worse by more than ~2 %, treat it as a
 regression, not a note: profile first, then confirm with

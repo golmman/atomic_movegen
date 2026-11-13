@@ -5,7 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.8.0] - 2026-11-13
+
+The child's terminal state on an already derived summary, the child key next to
+it, and a cheaper child-side existence question. Both additions are additive
+API; every existing query answers exactly what it answered in 2.7.0. No move
+order, perft value, hash, FEN output, or `Outcome`/`Terminal` semantics changed.
+
+Measured, this stack is **cheaper than 2.7.0 on every child query but not
+cheaper than building the child board** — see “Measured” below for the class
+table and the verdict; the numbers are not a performance promise for any
+consumer.
 
 ### Added
 
@@ -33,16 +43,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no blast and empties only its origin, so it is legal when the mover's
   commoner is not attacked after it — and falls back to the unchanged
   fast-legality ladder for everything it cannot prove (in check, captures only,
-  commoner moves only, decided positions). `EffectContext::has_legal_move_after`,
-  `EffectContext::is_terminal_after`, `EffectContext::terminal_after`,
-  `PostMove::terminal`, `EffectContext::child_outcome`,
-  `movegen::has_legal_move` and `movegen::has_legal_move_with_state` all answer
-  exactly what they answered before; only the cost changes. Measured on this
-  crate's bench positions: `has_legal_move_after` 36 → 25–30 ns per child,
-  `terminal_after` 43 → 30–34 ns, `has_legal_move` 6 → 2–3 ns per node
-  (`examples/effect_bench.rs`, which now prints the build-only row and the two
-  shares the MG19/MG20 cost bars need). No move order, perft value, hash, FEN
-  output, or `Outcome`/`Terminal` semantics changed.
+  commoner moves only, decided positions).
+  `EffectContext::has_legal_move_after`, `EffectContext::is_terminal_after`,
+  `EffectContext::terminal_after`, `PostMove::terminal`,
+  `EffectContext::child_outcome`, `movegen::has_legal_move` and
+  `movegen::has_legal_move_with_state` all answer exactly what they answered
+  before; only the cost changes. Measured on this crate's bench positions:
+  `has_legal_move_after` 36 → 25–30 ns per child, `terminal_after` 43 → 30–34 ns,
+  `has_legal_move` 6 → 2–3 ns per node.
 - The child-side terminal precedence no longer populates a `StateInfo` for the
   child: the two commoner counts and "is the side to move in check" are read
   from the placement view. The precedence itself is unchanged and now lives in
@@ -51,6 +59,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Terminal` semantics changed, and `Board::terminal`/`outcome` behaviour is
   byte-identical (their inputs are the caller's populated `StateInfo`, as
   before).
+
+### Measured
+
+`cargo run --release --example effect_bench 9 2000`, three runs, medians, over
+the pseudo-legal children of seeded play-outs from the 41-position perft corpus
+and the three bench positions (49,338 children over 2,106 nodes; 13,926 of them
+in handoff 3's *built-ish* class). ns per child, ratio to the class's build-only
+row (`clone` + `do_move`) in the same run:
+
+| class | children | `clone`+`do_move`+`outcome()`+key | build | `post_move` | `post_move`+`terminal()` | `post_move_and_key`+`terminal()` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| quiet | 35,412 | 37.9 (2.38×) | 15.9 | 17.8 (1.12×) | 32.1 (2.02×) | 43.5 (2.74×) |
+| capture | 3,972 | 54.3 (1.86×) | 29.2 | 36.4 (1.25×) | 49.7 (1.70×) | 63.0 (2.16×) |
+| promotion | 432 | 60.5 (3.56×) | 17.0 | 21.2 (1.25×) | 58.4 (3.44×) | 69.9 (4.11×) |
+| en-passant | 8 | 46.0 (1.83×) | 25.1 | 21.1 (0.84×) | 45.2 (1.80×) | 57.8 (2.30×) |
+| castling | 80 | 33.5 (2.15×) | 15.6 | 15.2 (0.97×) | 29.7 (1.90×) | 42.3 (2.71×) |
+| commoner-move | 10,052 | 37.6 (2.38×) | 15.8 | 18.6 (1.18×) | 31.2 (1.97×) | 41.6 (2.63×) |
+| **built-ish** | 13,926 | **42.5 (2.11×)** | 20.1 | 23.6 (1.17×) | 39.7 (1.98×) | **52.8 (2.63×)** |
+| all | 49,338 | 39.5 (2.34×) | 16.9 | 19.4 (1.15×) | 32.8 (1.94×) | 44.6 (2.64×) |
+
+**Verdict: the composite does not clear handoff 3's cost bars on this corpus.**
+The summary stack (`post_move_and_key` + `PostMove::terminal()`) costs
+**1.24× the clone path on `built-ish`** and **1.16× on `capture`** (1.11–1.26×
+on every class, three runs), so the honest statement is that it is *not*
+cheaper than `clone` + `do_move` + `outcome()` + key on this machine. The
+terminal state on the summary without the key (`post_move` + `terminal()`) *is*
+cheaper — 0.85–0.97× the clone path per class, 0.93× on `built-ish` — so the
+shape is sound and the remaining cost is the child key plus the child-side
+attack/existence work that the clone path gets from `populate_state`.
+
+No claim is made about any downstream's wall clock, tree or gate; the numbers
+above are this crate's corpus on this crate's machine, in the same run.
 
 ## [2.7.0] - 2026-11-13
 

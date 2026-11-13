@@ -17,25 +17,40 @@
 //!    from one derivation) and `post_move_and_key` (summary + key from one
 //!    derivation);
 //! 3. the **decided share**: the fraction of children answered `Some` over a
-//!    seeded play-out walk. This is this crate's own tree, not a downstream
-//!    search tree; it exists so the crate publishes what `terminal_after`
-//!    decides, not as a claim about any consumer.
+//!    seeded play-out walk, with the number of children per child class. This
+//!    is this crate's own tree, not a downstream search tree; it exists so the
+//!    crate publishes what `terminal_after` decides, not as a claim about any
+//!    consumer;
+//! 4. the **per-class child table** (handoff 3's table): the same child rows,
+//!    split by child class — `quiet`, `capture`, `promotion`, `en-passant`,
+//!    `castling`, `commoner-move`, the aggregate `built-ish` (everything that
+//!    is not `quiet`) and `all` — over the pseudo-legal children of seeded
+//!    play-outs from the 41-position perft corpus (`tests/perft_values.md`)
+//!    and the three bench positions. Every row is reported in ns per child
+//!    *and* as a ratio to that class's build-only row of the same run, because
+//!    the acceptance bars the table exists for are ratios: absolute ns are
+//!    only comparable on one machine.
 //!
 //! Usage:
 //! ```sh
-//! cargo run --release --example effect_bench [repeats] [iterations]
+//! cargo run --release --example effect_bench [repeats] [iterations] [budget-ms]
 //! ```
 //!
 //! Each row reports the *median* of `repeats` batches of `iterations` calls, so
-//! a single scheduling hiccup cannot be read as a result. Absolute numbers are
-//! only meaningful on the machine that produced them; compare rows within one
-//! run.
+//! a single scheduling hiccup cannot be read as a result. Class rows use fewer
+//! iterations for classes whose children are few, so that the whole section
+//! stays inside `budget-ms` (default 4000); the iterations used and the time
+//! spent are printed with the table. A small class also cycles a shorter child
+//! list, which keeps its boards hot in cache — class rows are comparable to
+//! each other on the same class, less so across classes.
 
 use atomic_movegen::movegen::{
     for_each_legal_with_state, generate_legal_with_state, generate_pseudo_legal,
     has_legal_move_with_state,
 };
-use atomic_movegen::{Board, MoveList, StateInfo};
+use atomic_movegen::types::MoveType;
+use atomic_movegen::{Board, EffectContext, Move, MoveList, PieceType, StateInfo};
+use std::fs;
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -93,17 +108,356 @@ impl Xorshift {
     }
 }
 
+// --- child classes (the handoff 3 table) -------------------------------------
+
+/// `quiet`: no casualties, not castling, not en passant, not a promotion, and
+/// the origin is not a commoner.
+const CLASS_QUIET: u8 = 1 << 0;
+/// `capture`: casualties non-empty and not an en-passant capture.
+const CLASS_CAPTURE: u8 = 1 << 1;
+/// `promotion`: [`MoveType::Promotion`], quiet or capturing.
+const CLASS_PROMOTION: u8 = 1 << 2;
+/// `en-passant`: [`MoveType::EnPassant`].
+const CLASS_EN_PASSANT: u8 = 1 << 3;
+/// `castling`: [`MoveType::Castling`].
+const CLASS_CASTLING: u8 = 1 << 4;
+/// `commoner-move`: the origin square holds a commoner of the side to move.
+const CLASS_COMMONER: u8 = 1 << 5;
+
+/// `built-ish`, handoff 3's definition: every class that is not `quiet`.
+const CLASS_BUILT_ISH: u8 =
+    CLASS_CAPTURE | CLASS_PROMOTION | CLASS_EN_PASSANT | CLASS_CASTLING | CLASS_COMMONER;
+
+/// Every child, quiet or not.
+const CLASS_ALL: u8 = u8::MAX;
+
+/// The primitive classes, in reported order, with their labels. A move is in
+/// none of these exactly when it is `quiet`; otherwise it is in one or more
+/// (a capture by a commoner is in `capture` *and* `commoner-move`).
+const PRIMITIVE_CLASSES: &[(&str, u8)] = &[
+    ("quiet", CLASS_QUIET),
+    ("capture", CLASS_CAPTURE),
+    ("promotion", CLASS_PROMOTION),
+    ("en-passant", CLASS_EN_PASSANT),
+    ("castling", CLASS_CASTLING),
+    ("commoner-move", CLASS_COMMONER),
+];
+
+/// The classes of the per-class table, in reported order. A move can be in
+/// several of the first six (a capturing promotion is in `capture` *and*
+/// `promotion`); `built-ish` is their union and `all` is everything.
+const CHILD_CLASSES: &[(&str, u8)] = &[
+    ("quiet", CLASS_QUIET),
+    ("capture", CLASS_CAPTURE),
+    ("promotion", CLASS_PROMOTION),
+    ("en-passant", CLASS_EN_PASSANT),
+    ("castling", CLASS_CASTLING),
+    ("commoner-move", CLASS_COMMONER),
+    ("built-ish", CLASS_BUILT_ISH),
+    ("all", CLASS_ALL),
+];
+
+/// The class membership of the child `m` of `board`.
+///
+/// Classified once per child while the child lists are materialised, never in a
+/// benchmark loop.
+fn class_mask(board: &Board, m: Move) -> u8 {
+    let mut mask = 0u8;
+    match m.move_type() {
+        MoveType::Promotion => mask |= CLASS_PROMOTION,
+        MoveType::EnPassant => mask |= CLASS_EN_PASSANT,
+        MoveType::Castling => mask |= CLASS_CASTLING,
+        _ => {}
+    }
+    if !board.blast_casualties(m).is_empty() && m.move_type() != MoveType::EnPassant {
+        mask |= CLASS_CAPTURE;
+    }
+    let piece = board.piece_on(m.from_sq());
+    if piece.type_of() == Some(PieceType::Commoner) && piece.color() == Some(board.side_to_move()) {
+        mask |= CLASS_COMMONER;
+    }
+    if mask == 0 { CLASS_QUIET } else { mask }
+}
+
+/// One visited position with its effect context and every pseudo-legal child,
+/// classified once so the benchmark loop does no classification work.
+struct NodeEntry {
+    board: Board,
+    ctx: EffectContext,
+    children: Vec<(Move, u8)>,
+}
+
+/// Visit the nodes of seeded play-outs from `start_fens` and collect their
+/// pseudo-legal children.
+fn collect_nodes(start_fens: &[String], seeds: u64, plies: u32) -> Vec<NodeEntry> {
+    let mut nodes = Vec::new();
+    let mut state = StateInfo::new();
+    let mut pseudo = MoveList::new();
+    let mut legal = MoveList::new();
+    for (i, fen) in start_fens.iter().enumerate() {
+        for seed in 0..seeds {
+            let mut board = Board::from_fen(fen).expect("play-out FEN must parse");
+            let mut rng = Xorshift::new(0x9E37_79B9_7F4A_7C15 ^ ((i as u64) << 32) ^ seed);
+            for _ in 0..=plies {
+                board.populate_state(&mut state);
+                let ctx = board.effect_context_with_state(&state);
+                pseudo.clear();
+                generate_pseudo_legal(&board, &mut pseudo);
+                if pseudo.is_empty() {
+                    break;
+                }
+                let children = pseudo
+                    .as_slice()
+                    .iter()
+                    .map(|&m| (m, class_mask(&board, m)))
+                    .collect();
+                nodes.push(NodeEntry {
+                    board: board.clone(),
+                    ctx,
+                    children,
+                });
+                legal.clear();
+                generate_legal_with_state(&board, &state, &mut legal);
+                if legal.is_empty() {
+                    break;
+                }
+                let m = legal.as_slice()[(rng.next() % legal.len() as u64) as usize];
+                board.do_move(m, &mut state);
+            }
+        }
+    }
+    nodes
+}
+
+/// The FENs of the `tests/perft_values.md` corpus (every row's last backticked
+/// field). A missing file is reported and yields the bench positions only.
+fn perft_corpus_fens(path: &str) -> Vec<String> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) => {
+            eprintln!(
+                "note: could not read `{path}` ({e}); class rows use the bench positions only"
+            );
+            return Vec::new();
+        }
+    };
+    let mut fens = Vec::new();
+    for line in content.lines() {
+        if let Some(close) = line.rfind('`') {
+            if let Some(open) = line[..close].rfind('`') {
+                let fen = &line[open + 1..close];
+                if fen.contains('/') && fen.contains(' ') {
+                    fens.push(fen.to_string());
+                }
+            }
+        }
+    }
+    fens
+}
+
+/// The child rows of the handoff 3 table, in reported order.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Row {
+    Today,
+    Build,
+    Mg15,
+    Summary,
+    Mg19,
+    Stack,
+    Exist,
+    TwoLevel,
+}
+
+impl Row {
+    const ALL: [Row; 8] = [
+        Row::Today,
+        Row::Build,
+        Row::Mg15,
+        Row::Summary,
+        Row::Mg19,
+        Row::Stack,
+        Row::Exist,
+        Row::TwoLevel,
+    ];
+
+    /// The label the table prints.
+    fn label(self) -> &'static str {
+        match self {
+            Row::Today => "today",
+            Row::Build => "build",
+            Row::Mg15 => "mg15",
+            Row::Summary => "summary",
+            Row::Mg19 => "mg19",
+            Row::Stack => "stack",
+            Row::Exist => "exist",
+            Row::TwoLevel => "two-level",
+        }
+    }
+
+    /// The work the row does for one child.
+    fn run(self, node: &NodeEntry, m: Move) {
+        let board = &node.board;
+        let ctx = &node.ctx;
+        match self {
+            // The downstream's baseline: build the child, read its outcome and
+            // its key.
+            Row::Today => {
+                let mut child = board.clone();
+                let mut st = StateInfo::new();
+                child.do_move(m, &mut st);
+                black_box((child.outcome(), board.hash_and_rule50_after(m)));
+            }
+            // The divisor of every ratio: the child build with nothing read.
+            Row::Build => {
+                let mut child = board.clone();
+                let mut st = StateInfo::new();
+                child.do_move(m, &mut st);
+                black_box(&child);
+            }
+            // MG15: the key and the terminal state from two effect queries.
+            Row::Mg15 => {
+                black_box((board.hash_and_rule50_after(m), ctx.terminal_after(board, m)));
+            }
+            // The summary alone.
+            Row::Summary => {
+                black_box(ctx.post_move(board, m));
+            }
+            // MG19: the terminal state of the summary the row just derived.
+            Row::Mg19 => {
+                if let Some(post) = ctx.post_move(board, m) {
+                    black_box(post.terminal());
+                }
+            }
+            // MG19 + MG20 as the downstream would use them: summary + key from
+            // one derivation, terminality from the summary.
+            Row::Stack => {
+                if let Some((post, key)) = ctx.post_move_and_key(board, m) {
+                    black_box((post.terminal(), key));
+                }
+            }
+            // MG20: the child's existence question alone.
+            Row::Exist => {
+                black_box(ctx.has_legal_move_after(board, m));
+            }
+            // The two-level child answer.
+            Row::TwoLevel => {
+                black_box(ctx.child_outcome(board, m));
+            }
+        }
+    }
+}
+
+/// Run `row` over `entries` in one batch of `iterations` calls and return the
+/// ns per call with sub-nanosecond resolution.
+fn batch_row(row: Row, nodes: &[NodeEntry], entries: &[(usize, Move)], iterations: usize) -> f64 {
+    let start = Instant::now();
+    for i in 0..iterations {
+        let (ni, m) = entries[i % entries.len()];
+        row.run(&nodes[ni], m);
+    }
+    start.elapsed().as_nanos() as f64 / iterations as f64
+}
+
+/// Print the per-class child table: every row in ns per child and as a ratio to
+/// the class's build-only row of the same run.
+fn per_class_table(nodes: &[NodeEntry], repeats: usize, iterations: usize, budget_ms: f64) {
+    let total_children: usize = nodes.iter().map(|n| n.children.len()).sum();
+    println!(
+        "per child, by class ({} children over {} nodes; empty classes are skipped):",
+        total_children,
+        nodes.len()
+    );
+    let rows = Row::ALL.len() as f64;
+    let per_class_budget_ns = budget_ms * 1e6 / CHILD_CLASSES.len() as f64;
+    let mut spent = 0.0f64;
+    let mut used_iterations = Vec::new();
+    for (name, class) in CHILD_CLASSES {
+        let mut entries: Vec<(usize, Move)> = Vec::new();
+        for (ni, node) in nodes.iter().enumerate() {
+            for &(m, mask) in &node.children {
+                if mask & class != 0 {
+                    entries.push((ni, m));
+                }
+            }
+        }
+        if entries.is_empty() {
+            println!("  {name}: no children");
+            continue;
+        }
+        // Size the batches to the budget: calibrate on the cheapest row, then
+        // give every class the same share of the budget.
+        let calibration = batch_row(Row::Build, nodes, &entries, 50).max(0.1);
+        let iters = ((per_class_budget_ns / (repeats as f64 * rows * calibration)) as usize)
+            .clamp(100, iterations.min(200_000));
+        used_iterations.push(iters);
+        let start = Instant::now();
+        // Interleave the rows within a round so a slow patch of the machine
+        // biases every row of the class alike; the median across rounds is the
+        // reported sample.
+        let mut samples: Vec<Vec<f64>> = vec![Vec::with_capacity(repeats); Row::ALL.len()];
+        for _ in 0..repeats {
+            for (ri, row) in Row::ALL.iter().enumerate() {
+                samples[ri].push(batch_row(*row, nodes, &entries, iters));
+            }
+        }
+        spent += start.elapsed().as_secs_f64() * 1e3;
+        let times: Vec<f64> = samples
+            .iter_mut()
+            .map(|s| {
+                s.sort_by(f64::total_cmp);
+                s[s.len() / 2]
+            })
+            .collect();
+        let build = times[Row::ALL.iter().position(|&r| r == Row::Build).unwrap()];
+        println!("  {name}: children {}", entries.len());
+        for (row, ns) in Row::ALL.iter().zip(&times) {
+            let ratio = ns / build;
+            println!(
+                "    {:<9} {:<42} {ns:>7.1}  ({ratio:>4.2}x build)",
+                row.label(),
+                row.description()
+            );
+        }
+    }
+    let (min_iters, max_iters) = used_iterations
+        .iter()
+        .fold((usize::MAX, 0usize), |(lo, hi), &i| (lo.min(i), hi.max(i)));
+    println!(
+        "  class rows: {repeats} rounds x {min_iters}..={max_iters} iterations per row, \
+         {spent:.0} ms spent (budget {budget_ms:.0} ms)\n"
+    );
+}
+
+impl Row {
+    /// The work description the table prints.
+    fn description(self) -> &'static str {
+        match self {
+            Row::Today => "clone+do_move+outcome+key",
+            Row::Build => "clone+do_move",
+            Row::Mg15 => "hash_and_rule50_after+terminal_after",
+            Row::Summary => "post_move",
+            Row::Mg19 => "post_move+PostMove::terminal()",
+            Row::Stack => "post_move_and_key+terminal()",
+            Row::Exist => "has_legal_move_after",
+            Row::TwoLevel => "child_outcome",
+        }
+    }
+}
+
 /// The share of children answered `Some` by `terminal_after` over seeded random
-/// play-outs, for pseudo-legal and for legal candidates separately.
+/// play-outs, for pseudo-legal and for legal candidates separately, plus the
+/// number of pseudo-legal children of each class.
 ///
 /// # Panics
 ///
 /// Panics when a start FEN does not parse.
-fn decided_share(start_fens: &[&str], seeds: u64, depth: u32) -> (u64, u64, u64, u64) {
+#[allow(clippy::type_complexity)]
+fn decided_share(start_fens: &[&str], seeds: u64, depth: u32) -> (u64, u64, u64, u64, [u64; 6]) {
     let mut pseudo_children = 0u64;
     let mut pseudo_decided = 0u64;
     let mut legal_children = 0u64;
     let mut legal_decided = 0u64;
+    let mut class_children = [0u64; 6];
     let mut state = StateInfo::new();
     for (i, fen) in start_fens.iter().enumerate() {
         for seed in 0..seeds {
@@ -118,6 +472,12 @@ fn decided_share(start_fens: &[&str], seeds: u64, depth: u32) -> (u64, u64, u64,
                     let decided = ctx.terminal_after(&board, m).is_some();
                     pseudo_children += 1;
                     pseudo_decided += u64::from(decided);
+                    let mask = class_mask(&board, m);
+                    for (i, (_, class)) in PRIMITIVE_CLASSES.iter().enumerate() {
+                        if mask & class != 0 {
+                            class_children[i] += 1;
+                        }
+                    }
                     if ctx.is_legal(&board, m) {
                         legal_children += 1;
                         legal_decided += u64::from(decided);
@@ -139,6 +499,7 @@ fn decided_share(start_fens: &[&str], seeds: u64, depth: u32) -> (u64, u64, u64,
         pseudo_decided,
         legal_children,
         legal_decided,
+        class_children,
     )
 }
 
@@ -146,6 +507,9 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let repeats: usize = args.get(1).map_or(9, |s| s.parse().expect("repeats"));
     let iterations: usize = args.get(2).map_or(2000, |s| s.parse().expect("iterations"));
+    let budget_ms: f64 = args
+        .get(3)
+        .map_or(4000.0, |s| s.parse().expect("budget-ms"));
 
     println!("effect_bench: median of {repeats} batches x {iterations} calls, ns per call\n");
 
@@ -573,7 +937,7 @@ fn main() {
 
     let mut start_fens: Vec<&str> = POSITIONS.iter().map(|(_, fen)| *fen).collect();
     start_fens.push("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-    let (pseudo_children, pseudo_decided, legal_children, legal_decided) =
+    let (pseudo_children, pseudo_decided, legal_children, legal_decided, class_children) =
         decided_share(&start_fens, 8, 60);
     let pct = |decided: u64, total: u64| {
         if total == 0 {
@@ -593,4 +957,33 @@ fn main() {
          ({:.2} %)",
         pct(legal_decided, legal_children)
     );
+    println!("  pseudo-legal children by class:");
+    for (i, (name, _)) in PRIMITIVE_CLASSES.iter().enumerate() {
+        println!(
+            "    {:<14} {:>8}  ({:.1} %)",
+            name,
+            class_children[i],
+            pct(class_children[i], pseudo_children)
+        );
+    }
+    println!(
+        "    {:<14} {:>8}  ({:.1} %)",
+        "built-ish",
+        pseudo_children - class_children[0],
+        pct(pseudo_children - class_children[0], pseudo_children)
+    );
+    println!();
+
+    // Handoff 3's table: children of seeded play-outs over the perft corpus and
+    // the bench positions, split by class, every row against its own class's
+    // build-only row.
+    let mut class_fens = perft_corpus_fens("tests/perft_values.md");
+    println!(
+        "class corpus: {} perft positions + {} bench positions, 2 seeds x 24 plies",
+        class_fens.len(),
+        POSITIONS.len()
+    );
+    class_fens.extend(POSITIONS.iter().map(|(_, fen)| (*fen).to_string()));
+    let nodes = collect_nodes(&class_fens, 2, 24);
+    per_class_table(&nodes, repeats, iterations, budget_ms);
 }

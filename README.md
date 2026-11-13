@@ -182,7 +182,7 @@ Add `atomic-movegen` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-atomic-movegen = "2.7.0"
+atomic-movegen = "2.8.0"
 ```
 
 ```rust
@@ -212,7 +212,7 @@ assert!(matches!(bad, Err(FenLoadError::InvalidPosition(_))));
 For move-effect classification without a child board:
 
 ```rust
-use atomic_movegen::{Board, Outcome, StateInfo};
+use atomic_movegen::{Board, Outcome};
 
 let board = Board::from_fen("4R1k1/8/8/8/8/8/8/4K3 w - - 0 1").unwrap();
 let ctx = board.effect_context();
@@ -239,7 +239,7 @@ The child's terminal state needs no child board either:
 ```rust
 use atomic_movegen::{Board, Move, Outcome, TerminalReason};
 
-let board = Board::from_fen("7k/8/8/5N2/3K4/8/8/R6R w - - 99 60").unwrap();
+let board = Board::from_fen("7k/8/8/5N2/3K4/8/8/R6R w - - 0 1").unwrap();
 let ctx = board.effect_context();
 
 // Mate outranks the 50-move clock, on the child's clock (100).
@@ -316,11 +316,21 @@ effect_bench`) put `Board::legal` at ~8–9 ns per candidate and `effect()` at
 path when you need the *effects* (captures, casualties, checks, explosions,
 child terminality, child facts) — not as a faster `legal()`.
 
-That also holds for the child queries: on this crate's bench machine
-`post_move()` (≈20 ns per child) costs about as much as cloning the board and
-playing the move (≈14–19 ns), so the summary path's advantage is the API shape
-— one derivation answering summary, key and terminality — not a claim that it
-beats `clone` + `do_move` on any particular machine.
+That also holds for the child queries, and 2.8.0 measures it per child class
+so the statement can be checked rather than believed
+(`cargo run --release --example effect_bench`): over 49,338 pseudo-legal
+children of seeded play-outs from the 41-position perft corpus, the *built-ish*
+class (every child that is not quiet: captures, promotions, en passant,
+castling, commoner moves — 13,926 children here) costs **42.5 ns** per child as
+`clone` + `do_move` + `outcome()` + key (**2.11×** this machine's build-only
+`clone` + `do_move`), and **52.8 ns (2.63×)** as
+`post_move_and_key()` + `PostMove::terminal()` (**1.24×** the clone path). The
+summary without the key — `post_move()` + `PostMove::terminal()` — is **39.7 ns
+(1.98×)**, i.e. **0.93×** the clone path. So the summary path's advantage is
+the API shape — one derivation answering summary, key and terminality — not a
+claim that it beats `clone` + `do_move` on any particular machine, and
+`PostMove::terminal()` is worth taking *instead of* a second child derivation,
+not instead of a child board you need anyway.
 
 `PostMove` carries the child facts without a rules opinion — no legality, no
 material shortcut; its terminality is asked *about* the summary:
@@ -344,6 +354,30 @@ assert_eq!(post.terminal(), None);
 let (post, key) = ctx.post_move_and_key(&board, m).unwrap();
 assert_eq!(key, board.hash_after(m));
 assert_eq!(post.terminal(), None);
+```
+
+The composite a consumer wants when the child board is *not* needed — key plus
+terminality from one derivation:
+
+```rust
+use atomic_movegen::{Board, Move, Outcome};
+
+fn child_key_and_terminal(board: &Board, m: Move) -> Option<(u64, Option<Outcome>)> {
+    let ctx = board.effect_context();
+    let (post, key) = ctx.post_move_and_key(board, m)?;
+    Some((key, post.terminal().map(|t| t.outcome)))
+}
+
+// A move whose child is decided, and one whose child is not.
+let board = Board::from_fen("7k/8/8/5N2/3K4/8/8/R6R w - - 0 1").unwrap();
+assert_eq!(
+    child_key_and_terminal(&board, Move::from_uci("a1g1").unwrap()),
+    Some((board.hash_after(Move::from_uci("a1g1").unwrap()), Some(Outcome::Loss))),
+);
+assert_eq!(
+    child_key_and_terminal(&board, Move::from_uci("h1h2").unwrap()),
+    Some((board.hash_after(Move::from_uci("h1h2").unwrap()), None)),
+);
 ```
 
 For SAN interchange and piece-set construction:
@@ -415,7 +449,7 @@ cargo run --example fen_after "FEN" MOVE      # FEN + moves after playing MOVE (
 cargo run --example debug_moves "FEN"         # pseudo-legal vs. legal counts, duplicates
 cargo run --example pawn_debug "FEN"          # pawn inspections and manual move checks
 cargo run --example test_d5g8                 # attack-table sanity check (hardcoded position)
-cargo run --release --example effect_bench    # effect-path vs board-write microbenchmark
+cargo run --release --example effect_bench    # effect-path vs board-write microbenchmark (incl. the per-child-class table)
 cargo run --example san "FEN"                 # legal moves as SAN + UCI (round-trip checked)
 cargo run --release --example verify_san [DEPTH] [PATH]  # SAN/Setup round-trip over the perft corpus
 ```
