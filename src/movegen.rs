@@ -1,6 +1,7 @@
 //! Pseudo-legal and legal move generation for atomic chess.
 
 use crate::attacks;
+use crate::bitboard::between_bb;
 use crate::board::{BK_CASTLE, BQ_CASTLE, Board, FastLegality, StateInfo, WK_CASTLE, WQ_CASTLE};
 use crate::position::PositionView;
 use crate::types::*;
@@ -470,6 +471,17 @@ pub fn has_legal_move_with_state(board: &Board, state: &StateInfo) -> bool {
 
 /// [`has_legal_move_with_state`] over a [`PositionView`]: the single
 /// implementation both entry points use.
+///
+/// Two steps: the positive screen ([`quiet_legal_witness`]) first, which answers
+/// `true` as soon as it can *prove* one legal move, then the exact ladder
+/// ([`has_legal_move_ladder`]). The screen can never change an answer: a witness
+/// is a proof of existence and "no witness" concludes nothing, so every other
+/// case is decided by the ladder that ran here before. The screen reads the two
+/// facts a populated [`StateInfo`] already holds (`checkers`, `pinned`), so it
+/// costs no attacker query.
+///
+/// The extinction guard stays first, so a stale [`StateInfo`] can still only
+/// produce `false`.
 pub(crate) fn has_legal_move_in_view(view: &PositionView, state: &StateInfo) -> bool {
     // Game already over (extinction): no legal moves, matching
     // `generate_legal_with_state`.
@@ -477,6 +489,45 @@ pub(crate) fn has_legal_move_in_view(view: &PositionView, state: &StateInfo) -> 
         return false;
     }
 
+    if quiet_legal_witness(view, state.checkers, state.pinned).is_some() {
+        return true;
+    }
+    has_legal_move_ladder(view, state)
+}
+
+/// The child-side existential-legality query: a view, no [`StateInfo`].
+///
+/// Exactly `has_legal_move_in_view(view, &populated_state)` for the same view,
+/// and exactly `!generate_legal_with_state(..).is_empty()`. The screen derives
+/// the two facts a [`StateInfo`] would have supplied
+/// ([`checking_pieces_and_pinned`], one pass, no board write), and a
+/// [`StateInfo`] is populated only when the screen cannot prove a move.
+pub(crate) fn has_legal_move_in_view_unpopulated(view: &PositionView) -> bool {
+    quiet_legal_witness_unpopulated(view).is_some() || has_legal_move_ladder_unpopulated(view)
+}
+
+/// The exact fallback of [`has_legal_move_in_view_unpopulated`]: the full ladder
+/// on a freshly populated [`StateInfo`].
+///
+/// Out of line on purpose: it is the cold path, and keeping it away from the
+/// screen leaves the hot path free of the population it never needs.
+#[inline(never)]
+fn has_legal_move_ladder_unpopulated(view: &PositionView) -> bool {
+    let mut state = StateInfo::new();
+    view.populate_state(&mut state);
+    if state.commoners_count == 0 || state.them_commoners_count == 0 {
+        return false;
+    }
+    has_legal_move_ladder(view, &state)
+}
+
+/// The exact existence walk: the pseudo-legal stream through the fast-legality
+/// ladder, stopping at the first accepted candidate.
+///
+/// This is the pre-screen implementation of [`has_legal_move_in_view`], without
+/// the "game is already over" guard (the callers apply it, which also keeps a
+/// stale [`StateInfo`] from turning into a `true`).
+fn has_legal_move_ladder(view: &PositionView, state: &StateInfo) -> bool {
     let fast = FastLegality::new(view, state);
     for_each_pseudo_legal_in_view::<()>(view, &mut |m| {
         if fast.is_legal(view, m, state) {
@@ -488,10 +539,216 @@ pub(crate) fn has_legal_move_in_view(view: &PositionView, state: &StateInfo) -> 
     .is_break()
 }
 
+/// One move the screen can prove legal, or `None` when it cannot prove any.
+///
+/// `checkers` and `pinned` are `view.checkers(view.side_to_move())` and
+/// `view.pinned(view.side_to_move())`, taken from the caller's populated
+/// [`StateInfo`] so the screen costs no attacker query.
+///
+/// `Some(m)` is a *proof*: `m` is a legal move of `view`, encoded exactly like
+/// [`generate_legal`] encodes it (a promotion push is the queen promotion).
+/// `None` means "not proven", never "no legal move": the callers fall back to
+/// [`has_legal_move_ladder`], which stays exact.
+///
+/// The proof rests on the two facts documented on
+/// [`WidenedLegality`](crate::board::WidenedLegality), quoted rather than
+/// re-derived:
+///
+/// 1. Only removals matter for a commoner that stays put. A quiet non-commoner
+///    move empties exactly its origin square, so our commoner can only become
+///    attacked if that origin is the sole piece between it and an aligned enemy
+///    slider — exactly `pinned`. A quiet move from any other origin leaves the
+///    commoner as safe as it is now.
+/// 2. A quiet non-commoner move triggers no blast, so it can neither explode the
+///    mover's own commoner nor the opponent's, and it cannot be a
+///    self-explosion.
+///
+/// With our commoner *not* attacked (`checkers` empty) — or immune because the
+/// two commoners touch, which makes `checkers` empty as well — such a move is
+/// legal. Nothing else is claimed: commoner moves, captures, en passant,
+/// castling, and in-check positions all return `None` here, and the ladder
+/// decides them.
+fn quiet_legal_witness(view: &PositionView, checkers: Bitboard, pinned: Bitboard) -> Option<Move> {
+    let us = view.side_to_move();
+    let our_commoners = view.commoners(us);
+    // Extinction: no move is legal at all. (The callers guard this too; the
+    // screen stays total on its own so it can never contradict them.)
+    if our_commoners.is_empty() || view.commoners(us.flip()).is_empty() {
+        return None;
+    }
+    // In check: a quiet move must also resolve the attack. That is the ladder's
+    // question, not this screen's.
+    if !checkers.is_empty() {
+        return None;
+    }
+    // The only origins a quiet move may not use are the sole blockers of an
+    // enemy slider's ray to our commoner (`pinned` holds our pieces only); the
+    // mover's commoner is not a non-commoner piece and is never iterated.
+    first_quiet_move(view, |from| !pinned.contains(from as usize))
+}
+
+/// [`quiet_legal_witness`] for a view that has no populated [`StateInfo`].
+///
+/// Same contract, same proof. The two facts a [`StateInfo`] would have supplied
+/// come from [`checking_pieces_and_pinned`]: one pass over the enemy's aligned
+/// sliders yields both the checkers and the sole blockers. A touching enemy
+/// commoner makes our commoner immune to every attack, in which case that pass
+/// returns two empty sets and any quiet non-commoner move is legal.
+fn quiet_legal_witness_unpopulated(view: &PositionView) -> Option<Move> {
+    let us = view.side_to_move();
+    if view.commoners(us).is_empty() || view.commoners(us.flip()).is_empty() {
+        return None;
+    }
+    let (checkers, pinned) = checking_pieces_and_pinned(view, us);
+    if !checkers.is_empty() {
+        return None;
+    }
+    first_quiet_move(view, |from| !pinned.contains(from as usize))
+}
+
+/// The enemy pieces checking the commoner of `us`, and the pieces of `us` that
+/// are the sole blocker between that commoner and an aligned enemy slider.
+///
+/// Equal to `view.checkers(us)` / `view.pinned(us)` (see
+/// [`PositionView::checkers`] for the immunity and extinction cases), computed
+/// in one pass because both answers read the same thing: with the empty-
+/// occupancy rays, an aligned enemy slider is a checker when nothing stands
+/// between it and the commoner and a pinning piece is the single blocker when
+/// exactly one square is occupied there.
+///
+/// Returns two empty sets when either side has no commoner or the two commoners
+/// touch; both facts are then "no check, no pin" as documented on
+/// [`PositionView::checkers`], and immunity means no origin has to be excluded.
+fn checking_pieces_and_pinned(view: &PositionView, us: Color) -> (Bitboard, Bitboard) {
+    let them = us.flip();
+    let commoners = view.commoners(us);
+    let them_commoners = view.commoners(them);
+    if commoners.is_empty() || them_commoners.is_empty() {
+        return (Bitboard::EMPTY, Bitboard::EMPTY);
+    }
+    let ksq = commoners.lsb();
+    if !(them_commoners & attacks::king_attacks(ksq)).is_empty() {
+        return (Bitboard::EMPTY, Bitboard::EMPTY);
+    }
+
+    let occupied = view.occupied();
+    let enemy = view.pieces_color(them);
+    let mut checkers = (attacks::knight_attacks(ksq) & view.pieces_pt(PieceType::Knight) & enemy)
+        | (attacks::pawn_attacks(us, ksq) & view.pieces_pt(PieceType::Pawn) & enemy);
+    let mut snipers = (((view.pieces_pt(PieceType::Rook) | view.pieces_pt(PieceType::Queen))
+        & attacks::rook_attacks(ksq, Bitboard::EMPTY))
+        | ((view.pieces_pt(PieceType::Bishop) | view.pieces_pt(PieceType::Queen))
+            & attacks::bishop_attacks(ksq, Bitboard::EMPTY)))
+        & enemy;
+
+    let mut pinned = Bitboard::EMPTY;
+    while !snipers.is_empty() {
+        let sniper = snipers.pop_lsb();
+        let between = between_bb(ksq, sniper) & occupied;
+        match between.count() {
+            // Nothing between: the slider's ray reaches the commoner.
+            0 => checkers = checkers | Bitboard::square_bb(sniper),
+            // Exactly one piece between: it is the sole blocker (`pinned` keeps
+            // our own pieces, as `PositionView::pinned` documents).
+            1 => pinned = pinned | (between & view.pieces_color(us)),
+            _ => {}
+        }
+    }
+    (checkers, pinned)
+}
+
+/// The first quiet non-commoner move whose origin `accept` allows, in
+/// [`for_each_pseudo_legal`]'s piece order (pawns, knights, bishops, rooks,
+/// queens).
+///
+/// Only quiet moves are produced: the destination is always empty, so no blast
+/// is triggered and the move's only effect on the placement is emptying
+/// `origin`. Pawn moves are the single push (a promotion push is encoded as the
+/// generator's queen promotion); double pushes are never needed, because a legal
+/// double push implies a legal single push.
+///
+/// Pawn pushes are computed for the whole pawn set with two shifts, so the
+/// common case (some pawn can push from an allowed origin) costs no per-piece
+/// loop and no branching per pawn.
+fn first_quiet_move(view: &PositionView, accept: impl Fn(Square) -> bool) -> Option<Move> {
+    let us = view.side_to_move();
+    let occupied = view.occupied();
+    let empty = !occupied;
+    let promo_from_rank = match us {
+        Color::White => Rank::R7,
+        Color::Black => Rank::R2,
+    };
+    let push = |bb: Bitboard| match us {
+        Color::White => bb << 8,
+        Color::Black => bb >> 8,
+    };
+
+    let pawns = view.pieces_color_pt(us, PieceType::Pawn);
+    let mut pushes = push(pawns) & empty;
+    while !pushes.is_empty() {
+        let to = pushes.pop_lsb();
+        // A push is vertical, so the origin follows from the destination.
+        let from = match us {
+            Color::White => Square::from_index(to as i8 - 8),
+            Color::Black => Square::from_index(to as i8 + 8),
+        };
+        if !accept(from) {
+            continue;
+        }
+        return Some(if rank_of(from) == promo_from_rank {
+            Move::make_promotion(from, to, PROMOTION_PIECES[0])
+        } else {
+            Move::make_move(from, to)
+        });
+    }
+
+    let mut knights = view.pieces_color_pt(us, PieceType::Knight);
+    while !knights.is_empty() {
+        let from = knights.pop_lsb();
+        let to = attacks::knight_attacks(from) & empty;
+        if to.is_empty() || !accept(from) {
+            continue;
+        }
+        return Some(Move::make_move(from, to.lsb()));
+    }
+
+    // Sliders: one attack lookup per piece, the first quiet destination wins.
+    let mut bishops = view.pieces_color_pt(us, PieceType::Bishop);
+    while !bishops.is_empty() {
+        let from = bishops.pop_lsb();
+        let to = attacks::bishop_attacks(from, occupied) & empty;
+        if to.is_empty() || !accept(from) {
+            continue;
+        }
+        return Some(Move::make_move(from, to.lsb()));
+    }
+    let mut rooks = view.pieces_color_pt(us, PieceType::Rook);
+    while !rooks.is_empty() {
+        let from = rooks.pop_lsb();
+        let to = attacks::rook_attacks(from, occupied) & empty;
+        if to.is_empty() || !accept(from) {
+            continue;
+        }
+        return Some(Move::make_move(from, to.lsb()));
+    }
+    let mut queens = view.pieces_color_pt(us, PieceType::Queen);
+    while !queens.is_empty() {
+        let from = queens.pop_lsb();
+        let to = attacks::queen_attacks(from, occupied) & empty;
+        if to.is_empty() || !accept(from) {
+            continue;
+        }
+        return Some(Move::make_move(from, to.lsb()));
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::board::Board;
+    use crate::position::child_view;
 
     #[test]
     fn test_no_legal_moves_when_game_is_over() {
@@ -878,5 +1135,427 @@ mod tests {
                 "f2f3", "f2f4", "g2g3", "g2g4", "h2h3", "h2h4", "b1a3", "b1c3", "g1f3", "g1h3",
             ]
         );
+    }
+
+    /// The 41-position perft oracle corpus plus the stream fixtures, so the
+    /// screen is exercised on real and on artificial positions.
+    fn oracle_corpus() -> Vec<String> {
+        let table = include_str!("../tests/perft_values.md");
+        let mut fens = Vec::new();
+        for line in table.lines() {
+            if !line.starts_with('|') {
+                continue;
+            }
+            let Some(start) = line.find('`') else {
+                continue;
+            };
+            let Some(len) = line[start + 1..].find('`') else {
+                continue;
+            };
+            fens.push(line[start + 1..start + 1 + len].to_owned());
+        }
+        assert_eq!(fens.len(), 41, "expected 41 perft corpus positions");
+        for fen in STREAM_CORPUS {
+            fens.push((*fen).to_owned());
+        }
+        fens
+    }
+
+    fn populated(board: &Board) -> StateInfo {
+        let mut state = StateInfo::new();
+        board.populate_state(&mut state);
+        state
+    }
+
+    /// Visit `view` as a position the child path would see: the differential
+    /// against the populated state, the witness soundness, and the counters.
+    ///
+    /// `coverage` is `(positions with a legal move and no checker, of which the
+    /// screen proved one)`.
+    fn check_view(
+        view: &PositionView,
+        checked: &mut u64,
+        coverage: &mut (u64, u64),
+        state_coverage: &mut (u64, u64),
+        witness_hits: &mut [u64; PieceType::NB],
+        decided: &mut u64,
+    ) {
+        let mut state = StateInfo::new();
+        view.populate_state(&mut state);
+        let mut legal = MoveList::new();
+        generate_legal_in_view(view, &state, &mut legal);
+
+        let expected = !legal.is_empty();
+        let us = view.side_to_move();
+        let witness = quiet_legal_witness_unpopulated(view);
+        let witness_state = quiet_legal_witness(view, state.checkers, state.pinned);
+
+        // The direct differential of the light entry point.
+        assert_eq!(
+            has_legal_move_in_view_unpopulated(view),
+            has_legal_move_in_view(view, &state),
+            "light vs state existence"
+        );
+        assert_eq!(
+            has_legal_move_in_view_unpopulated(view),
+            expected,
+            "light existence vs legal list"
+        );
+        assert_eq!(
+            has_legal_move_in_view(view, &state),
+            expected,
+            "state existence vs legal list"
+        );
+
+        // Soundness: a witness is a proof, so it must be a member of the legal
+        // list (the encodings are the generator's, so equality is exact).
+        for (name, candidate) in [("light", witness), ("state", witness_state)] {
+            if let Some(m) = candidate {
+                assert!(
+                    legal.as_slice().contains(&m),
+                    "{name} witness {m} is not in the legal list"
+                );
+            }
+        }
+        if let Some(m) = witness {
+            let pt = view
+                .type_on(m.from_sq())
+                .expect("a witness origin holds a piece");
+            witness_hits[pt as usize] += 1;
+        }
+
+        *checked += 1;
+        if expected && view.checkers(us).is_empty() {
+            coverage.0 += 1;
+            if witness.is_some() {
+                coverage.1 += 1;
+            }
+            state_coverage.0 += 1;
+            if witness_state.is_some() {
+                state_coverage.1 += 1;
+            }
+        }
+        if !expected {
+            *decided += 1;
+        }
+    }
+
+    /// Every corpus position, every child of every corpus position, and a
+    /// seeded play-out walk: the light existence query equals the state-based
+    /// one, every witness is a legal move, and the screen actually fires.
+    #[test]
+    fn existence_screen_matches_legal_lists() {
+        let mut checked = 0u64;
+        let mut coverage = (0u64, 0u64);
+        let mut state_coverage = (0u64, 0u64);
+        let mut witness_hits = [0u64; PieceType::NB];
+        let mut decided = 0u64;
+
+        for fen in oracle_corpus() {
+            let board = Board::from_fen(&fen).expect("corpus FEN must parse");
+            let view = board.position_view();
+            check_view(
+                view,
+                &mut checked,
+                &mut coverage,
+                &mut state_coverage,
+                &mut witness_hits,
+                &mut decided,
+            );
+
+            let mut pseudo = MoveList::new();
+            generate_pseudo_legal(&board, &mut pseudo);
+            for &m in pseudo.as_slice() {
+                let child = child_view(view, m, board.rule50_after(m))
+                    .expect("child of a pseudo-legal move")
+                    .view;
+                check_view(
+                    &child,
+                    &mut checked,
+                    &mut coverage,
+                    &mut state_coverage,
+                    &mut witness_hits,
+                    &mut decided,
+                );
+            }
+        }
+
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut visited = 0u64;
+        let start_fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+        ];
+        for (i, fen) in start_fens.iter().enumerate() {
+            for walk in 0..4u64 {
+                let mut board = Board::from_fen(fen).expect("play-out FEN must parse");
+                let mut state = StateInfo::new();
+                seed ^= (i as u64) << 32 ^ walk;
+                for _ in 0..120 {
+                    board.populate_state(&mut state);
+                    check_view(
+                        board.position_view(),
+                        &mut checked,
+                        &mut coverage,
+                        &mut state_coverage,
+                        &mut witness_hits,
+                        &mut decided,
+                    );
+                    visited += 1;
+                    let mut legal = MoveList::new();
+                    generate_legal_with_state(&board, &state, &mut legal);
+                    if legal.is_empty() {
+                        break;
+                    }
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    let m = legal.as_slice()[(seed % legal.len() as u64) as usize];
+                    board.do_move(m, &mut state);
+                }
+            }
+        }
+
+        eprintln!(
+            "existence screen: {checked} views ({visited} play-out positions), \
+             {decided} views without a legal move",
+            checked = checked,
+            visited = visited,
+            decided = decided,
+        );
+        eprintln!(
+            "  coverage (legal move, no checker): light {}/{} ({:.1} %), state {}/{} ({:.1} %)",
+            coverage.1,
+            coverage.0,
+            100.0 * coverage.1 as f64 / coverage.0 as f64,
+            state_coverage.1,
+            state_coverage.0,
+            100.0 * state_coverage.1 as f64 / state_coverage.0 as f64,
+        );
+        eprintln!(
+            "  witnesses by piece type: {:?}",
+            &witness_hits[..PieceType::NB]
+        );
+        // Every piece loop of the screen must be reachable; a bishop witness is
+        // rare only because the pawn screen answers first.
+        for pt in [
+            PieceType::Pawn,
+            PieceType::Knight,
+            PieceType::Rook,
+            PieceType::Queen,
+        ] {
+            assert!(
+                witness_hits[pt as usize] > 5,
+                "the screen fired only {} times for {pt:?}",
+                witness_hits[pt as usize]
+            );
+        }
+        assert!(
+            witness_hits[PieceType::Bishop as usize] > 0,
+            "no bishop witness"
+        );
+        assert!(checked > 2_000, "expected many views, got {checked}");
+        assert!(decided > 20, "expected decided views, got {decided}");
+        assert!(
+            coverage.0 > 1_000,
+            "expected many undecided, in-check-free views, got {}",
+            coverage.0
+        );
+        assert!(
+            10 * coverage.1 >= 95 * coverage.0 / 10,
+            "the screen fires too rarely: {}/{}",
+            coverage.1,
+            coverage.0
+        );
+    }
+
+    /// The classes handoff 3 names, with the documented witness behaviour: the
+    /// screen proves only quiet non-commoner moves, and every other class is
+    /// decided by the exact ladder.
+    #[test]
+    fn existence_screen_fixtures() {
+        use crate::movegen::generate_legal_with_state;
+
+        // (name, fen, expected existence, the screen fires)
+        let fixtures = [
+            (
+                "only commoner and pawns",
+                "8/8/8/4k3/8/4P3/8/4K3 w - - 0 1",
+                true,
+                true,
+            ),
+            (
+                "blocked-pawn ray shield",
+                "8/8/8/8/8/4k3/4P3/4K3 b - - 0 1",
+                true,
+                false,
+            ),
+            (
+                "touching commoners",
+                "8/8/8/8/8/8/1k6/2K5 w - - 0 1",
+                true,
+                false,
+            ),
+            (
+                "in check, one escape",
+                "7k/5P2/8/8/8/8/8/K6R b - - 0 1",
+                true,
+                false,
+            ),
+            (
+                "captures only",
+                "k7/8/3npn2/4P3/8/8/3nnn2/3nKn2 w - - 0 1",
+                true,
+                false,
+            ),
+            (
+                "checkmate",
+                "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3",
+                false,
+                false,
+            ),
+            ("stalemate", "7k/8/8/8/8/8/nn6/Kn6 w - - 0 1", false, false),
+            (
+                "bare commoners (K vs K)",
+                "k7/8/8/8/8/8/8/7K w - - 0 1",
+                true,
+                false,
+            ),
+            // The screen's piece loops, one fixture per mover type: a lone
+            // piece is the only quiet mover, so the witness must come from it.
+            ("knight", "7k/8/8/8/8/8/8/N3K3 w - - 0 1", true, true),
+            ("bishop", "7k/8/8/8/8/8/8/2B1K3 w - - 0 1", true, true),
+            ("rook", "7k/8/8/8/8/8/8/R3K3 w - - 0 1", true, true),
+            ("queen", "7k/8/8/8/8/8/8/3QK3 w - - 0 1", true, true),
+            // A promotion push is quiet, so the witness is the queen promotion.
+            (
+                "promotion push",
+                "7k/4P3/8/8/8/8/8/4K3 w - - 0 1",
+                true,
+                true,
+            ),
+            // The e2 pawn is the sole blocker between the e8 rook and the e1
+            // commoner, so its push is illegal and the witness must be the
+            // a1 knight's move instead.
+            (
+                "pinned pawn, knight available",
+                "4r2k/8/8/8/8/8/4P3/N3K3 w - - 0 1",
+                true,
+                true,
+            ),
+        ];
+
+        for (name, fen, expected, screen_fires) in fixtures {
+            let board = Board::from_fen(fen).expect("fixture FEN must parse");
+            let state = populated(&board);
+            let mut legal = MoveList::new();
+            generate_legal_with_state(&board, &state, &mut legal);
+            assert_eq!(legal.is_empty(), !expected, "{name}: legal list");
+
+            // Both entry points, and the direct differential.
+            assert_eq!(
+                has_legal_move_in_view_unpopulated(board.position_view()),
+                expected,
+                "{name}: light existence"
+            );
+            assert_eq!(
+                has_legal_move_in_view(board.position_view(), &state),
+                expected,
+                "{name}: state existence"
+            );
+            assert_eq!(
+                quiet_legal_witness_unpopulated(board.position_view()).is_some(),
+                screen_fires,
+                "{name}: screen fires"
+            );
+            assert_eq!(
+                quiet_legal_witness(board.position_view(), state.checkers, state.pinned).is_some(),
+                screen_fires,
+                "{name}: state screen fires"
+            );
+
+            // A witness is a proof: it must be a member of the legal list, in
+            // both screens. Encoding equality is exact (the screen uses the
+            // generator's encodings, queen promotion included).
+            for (screen, witness) in [
+                (
+                    "light",
+                    quiet_legal_witness_unpopulated(board.position_view()),
+                ),
+                (
+                    "state",
+                    quiet_legal_witness(board.position_view(), state.checkers, state.pinned),
+                ),
+            ] {
+                if let Some(m) = witness {
+                    assert!(
+                        legal.as_slice().contains(&m),
+                        "{name}: {screen} witness {m} is not a legal move"
+                    );
+                }
+            }
+
+            if name == "pinned pawn, knight available" {
+                let witness = quiet_legal_witness_unpopulated(board.position_view())
+                    .expect("the knight has quiet moves");
+                assert_eq!(
+                    witness.from_sq(),
+                    Square::A1,
+                    "the pinned pawn may not be claimed"
+                );
+            }
+        }
+    }
+
+    /// The checking/pinned split is exactly the two board queries it replaces,
+    /// including the immunity and extinction branches.
+    #[test]
+    fn checking_pieces_and_pinned_matches_view_queries() {
+        let mut checked = 0u64;
+        let mut with_checkers = 0u64;
+        let mut with_pins = 0u64;
+        for fen in oracle_corpus() {
+            let board = Board::from_fen(&fen).expect("corpus FEN must parse");
+            let view = board.position_view();
+            let mut views = vec![*view];
+            let mut pseudo = MoveList::new();
+            generate_pseudo_legal(&board, &mut pseudo);
+            for &m in pseudo.as_slice() {
+                views.push(
+                    child_view(view, m, board.rule50_after(m))
+                        .expect("child of a pseudo-legal move")
+                        .view,
+                );
+            }
+            for view in views {
+                for us in [Color::White, Color::Black] {
+                    let (checkers, pinned) = checking_pieces_and_pinned(&view, us);
+                    if us == view.side_to_move() {
+                        // The single-commoner case is the one the screen uses.
+                        assert_eq!(checkers, view.checkers(us), "{fen}: checkers");
+                        if view.commoners(Color::White).count() == 1
+                            && view.commoners(Color::Black).count() == 1
+                        {
+                            assert_eq!(pinned, view.pinned(us), "{fen}: pinned");
+                        }
+                    }
+                    if !checkers.is_empty() {
+                        with_checkers += 1;
+                    }
+                    if !pinned.is_empty() {
+                        with_pins += 1;
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        eprintln!(
+            "checking/pinned split: {checked} (view, color) pairs, \
+             {with_checkers} with checkers, {with_pins} with pins"
+        );
+        assert!(with_checkers > 10, "expected checked positions");
+        assert!(with_pins > 10, "expected pinned pieces");
     }
 }

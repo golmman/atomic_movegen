@@ -26,6 +26,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The child's existence question ("does the side to move have a legal move?")
+  is answered by a positive screen before the exact ladder runs, and it no
+  longer populates a `StateInfo` on the way. The screen proves one quiet
+  non-commoner move legal from the placement view alone — a quiet move triggers
+  no blast and empties only its origin, so it is legal when the mover's
+  commoner is not attacked after it — and falls back to the unchanged
+  fast-legality ladder for everything it cannot prove (in check, captures only,
+  commoner moves only, decided positions). `EffectContext::has_legal_move_after`,
+  `EffectContext::is_terminal_after`, `EffectContext::terminal_after`,
+  `PostMove::terminal`, `EffectContext::child_outcome`,
+  `movegen::has_legal_move` and `movegen::has_legal_move_with_state` all answer
+  exactly what they answered before; only the cost changes. Measured on this
+  crate's bench positions: `has_legal_move_after` 36 → 25–30 ns per child,
+  `terminal_after` 43 → 30–34 ns, `has_legal_move` 6 → 2–3 ns per node
+  (`examples/effect_bench.rs`, which now prints the build-only row and the two
+  shares the MG19/MG20 cost bars need). No move order, perft value, hash, FEN
+  output, or `Outcome`/`Terminal` semantics changed.
 - The child-side terminal precedence no longer populates a `StateInfo` for the
   child: the two commoner counts and "is the side to move in check" are read
   from the placement view. The precedence itself is unchanged and now lives in

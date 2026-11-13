@@ -13,8 +13,12 @@ Before reaching for a profiler, the relevant code is small enough to name:
   ladder, `child_view` (the child of a move, derived without a board write) and
   `terminal_in_view` (the one terminal precedence) all live here.
 - `src/movegen.rs` — the pseudo-legal generator, the fast-legality ladder
-  (`legal_with_counts` and the per-move ladder above it), and
-  `has_legal_move_in_view`.
+  (`legal_with_counts` and the per-move ladder above it), and the existence
+  queries: `has_legal_move_in_view` (state-based),
+  `has_legal_move_in_view_unpopulated` (child-side, no `StateInfo`) and the two
+  positive screens behind them (`quiet_legal_witness`,
+  `quiet_legal_witness_unpopulated`, `checking_pieces_and_pinned`,
+  `first_quiet_move`).
 - `src/effects.rs` — `EffectContext`: `analyze` (the child derivation),
   `classification` (rules fields, no legality ladder) and `is_legal_from`
   (the ladder on the child view). The child path of the effect context is the
@@ -28,9 +32,16 @@ Measured starting points (see `cargo run --release --example effect_bench`,
   candidate because it derives the child placement instead of reading
   node-constant `StateInfo`.
 - `generate_legal_with_state` ≈ 100–115 ns per node at the bench positions;
-  `for_each_legal` ≈ 75–85 ns; `has_legal_move` ≈ 6–7 ns (first legal move).
-- The child path (`terminal_after`, `child_outcome`, `post_move`) is 20–50 ns
-  per child on those positions.
+  `for_each_legal` ≈ 70–80 ns; `has_legal_move` ≈ 2–3 ns (first legal move —
+  the existence screen usually proves one before the ladder starts).
+- The child path (`post_move` ≈ 20 ns per child, `terminal_after` /
+  `child_outcome` ≈ 30–40 ns, `has_legal_move_after` ≈ 25–30 ns) on those
+  positions. The existence part of those rows is the last ~8–10 ns: one pass
+  over the child's aligned enemy sliders (`checking_pieces_and_pinned`) plus
+  the search for one quiet move that the proof admits. The child path
+  deliberately does **not** populate a `StateInfo` unless the screen fails, so
+  a profiling hotspot inside `populate_state` on the child path would be a
+  regression, not the baseline.
 
 If a change makes any of these worse by more than ~2 %, treat it as a
 regression, not a note: profile first, then confirm with

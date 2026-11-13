@@ -81,7 +81,13 @@
 //! read, so “does the child have a legal move?” needs no board write.
 //! [`EffectContext::is_terminal_after`] mirrors [`Board::is_terminal`] on the
 //! child and [`EffectContext::has_legal_move_after`] answers the existence
-//! query alone.
+//! query alone. That existence question is two-stepped: a positive screen
+//! proves one quiet non-commoner move legal from the placement view (a quiet
+//! move empties only its origin and triggers no blast, so it is legal whenever
+//! the mover's commoner is not attacked after it), and the exact
+//! fast-legality ladder decides everything the screen cannot prove. The
+//! answers are unchanged; the child path populates no `StateInfo` unless the
+//! screen fails.
 //!
 //! [`EffectContext::child_outcome`] (also reachable as
 //! [`Board::child_outcome`]) is the unambiguous two-level answer over the same

@@ -60,7 +60,9 @@ reference implementation.
   for every pseudo-legal move, exactly as a cloned `do_move` child's
   `Board::terminal()` would, with no clone and no `MoveList`. Companion
   queries: `is_terminal_after()` (the literal `is_terminal()` mirror) and
-  `has_legal_move_after()`
+  `has_legal_move_after()`. The child's existence question is answered by a
+  positive screen that proves one quiet legal move before the exact ladder
+  runs, so the child path populates no `StateInfo` unless the screen fails
 - Two-level child answer: `EffectContext::child_outcome` (and
   `Board::child_outcome()`) return an `AfterState` — `Illegal` (the move is not
   legal), `Undecided` (legal, the game continues), or `Terminal(t)` (legal, and
@@ -313,6 +315,12 @@ effect_bench`) put `Board::legal` at ~8–9 ns per candidate and `effect()` at
 `Board::legal` reads the parent's node-constant `StateInfo`. Use the effect
 path when you need the *effects* (captures, casualties, checks, explosions,
 child terminality, child facts) — not as a faster `legal()`.
+
+That also holds for the child queries: on this crate's bench machine
+`post_move()` (≈20 ns per child) costs about as much as cloning the board and
+playing the move (≈14–19 ns), so the summary path's advantage is the API shape
+— one derivation answering summary, key and terminality — not a claim that it
+beats `clone` + `do_move` on any particular machine.
 
 `PostMove` carries the child facts without a rules opinion — no legality, no
 material shortcut; its terminality is asked *about* the summary:

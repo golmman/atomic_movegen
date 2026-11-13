@@ -626,10 +626,12 @@ impl EffectContext {
     /// `None`.
     ///
     /// This is `post_move(board, m).and_then(|post| post.terminal())`: the
-    /// child's commoner counts and attacker query are read from the placement
-    /// view, and the existence question — which needs the child's pins — is
-    /// only asked when the clock and the check test did not already decide. No
-    /// board is written and nothing is allocated.
+    /// child's commoner counts are read from the placement view, and the
+    /// existence question is answered by the positive screen whenever that
+    /// screen can prove a legal move — so the child's attacker query and its
+    /// pins are derived only when the precedence actually needs them. No board
+    /// is written, nothing is allocated, and no [`StateInfo`] is populated on
+    /// that path.
     #[must_use]
     pub fn terminal_after(&self, board: &Board, m: Move) -> Option<Terminal> {
         self.analyze(board, m)?.terminal()
@@ -658,9 +660,7 @@ impl EffectContext {
         {
             return Some(true);
         }
-        let mut state = StateInfo::new();
-        view.populate_state(&mut state);
-        Some(!crate::movegen::has_legal_move_in_view(view, &state))
+        Some(!crate::movegen::has_legal_move_in_view_unpopulated(view))
     }
 
     /// Whether the child position after `m` has at least one legal move,
@@ -669,12 +669,16 @@ impl EffectContext {
     /// For every pseudo-legal `m` this is exactly
     /// `{ let mut c = board.clone(); c.do_move(m, &mut st);
     /// crate::movegen::has_legal_move(&c) }`. Malformed input returns `None`.
+    /// Like the board query, this is a two-step answer: a quiet move the
+    /// existence screen can prove legal decides `true` immediately, and only
+    /// the remaining children (in check, captures only, commoner moves only)
+    /// populate a [`StateInfo`] for the exact ladder.
     #[must_use]
     pub fn has_legal_move_after(&self, board: &Board, m: Move) -> Option<bool> {
         let child = self.analyze(board, m)?;
-        let mut state = StateInfo::new();
-        child.view.populate_state(&mut state);
-        Some(crate::movegen::has_legal_move_in_view(&child.view, &state))
+        Some(crate::movegen::has_legal_move_in_view_unpopulated(
+            &child.view,
+        ))
     }
 
     /// The opponent's commoners in the context position.

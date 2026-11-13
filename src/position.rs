@@ -284,9 +284,9 @@ impl PositionView {
     /// [`populate_state`](Self::populate_state) with a `checkers` value the
     /// caller has already computed for this view's side to move.
     ///
-    /// The child-side terminal path computes `checkers` for the precedence and
-    /// needs a populated state for the existence query as well; this way the
-    /// attacker query is run once instead of twice.
+    /// For callers that derive the attacker set for another purpose (the
+    /// terminal precedence, the existence screen); the query then runs once
+    /// instead of twice.
     #[inline]
     pub(crate) fn populate_state_with_checkers(&self, state: &mut StateInfo, checkers: Bitboard) {
         let us = self.side_to_move;
@@ -696,21 +696,23 @@ fn terminal_cheap(
 /// The terminal-precedence tail: the clock, the existence question, and mate or
 /// stalemate.
 ///
-/// `in_check` says whether the side to move is in check; `moves_exist` answers
-/// the existence question and is only called when the answer matters — a
-/// position whose clock is up and whose side to move is *not* in check is
-/// decided without asking it at all.
+/// `in_check` says whether the side to move is in check; it is a closure so a
+/// caller that cannot cheaply know it pays for the attacker query only when the
+/// answer matters: a position whose clock is up and whose side to move is *not*
+/// in check is decided without asking it, and so is a position whose clock is
+/// down and which has legal moves. `moves_exist` answers the existence question
+/// and is only called when the answer matters.
 #[inline]
 fn terminal_tail(
     view: &PositionView,
-    in_check: bool,
+    in_check: impl Fn() -> bool,
     moves_exist: impl FnOnce() -> bool,
 ) -> Option<Terminal> {
     // The clock is a draw without movegen when there is no check. When the
     // side to move is in check, mate outranks the clock, so resolve the
     // existence question first (Fairy-Stockfish's `!checkers() || legal`
     // guard).
-    if view.rule50 >= 100 && !in_check {
+    if view.rule50 >= 100 && !in_check() {
         return Some(Terminal {
             outcome: Outcome::Draw,
             reason: TerminalReason::FiftyMoveRule,
@@ -718,7 +720,7 @@ fn terminal_tail(
     }
 
     if !moves_exist() {
-        return Some(if !in_check {
+        return Some(if !in_check() {
             Terminal {
                 outcome: Outcome::Draw,
                 reason: TerminalReason::Stalemate,
@@ -758,17 +760,22 @@ pub(crate) fn terminal_in_view(
     {
         return Some(terminal);
     }
-    terminal_tail(view, !state.checkers.is_empty(), || {
-        moves_exist.unwrap_or_else(|| crate::movegen::has_legal_move_in_view(view, state))
-    })
+    terminal_tail(
+        view,
+        || !state.checkers.is_empty(),
+        || moves_exist.unwrap_or_else(|| crate::movegen::has_legal_move_in_view(view, state)),
+    )
 }
 
 /// The child-side terminal-precedence implementation: a view, no [`StateInfo`].
 ///
 /// Same precedence as [`terminal_in_view`] and the same branch code, but the
 /// facts it reads come from the view: the two commoner counts (one popcount
-/// each) and “is the side to move in check” (one attacker query, shared with
-/// the existence query further down).
+/// each) and “is the side to move in check”, whose attacker query runs only when
+/// the precedence actually needs it. The existence question itself is
+/// [`has_legal_move_in_view_unpopulated`](crate::movegen::has_legal_move_in_view_unpopulated),
+/// which answers `true` from a proven quiet legal move and falls back to the
+/// exact ladder (populating a [`StateInfo`]) otherwise.
 ///
 /// The attacker query is deliberately run only after [`terminal_cheap`]:
 /// extinction and the material draw must not pay for it.
@@ -780,14 +787,11 @@ pub(crate) fn terminal_in_view_light(view: &PositionView) -> Option<Terminal> {
         return Some(terminal);
     }
 
-    let checkers = view.checkers(us);
-    terminal_tail(view, !checkers.is_empty(), || {
-        // The exact existence query, whose ladder wants a populated
-        // `StateInfo`. `checkers` is already known and is passed through.
-        let mut state = StateInfo::new();
-        view.populate_state_with_checkers(&mut state, checkers);
-        crate::movegen::has_legal_move_in_view(view, &state)
-    })
+    terminal_tail(
+        view,
+        || !view.checkers(us).is_empty(),
+        || crate::movegen::has_legal_move_in_view_unpopulated(view),
+    )
 }
 
 #[cfg(test)]
@@ -1012,17 +1016,19 @@ mod tests {
         assert_eq!(fresh.rule50(), 0);
 
         let never = || -> bool { panic!("the existence question must not be asked") };
+        let in_check = || true;
+        let not_in_check = || false;
         let yes = || true;
         let no = || false;
 
         // The clock is a draw without movegen when there is no check.
-        assert_eq!(terminal_tail(&loaded, false, never), Some(clock));
+        assert_eq!(terminal_tail(&loaded, not_in_check, never), Some(clock));
         // A clock with the side to move in check is resolved by the existence
         // question first: mate outranks the clock, and so does the clock when
         // moves exist.
-        assert_eq!(terminal_tail(&loaded, true, yes), Some(clock));
+        assert_eq!(terminal_tail(&loaded, in_check, yes), Some(clock));
         assert_eq!(
-            terminal_tail(&loaded, true, no),
+            terminal_tail(&loaded, in_check, no),
             Some(Terminal {
                 outcome: Outcome::Loss,
                 reason: TerminalReason::NoMovesInCheck,
@@ -1030,15 +1036,16 @@ mod tests {
         );
         // Without the clock: no moves and no check is stalemate.
         assert_eq!(
-            terminal_tail(&fresh, false, no),
+            terminal_tail(&fresh, not_in_check, no),
             Some(Terminal {
                 outcome: Outcome::Draw,
                 reason: TerminalReason::Stalemate,
             })
         );
-        // Undecided: moves exist and the clock is not up.
-        assert_eq!(terminal_tail(&fresh, false, yes), None);
-        assert_eq!(terminal_tail(&fresh, true, yes), None);
+        // Undecided: moves exist and the clock is not up. The check flag is
+        // never read here, which is what lets the light path derive it lazily.
+        assert_eq!(terminal_tail(&fresh, not_in_check, yes), None);
+        assert_eq!(terminal_tail(&fresh, in_check, yes), None);
     }
 
     /// The light path and the board path are the same precedence: same answer

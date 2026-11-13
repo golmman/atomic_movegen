@@ -316,6 +316,21 @@ fn main() {
             repeats,
             iterations,
         );
+        // The divisor of the MG20 cost bars: the child build alone, with no
+        // fact read at all.
+        let mut i = 0usize;
+        let build_only_ns = bench(
+            || {
+                let m = pseudo[i % pseudo.len()];
+                i += 1;
+                let mut child = board.clone();
+                let mut st = StateInfo::new();
+                child.do_move(m, &mut st);
+                black_box(&child);
+            },
+            repeats,
+            iterations,
+        );
         let mut i = 0usize;
         let post_move_ns = bench(
             || {
@@ -330,6 +345,19 @@ fn main() {
                         post.casualties(),
                     ));
                 }
+            },
+            repeats,
+            iterations,
+        );
+        // The same derivation with nothing read from it: the row the MG20
+        // shares are measured against (the `post_move` row above also reads
+        // five facts off the summary).
+        let mut i = 0usize;
+        let post_derivation_ns = bench(
+            || {
+                let m = pseudo[i % pseudo.len()];
+                i += 1;
+                black_box(ctx.post_move(&board, m));
             },
             repeats,
             iterations,
@@ -478,6 +506,10 @@ fn main() {
             iterations,
         );
 
+        let existential_share = has_move_after_ns - post_derivation_ns;
+        let terminality_share = post_terminal_ns - post_derivation_ns;
+        let existential_ratio = existential_share / build_only_ns;
+        let terminality_ratio = terminality_share / build_only_ns;
         println!(
             "  per pseudo-legal move: classification {classification_ns:>9.1}  \
              effect.full {effect_full:>9.1}  effect.is_legal {effect_legal:>9.1}  \
@@ -506,11 +538,22 @@ fn main() {
         );
         println!(
             "  child summary:         post_move {post_move_ns:>9.1}  \
-             clone+do_move+facts {post_clone_ns:>9.1}"
+             post_move.derivation {post_derivation_ns:>9.1}  \
+             clone+do_move+facts {post_clone_ns:>9.1}  \
+             clone+do_move {build_only_ns:>9.1}"
         );
         println!(
             "  summary + terminal:    post_move+terminal {post_terminal_ns:>9.1}  \
              terminal_after {terminal_after_ns:>9.1}"
+        );
+        // The MG20 bars, as ratios of this run: the existence question alone
+        // (`has_legal_move_after - post_move.derivation`) and the terminality
+        // alone (`post_move+terminal - post_move.derivation`) against the
+        // build-only row.
+        println!(
+            "  shares vs build only:  existential {existential_share:>9.1} \
+             ({existential_ratio:>4.2}x)  terminality {terminality_share:>9.1} \
+             ({terminality_ratio:>4.2}x)"
         );
         println!(
             "  summary + key:         post_move_and_key {post_key_ns:>9.1}  \
