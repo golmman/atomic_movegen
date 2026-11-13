@@ -2,6 +2,7 @@
 
 use crate::attacks;
 use crate::board::{BK_CASTLE, BQ_CASTLE, Board, FastLegality, StateInfo, WK_CASTLE, WQ_CASTLE};
+use crate::position::PositionView;
 use crate::types::*;
 use std::ops::ControlFlow;
 
@@ -15,7 +16,13 @@ use std::ops::ControlFlow;
 /// The output order is the generation-order contract documented on
 /// [`for_each_pseudo_legal`].
 pub fn generate_pseudo_legal(board: &Board, moves: &mut MoveList) {
-    let _ = for_each_pseudo_legal::<core::convert::Infallible>(board, &mut |m| {
+    generate_pseudo_legal_in_view(board.position_view(), moves);
+}
+
+/// [`generate_pseudo_legal`] over a [`PositionView`]: the single
+/// implementation both entry points use.
+pub(crate) fn generate_pseudo_legal_in_view(view: &PositionView, moves: &mut MoveList) {
+    let _ = for_each_pseudo_legal_in_view::<core::convert::Infallible>(view, &mut |m| {
         moves.push(m);
         ControlFlow::Continue(())
     });
@@ -44,21 +51,30 @@ pub fn for_each_pseudo_legal<B>(
     board: &Board,
     f: &mut impl FnMut(Move) -> ControlFlow<B>,
 ) -> ControlFlow<B> {
-    let us = board.side_to_move();
+    for_each_pseudo_legal_in_view(board.position_view(), f)
+}
+
+/// [`for_each_pseudo_legal`] over a [`PositionView`]: the single
+/// implementation both entry points use.
+pub(crate) fn for_each_pseudo_legal_in_view<B>(
+    view: &PositionView,
+    f: &mut impl FnMut(Move) -> ControlFlow<B>,
+) -> ControlFlow<B> {
+    let us = view.side_to_move();
     let them = us.flip();
-    let occupied = board.occupied();
-    let them_bb = board.pieces_color(them);
-    let ep_square = board.ep_square();
+    let occupied = view.occupied();
+    let them_bb = view.pieces_color(them);
+    let ep_square = view.ep_square();
     let target = !occupied | them_bb;
 
-    let mut p = board.pieces_color_pt(us, PieceType::Pawn);
+    let mut p = view.pieces_color_pt(us, PieceType::Pawn);
     while !p.is_empty() {
         let from = p.pop_lsb();
-        generate_pawn_moves_for(board, us, occupied, them_bb, ep_square, from, f)?;
+        generate_pawn_moves_for(view, us, occupied, them_bb, ep_square, from, f)?;
     }
 
     generate_piece_moves(
-        board,
+        view,
         us,
         target,
         PieceType::Knight,
@@ -66,7 +82,7 @@ pub fn for_each_pseudo_legal<B>(
         f,
     )?;
     generate_piece_moves(
-        board,
+        view,
         us,
         target,
         PieceType::Bishop,
@@ -74,7 +90,7 @@ pub fn for_each_pseudo_legal<B>(
         f,
     )?;
     generate_piece_moves(
-        board,
+        view,
         us,
         target,
         PieceType::Rook,
@@ -82,7 +98,7 @@ pub fn for_each_pseudo_legal<B>(
         f,
     )?;
     generate_piece_moves(
-        board,
+        view,
         us,
         target,
         PieceType::Queen,
@@ -90,7 +106,7 @@ pub fn for_each_pseudo_legal<B>(
         f,
     )?;
     generate_piece_moves(
-        board,
+        view,
         us,
         target,
         PieceType::Commoner,
@@ -100,22 +116,22 @@ pub fn for_each_pseudo_legal<B>(
 
     // Castling moves. Most nodes have no castling rights for the side to move,
     // so skip the whole path with one test.
-    if board.castling_rights() & castling_rights_mask(us) != 0 {
-        generate_castling(board, us, f)?;
+    if view.castling_rights() & castling_rights_mask(us) != 0 {
+        generate_castling(view, us, f)?;
     }
     ControlFlow::Continue(())
 }
 
 #[inline(always)]
 fn generate_piece_moves<B>(
-    board: &Board,
+    view: &PositionView,
     us: Color,
     target: Bitboard,
     pt: PieceType,
     attacks: impl Fn(Square) -> Bitboard,
     f: &mut impl FnMut(Move) -> ControlFlow<B>,
 ) -> ControlFlow<B> {
-    let mut pieces = board.pieces_color_pt(us, pt);
+    let mut pieces = view.pieces_color_pt(us, pt);
     while !pieces.is_empty() {
         let from = pieces.pop_lsb();
         let mut a = attacks(from) & target;
@@ -134,7 +150,7 @@ fn generate_piece_moves<B>(
 /// `occupied`, `them_bb` and `ep_square` are per-node values hoisted by the
 /// caller; the pawn targets come from the compile-time attack tables.
 fn generate_pawn_moves_for<B>(
-    board: &Board,
+    view: &PositionView,
     us: Color,
     occupied: Bitboard,
     them_bb: Bitboard,
@@ -195,7 +211,10 @@ fn generate_pawn_moves_for<B>(
                 Color::White => Square::from_index(ep_sq as i8 - 8),
                 Color::Black => Square::from_index(ep_sq as i8 + 8),
             };
-            if board.piece_on(ep_cap) == make_piece(them, PieceType::Pawn) {
+            if view
+                .pieces_color_pt(them, PieceType::Pawn)
+                .contains(ep_cap as usize)
+            {
                 f(Move::make_enpassant(from, ep_sq))?;
             }
         }
@@ -214,7 +233,7 @@ fn castling_rights_mask(us: Color) -> u8 {
 }
 
 fn generate_castling<B>(
-    board: &Board,
+    view: &PositionView,
     us: Color,
     f: &mut impl FnMut(Move) -> ControlFlow<B>,
 ) -> ControlFlow<B> {
@@ -247,14 +266,17 @@ fn generate_castling<B>(
         ),
     };
 
+    let commoners = view.pieces_color_pt(us, PieceType::Commoner);
+    let rooks = view.pieces_color_pt(us, PieceType::Rook);
+
     // King-side castling
-    if board.castling_rights() & king_side_right != 0
-        && board.piece_on(king_sq) == make_piece(us, PieceType::Commoner)
-        && board.piece_on(king_side_rook_sq) == make_piece(us, PieceType::Rook)
+    if view.castling_rights() & king_side_right != 0
+        && commoners.contains(king_sq as usize)
+        && rooks.contains(king_side_rook_sq as usize)
     {
         let mut clear = true;
         for &sq in &king_side_squares {
-            if !board.empty(sq) {
+            if !view.empty(sq) {
                 clear = false;
                 break;
             }
@@ -265,13 +287,13 @@ fn generate_castling<B>(
     }
 
     // Queen-side castling
-    if board.castling_rights() & queen_side_right != 0
-        && board.piece_on(king_sq) == make_piece(us, PieceType::Commoner)
-        && board.piece_on(queen_side_rook_sq) == make_piece(us, PieceType::Rook)
+    if view.castling_rights() & queen_side_right != 0
+        && commoners.contains(king_sq as usize)
+        && rooks.contains(queen_side_rook_sq as usize)
     {
         let mut clear = true;
         for &sq in &queen_side_squares {
-            if !board.empty(sq) {
+            if !view.empty(sq) {
                 clear = false;
                 break;
             }
@@ -295,9 +317,12 @@ fn generate_castling<B>(
 /// The output preserves the pseudo-legal order; see the generation-order
 /// contract on [`for_each_pseudo_legal`].
 pub fn generate_legal(board: &Board, moves: &mut MoveList) {
+    // One view per node: the state and the generator both read from it, so the
+    // snapshot is built once here instead of once per entry point.
+    let view = board.position_view();
     let mut state = StateInfo::new();
-    board.populate_state(&mut state);
-    generate_legal_with_state(board, &state, moves);
+    view.populate_state(&mut state);
+    generate_legal_in_view(view, &state, moves);
 }
 
 /// Generate all fully legal moves for the side to move using a pre-populated
@@ -308,6 +333,12 @@ pub fn generate_legal(board: &Board, moves: &mut MoveList) {
 /// `populate_state` itself. The output preserves the pseudo-legal order; see
 /// the generation-order contract on [`for_each_pseudo_legal`].
 pub fn generate_legal_with_state(board: &Board, state: &StateInfo, moves: &mut MoveList) {
+    generate_legal_in_view(board.position_view(), state, moves);
+}
+
+/// [`generate_legal_with_state`] over a [`PositionView`]: the single
+/// implementation both entry points use.
+pub(crate) fn generate_legal_in_view(view: &PositionView, state: &StateInfo, moves: &mut MoveList) {
     // The game is already over when either side has no commoner left
     // (extinction). Fairy-Stockfish's `generate<LEGAL>` returns no moves in
     // that case, so neither do we.
@@ -315,7 +346,7 @@ pub fn generate_legal_with_state(board: &Board, state: &StateInfo, moves: &mut M
         return;
     }
 
-    generate_pseudo_legal(board, moves);
+    generate_pseudo_legal_in_view(view, moves);
 
     // In-place compaction: the ladder accepts most moves without a `legal()`
     // call.
@@ -325,14 +356,14 @@ pub fn generate_legal_with_state(board: &Board, state: &StateInfo, moves: &mut M
     }
 
     // Node-constant fast-legality data, hoisted out of the compaction loop.
-    let fast = FastLegality::new(board, state);
+    let fast = FastLegality::new(view, state);
 
     let new_len = {
         let ms = moves.as_mut_slice();
         let mut write_idx = 0;
         for read_idx in 0..orig_len {
             let m = ms[read_idx];
-            if fast.is_legal(board, m, state) {
+            if fast.is_legal(view, m, state) {
                 ms[write_idx] = m;
                 write_idx += 1;
             }
@@ -360,9 +391,10 @@ pub fn for_each_legal<B>(
     board: &Board,
     f: &mut impl FnMut(Move) -> ControlFlow<B>,
 ) -> ControlFlow<B> {
+    let view = board.position_view();
     let mut state = StateInfo::new();
-    board.populate_state(&mut state);
-    for_each_legal_with_state(board, &state, f)
+    view.populate_state(&mut state);
+    for_each_legal_in_view(view, &state, f)
 }
 
 /// Same as [`for_each_legal`], using a caller-populated [`StateInfo`].
@@ -380,6 +412,16 @@ pub fn for_each_legal_with_state<B>(
     state: &StateInfo,
     f: &mut impl FnMut(Move) -> ControlFlow<B>,
 ) -> ControlFlow<B> {
+    for_each_legal_in_view(board.position_view(), state, f)
+}
+
+/// [`for_each_legal_with_state`] over a [`PositionView`]: the single
+/// implementation both entry points use.
+pub(crate) fn for_each_legal_in_view<B>(
+    view: &PositionView,
+    state: &StateInfo,
+    f: &mut impl FnMut(Move) -> ControlFlow<B>,
+) -> ControlFlow<B> {
     // The game is already over when either side has no commoner left
     // (extinction), matching `generate_legal_with_state`.
     if state.commoners_count == 0 || state.them_commoners_count == 0 {
@@ -389,10 +431,10 @@ pub fn for_each_legal_with_state<B>(
     // Node-constant data, built once per node. The same ladder as
     // `generate_legal_with_state`: the trivial quiet fast path first, then the
     // widened rules, then `Board::legal`.
-    let fast = FastLegality::new(board, state);
+    let fast = FastLegality::new(view, state);
 
-    for_each_pseudo_legal(board, &mut |m| {
-        if fast.is_legal(board, m, state) {
+    for_each_pseudo_legal_in_view(view, &mut |m| {
+        if fast.is_legal(view, m, state) {
             f(m)
         } else {
             ControlFlow::Continue(())
@@ -406,9 +448,10 @@ pub fn for_each_legal_with_state<B>(
 /// [`generate_legal`] when moves exist. Calls [`Board::populate_state`]
 /// internally.
 pub fn has_legal_move(board: &Board) -> bool {
+    let view = board.position_view();
     let mut state = StateInfo::new();
-    board.populate_state(&mut state);
-    has_legal_move_with_state(board, &state)
+    view.populate_state(&mut state);
+    has_legal_move_in_view(view, &state)
 }
 
 /// Same as [`has_legal_move`], using a caller-populated [`StateInfo`].
@@ -422,15 +465,21 @@ pub fn has_legal_move(board: &Board) -> bool {
 /// For any position and any populated `StateInfo` this returns exactly
 /// `!generate_legal_with_state(board, state, list).is_empty()`.
 pub fn has_legal_move_with_state(board: &Board, state: &StateInfo) -> bool {
+    has_legal_move_in_view(board.position_view(), state)
+}
+
+/// [`has_legal_move_with_state`] over a [`PositionView`]: the single
+/// implementation both entry points use.
+pub(crate) fn has_legal_move_in_view(view: &PositionView, state: &StateInfo) -> bool {
     // Game already over (extinction): no legal moves, matching
     // `generate_legal_with_state`.
     if state.commoners_count == 0 || state.them_commoners_count == 0 {
         return false;
     }
 
-    let fast = FastLegality::new(board, state);
-    for_each_pseudo_legal::<()>(board, &mut |m| {
-        if fast.is_legal(board, m, state) {
+    let fast = FastLegality::new(view, state);
+    for_each_pseudo_legal_in_view::<()>(view, &mut |m| {
+        if fast.is_legal(view, m, state) {
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(())

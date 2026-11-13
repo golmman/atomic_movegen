@@ -3,6 +3,7 @@
 
 use crate::attacks;
 use crate::bitboard::*;
+use crate::position::PositionView;
 use crate::types::*;
 use std::cell::{Cell, OnceCell};
 use std::error::Error;
@@ -358,13 +359,14 @@ impl StateInfo {
 /// making and unmaking moves, and legality checking.
 #[derive(Debug, Clone)]
 pub struct Board {
+    /// Piece placement as a square array, for O(1) lookups by square.
     squares: [Piece; 64],
-    by_color: [Bitboard; 2],
-    by_type: [Bitboard; 6],
-    side_to_move: Color,
-    castling_rights: u8,
-    ep_square: Option<Square>,
-    rule50: u16,
+    /// Placement bitboards, side to move, ep target, castling rights, clock.
+    ///
+    /// Nested so that every rule query can borrow the view instead of copying
+    /// it; the fields are kept in lock-step with `squares` by the crate's own
+    /// mutators.
+    position: PositionView,
     game_ply: u16,
     hash: u64,
 }
@@ -663,12 +665,14 @@ impl Board {
 
         let mut board = Board {
             squares,
-            by_color,
-            by_type,
-            side_to_move,
-            castling_rights,
-            ep_square,
-            rule50,
+            position: PositionView::from_parts(
+                by_color,
+                by_type,
+                side_to_move,
+                ep_square,
+                castling_rights,
+                rule50,
+            ),
             game_ply,
             hash: 0,
         };
@@ -774,25 +778,25 @@ impl Board {
         let white_rook = make_piece(Color::White, PieceType::Rook);
         let black_commoner = make_piece(Color::Black, PieceType::Commoner);
         let black_rook = make_piece(Color::Black, PieceType::Rook);
-        if self.castling_rights & WK_CASTLE != 0
+        if self.position.castling_rights & WK_CASTLE != 0
             && (self.squares[Square::E1 as usize] != white_commoner
                 || self.squares[Square::H1 as usize] != white_rook)
         {
             errors |= ValidationErrors::INVALID_CASTLING_RIGHTS;
         }
-        if self.castling_rights & WQ_CASTLE != 0
+        if self.position.castling_rights & WQ_CASTLE != 0
             && (self.squares[Square::E1 as usize] != white_commoner
                 || self.squares[Square::A1 as usize] != white_rook)
         {
             errors |= ValidationErrors::INVALID_CASTLING_RIGHTS;
         }
-        if self.castling_rights & BK_CASTLE != 0
+        if self.position.castling_rights & BK_CASTLE != 0
             && (self.squares[Square::E8 as usize] != black_commoner
                 || self.squares[Square::H8 as usize] != black_rook)
         {
             errors |= ValidationErrors::INVALID_CASTLING_RIGHTS;
         }
-        if self.castling_rights & BQ_CASTLE != 0
+        if self.position.castling_rights & BQ_CASTLE != 0
             && (self.squares[Square::E8 as usize] != black_commoner
                 || self.squares[Square::A8 as usize] != black_rook)
         {
@@ -824,17 +828,17 @@ impl Board {
         // 5. En-passant geometry must be consistent with a double push. A
         // legal ep capture is deliberately not required: FSF records the
         // target after every double push.
-        if let Some(sq) = self.ep_square {
+        if let Some(sq) = self.position.ep_square {
             let mut valid = true;
-            let expected_rank = match self.side_to_move {
+            let expected_rank = match self.position.side_to_move {
                 Color::White => Rank::R6,
                 Color::Black => Rank::R3,
             };
             if rank_of(sq) != expected_rank {
                 valid = false;
             } else {
-                let them = self.side_to_move.flip();
-                let (pawn_sq, origin_sq) = match self.side_to_move {
+                let them = self.position.side_to_move.flip();
+                let (pawn_sq, origin_sq) = match self.position.side_to_move {
                     Color::White => (
                         Square::from_index(sq as i8 - 8),
                         Square::from_index(sq as i8 + 8),
@@ -858,7 +862,7 @@ impl Board {
 
         // 6. The side that just moved must not be in check.
         if policy != FenPolicy::AllowImpossibleCheck {
-            let just_moved = self.side_to_move.flip();
+            let just_moved = self.position.side_to_move.flip();
             if !self.compute_checkers(just_moved).is_empty() {
                 errors |= ValidationErrors::OPPOSITE_CHECK;
             }
@@ -878,7 +882,7 @@ impl Board {
     /// allocation-free equivalent of serializing and re-parsing this FEN.
     #[must_use]
     pub fn fen(&self) -> String {
-        self.write_fen(self.ep_square)
+        self.write_fen(self.position.ep_square)
     }
 
     /// Serialize the board to a FEN string with the selected en-passant policy.
@@ -890,7 +894,7 @@ impl Board {
     #[must_use]
     pub fn fen_with(&self, mode: EnPassantMode) -> String {
         match mode {
-            EnPassantMode::Always => self.write_fen(self.ep_square),
+            EnPassantMode::Always => self.write_fen(self.position.ep_square),
             EnPassantMode::Legal => self.write_fen(self.legal_ep_square()),
         }
     }
@@ -921,26 +925,26 @@ impl Board {
         }
 
         fen.push(' ');
-        fen.push(match self.side_to_move {
+        fen.push(match self.position.side_to_move {
             Color::White => 'w',
             Color::Black => 'b',
         });
 
         fen.push(' ');
         let mut has_castling = false;
-        if self.castling_rights & WK_CASTLE != 0 {
+        if self.position.castling_rights & WK_CASTLE != 0 {
             fen.push('K');
             has_castling = true;
         }
-        if self.castling_rights & WQ_CASTLE != 0 {
+        if self.position.castling_rights & WQ_CASTLE != 0 {
             fen.push('Q');
             has_castling = true;
         }
-        if self.castling_rights & BK_CASTLE != 0 {
+        if self.position.castling_rights & BK_CASTLE != 0 {
             fen.push('k');
             has_castling = true;
         }
-        if self.castling_rights & BQ_CASTLE != 0 {
+        if self.position.castling_rights & BQ_CASTLE != 0 {
             fen.push('q');
             has_castling = true;
         }
@@ -955,7 +959,7 @@ impl Board {
         }
 
         fen.push(' ');
-        fen.push_str(&self.rule50.to_string());
+        fen.push_str(&self.position.rule50.to_string());
         fen.push(' ');
         fen.push_str(&self.fullmove_number().to_string());
 
@@ -972,11 +976,11 @@ impl Board {
                 h ^= crate::zobrist::ZOBRIST.piece[sq_idx][raw];
             }
         }
-        if self.side_to_move == Color::Black {
+        if self.position.side_to_move == Color::Black {
             h ^= crate::zobrist::ZOBRIST.side;
         }
-        h ^= crate::zobrist::ZOBRIST.castling[self.castling_rights as usize];
-        if let Some(sq) = self.ep_square {
+        h ^= crate::zobrist::ZOBRIST.castling[self.position.castling_rights as usize];
+        if let Some(sq) = self.position.ep_square {
             h ^= crate::zobrist::ZOBRIST.ep[crate::types::file_of(sq) as usize];
         }
         h
@@ -1013,12 +1017,14 @@ impl Board {
 
         let mut board = Board {
             squares,
-            by_color,
-            by_type,
-            side_to_move,
-            castling_rights,
-            ep_square,
-            rule50,
+            position: PositionView::from_parts(
+                by_color,
+                by_type,
+                side_to_move,
+                ep_square,
+                castling_rights,
+                rule50,
+            ),
             game_ply,
             hash: 0,
         };
@@ -1077,38 +1083,47 @@ impl Board {
     #[inline(always)]
     #[must_use]
     pub fn occupied(&self) -> Bitboard {
-        self.by_color[0] | self.by_color[1]
+        self.position.by_color[0] | self.position.by_color[1]
     }
 
     /// Return all pieces of a given color.
     #[inline(always)]
     pub fn pieces_color(&self, c: Color) -> Bitboard {
-        self.by_color[c as usize]
+        self.position.by_color[c as usize]
     }
 
     /// Return all pieces of a given type.
     #[inline(always)]
     pub fn pieces_pt(&self, pt: PieceType) -> Bitboard {
-        self.by_type[pt as usize]
+        self.position.by_type[pt as usize]
     }
 
     /// Return all pieces of a given color and type.
     #[inline(always)]
     pub fn pieces_color_pt(&self, c: Color, pt: PieceType) -> Bitboard {
-        self.by_color[c as usize] & self.by_type[pt as usize]
+        self.position.by_color[c as usize] & self.position.by_type[pt as usize]
     }
 
     /// Return the side to move.
     #[inline]
     #[must_use]
     pub fn side_to_move(&self) -> Color {
-        self.side_to_move
+        self.position.side_to_move
+    }
+
+    /// Borrow the rule view of this position.
+    ///
+    /// This is how the board, the move generator, and the effect path share one
+    /// rules implementation without copying the placement.
+    #[inline(always)]
+    pub(crate) fn position_view(&self) -> &PositionView {
+        &self.position
     }
 
     /// Return the castling rights bitmask.
     #[must_use]
     pub fn castling_rights(&self) -> u8 {
-        self.castling_rights
+        self.position.castling_rights
     }
 
     /// Return `true` when `color` still has the castling right for `side`.
@@ -1120,7 +1135,7 @@ impl Board {
             (Color::Black, CastlingSide::KingSide) => BK_CASTLE,
             (Color::Black, CastlingSide::QueenSide) => BQ_CASTLE,
         };
-        self.castling_rights & bit != 0
+        self.position.castling_rights & bit != 0
     }
 
     /// Return the stored en-passant target square, if any.
@@ -1131,7 +1146,7 @@ impl Board {
     /// one legal en-passant capture actually attacks.
     #[must_use]
     pub fn ep_square(&self) -> Option<Square> {
-        self.ep_square
+        self.position.ep_square
     }
 
     /// Return the stored en-passant target, but only when at least one fully
@@ -1144,14 +1159,14 @@ impl Board {
     /// without an en-passant target return `None`.
     #[must_use]
     pub fn legal_ep_square(&self) -> Option<Square> {
-        let ep = self.ep_square?;
+        let ep = self.position.ep_square?;
         let mut state = StateInfo::new();
         self.populate_state(&mut state);
         if state.commoners_count == 0 || state.them_commoners_count == 0 {
             return None;
         }
 
-        let us = self.side_to_move;
+        let us = self.position.side_to_move;
         let them = us.flip();
         // Attack tables are symmetric, so this is the set of squares from which
         // one of our pawns attacks the ep target.
@@ -1176,7 +1191,7 @@ impl Board {
     #[inline]
     #[must_use]
     pub fn rule50(&self) -> u16 {
-        self.rule50
+        self.position.rule50
     }
 
     /// Return the raw per-ply move counter (1-based).
@@ -1207,8 +1222,8 @@ impl Board {
     #[must_use]
     pub fn null_for(&self, attacker: Color) -> Board {
         let mut board = self.clone();
-        board.side_to_move = attacker;
-        board.ep_square = None;
+        board.position.side_to_move = attacker;
+        board.position.ep_square = None;
         // Match the FEN round-trip: the fullmove number is preserved and the
         // game ply is derived from the new side to move. Saturating arithmetic
         // keeps an extreme fullmove number from overflowing in debug builds.
@@ -1261,7 +1276,7 @@ impl Board {
     pub fn hash_with(&self, mode: EnPassantMode) -> u64 {
         match mode {
             EnPassantMode::Always => self.hash,
-            EnPassantMode::Legal => match self.ep_square {
+            EnPassantMode::Legal => match self.position.ep_square {
                 Some(sq) if self.legal_ep_square().is_none() => {
                     self.hash ^ crate::zobrist::ZOBRIST.ep[file_of(sq) as usize]
                 }
@@ -1310,7 +1325,7 @@ impl Board {
     #[must_use]
     pub fn hash_and_rule50_after(&self, m: Move) -> (u64, u16) {
         if m.move_type() == MoveType::Castling {
-            return (self.hash_after_castling(m), self.rule50 + 1);
+            return (self.hash_after_castling(m), self.position.rule50 + 1);
         }
         let class = self.classify_move(m);
         (
@@ -1322,7 +1337,7 @@ impl Board {
     /// Castling branch of [`hash_after`](Self::hash_after); castling never
     /// captures and never changes the en-passant file.
     fn hash_after_castling(&self, m: Move) -> u64 {
-        let us = self.side_to_move;
+        let us = self.position.side_to_move;
         let from = m.from_sq();
         let to = m.to_sq();
 
@@ -1335,14 +1350,14 @@ impl Board {
             ^ piece_key(kto, commoner)
             ^ piece_key(rfrom, rook)
             ^ piece_key(rto, rook);
-        let new_rights = self.castling_rights
+        let new_rights = self.position.castling_rights
             & match us {
                 Color::White => !(WK_CASTLE | WQ_CASTLE),
                 Color::Black => !(BK_CASTLE | BQ_CASTLE),
             };
-        h ^= crate::zobrist::ZOBRIST.castling[self.castling_rights as usize];
+        h ^= crate::zobrist::ZOBRIST.castling[self.position.castling_rights as usize];
         h ^= crate::zobrist::ZOBRIST.castling[new_rights as usize];
-        if let Some(sq) = self.ep_square {
+        if let Some(sq) = self.position.ep_square {
             h ^= crate::zobrist::ZOBRIST.ep[file_of(sq) as usize];
         }
         h
@@ -1371,7 +1386,7 @@ impl Board {
     /// Hash branch of [`hash_after`](Self::hash_after) for an already
     /// classified non-castling move.
     fn hash_after_classified(&self, m: Move, class: MoveClass) -> u64 {
-        let us = self.side_to_move;
+        let us = self.position.side_to_move;
         let from = m.from_sq();
         let to = m.to_sq();
         let piece = class.piece;
@@ -1389,7 +1404,7 @@ impl Board {
 
         if is_capture_or_ep {
             occupied = self.occupied();
-            pawns = self.by_type[PieceType::Pawn as usize];
+            pawns = self.position.by_type[PieceType::Pawn as usize];
             if m.move_type() == MoveType::EnPassant {
                 let ep_cap = match us {
                     Color::White => Square::from_index(to as i8 - 8),
@@ -1502,23 +1517,29 @@ impl Board {
                     self.squares[Square::E8 as usize]
                 },
             ];
-            castling_rights_after(self.castling_rights, from, to, true, &post_blast)
+            castling_rights_after(self.position.castling_rights, from, to, true, &post_blast)
         } else if is_capture_or_ep {
             // No castling-relevant square touched: rights unchanged.
-            self.castling_rights
+            self.position.castling_rights
         } else if (from_bb | to_bb) & BB_FIRST_LAST_RANK == Bitboard::EMPTY {
             // A quiet move touching neither back rank cannot change rights.
-            self.castling_rights
+            self.position.castling_rights
         } else {
-            castling_rights_after(self.castling_rights, from, to, false, &[NO_PIECE; 6])
+            castling_rights_after(
+                self.position.castling_rights,
+                from,
+                to,
+                false,
+                &[NO_PIECE; 6],
+            )
         };
-        if new_rights != self.castling_rights {
-            h ^= crate::zobrist::ZOBRIST.castling[self.castling_rights as usize];
+        if new_rights != self.position.castling_rights {
+            h ^= crate::zobrist::ZOBRIST.castling[self.position.castling_rights as usize];
             h ^= crate::zobrist::ZOBRIST.castling[new_rights as usize];
         }
 
         // En-passant square transition: old file out, new file in.
-        if let Some(sq) = self.ep_square {
+        if let Some(sq) = self.position.ep_square {
             h ^= crate::zobrist::ZOBRIST.ep[file_of(sq) as usize];
         }
         if is_pawn && (to as i8 - from as i8).abs() == 16 {
@@ -1586,7 +1607,7 @@ impl Board {
     #[must_use]
     pub fn rule50_after(&self, m: Move) -> u16 {
         if m.move_type() == MoveType::Castling {
-            return self.rule50 + 1;
+            return self.position.rule50 + 1;
         }
         self.rule50_after_classified(self.classify_move(m))
     }
@@ -1597,7 +1618,7 @@ impl Board {
         if class.is_pawn || class.is_capture {
             0
         } else {
-            self.rule50 + 1
+            self.position.rule50 + 1
         }
     }
 
@@ -1739,59 +1760,7 @@ impl Board {
     /// One precedence implementation shared by every `terminal*` query and,
     /// through [`outcome_impl`](Self::outcome_impl), by every `outcome*` query.
     fn terminal_impl(&self, state: &StateInfo, moves_exist: Option<bool>) -> Option<Terminal> {
-        if state.commoners_count == 0 {
-            return Some(Terminal {
-                outcome: Outcome::Loss,
-                reason: TerminalReason::Extinction,
-            });
-        }
-        if state.them_commoners_count == 0 {
-            return Some(Terminal {
-                outcome: Outcome::Win,
-                reason: TerminalReason::Extinction,
-            });
-        }
-        if self.is_material_draw() {
-            return Some(Terminal {
-                outcome: Outcome::Draw,
-                reason: TerminalReason::MaterialDraw,
-            });
-        }
-
-        // The clock is a draw without movegen when there is no check. When the
-        // side to move is in check, mate outranks the clock, so resolve the
-        // existence question first (Fairy-Stockfish's `!checkers() || legal`
-        // guard).
-        if self.rule50 >= 100 && state.checkers.is_empty() {
-            return Some(Terminal {
-                outcome: Outcome::Draw,
-                reason: TerminalReason::FiftyMoveRule,
-            });
-        }
-
-        let moves_exist =
-            moves_exist.unwrap_or_else(|| crate::movegen::has_legal_move_with_state(self, state));
-
-        if !moves_exist {
-            return Some(if state.checkers.is_empty() {
-                Terminal {
-                    outcome: Outcome::Draw,
-                    reason: TerminalReason::Stalemate,
-                }
-            } else {
-                Terminal {
-                    outcome: Outcome::Loss,
-                    reason: TerminalReason::NoMovesInCheck,
-                }
-            });
-        }
-        if self.rule50 >= 100 {
-            return Some(Terminal {
-                outcome: Outcome::Draw,
-                reason: TerminalReason::FiftyMoveRule,
-            });
-        }
-        None
+        crate::position::terminal_in_view(self.position_view(), state, moves_exist)
     }
 
     /// Return `true` if both colors have exactly one commoner and no other
@@ -1809,9 +1778,7 @@ impl Board {
     /// other piece on the board do not.
     #[must_use]
     pub fn is_material_draw(&self) -> bool {
-        self.occupied().count() == 2
-            && self.commoners(Color::White).count() == 1
-            && self.commoners(Color::Black).count() == 1
+        self.position_view().is_material_draw()
     }
 
     /// Return `true` if the game is literally over.
@@ -1829,9 +1796,9 @@ impl Board {
     pub fn is_terminal(&self) -> bool {
         let mut state = StateInfo::new();
         self.populate_state(&mut state);
-        self.commoners(self.side_to_move).is_empty()
-            || self.commoners(self.side_to_move.flip()).is_empty()
-            || self.rule50 >= 100
+        self.commoners(self.position.side_to_move).is_empty()
+            || self.commoners(self.position.side_to_move.flip()).is_empty()
+            || self.position.rule50 >= 100
             || !crate::movegen::has_legal_move_with_state(self, &state)
     }
 
@@ -1869,13 +1836,10 @@ impl Board {
     /// `{ let mut b = self.clone(); b.do_move(m, &mut st); b.outcome() }`, and
     /// for every illegal `m` it returns `None`.
     ///
-    /// Immediate extinction (the move's blast removes the enemy commoner) and
-    /// the decisions that need no move generation are answered from the move's
-    /// effect. A position where the child could still be decided by the
-    /// absence of a legal move (checkmate or stalemate) falls back to a cloned
-    /// board and [`outcome`](Self::outcome); the fallback is an implementation
-    /// detail and may disappear once a child-view generator can prove
-    /// “no legal move” without a board write.
+    /// `None` is therefore ambiguous: it means *illegal* **or** *undecided*
+    /// (the child is not decided, so the game continues). Use
+    /// [`EffectContext::is_legal`](crate::effects::EffectContext::is_legal) and
+    /// [`terminal_after`](Self::terminal_after) to tell the two apart.
     ///
     /// `state` must be populated for this board. This is a convenience wrapper
     /// for [`EffectContext::outcome_after`](crate::effects::EffectContext::outcome_after)
@@ -1885,12 +1849,32 @@ impl Board {
         self.effect_context_with_state(state).outcome_after(self, m)
     }
 
+    /// Return the terminal state of the child position after `m` **without
+    /// building the child**, from the child side-to-move perspective.
+    ///
+    /// `None` means the child is not decided. For every **pseudo-legal** `m`
+    /// this returns exactly
+    /// `{ let mut b = self.clone(); b.do_move(m, &mut st); b.terminal() }`, with
+    /// the same precedence as [`terminal`](Self::terminal) (extinction →
+    /// material draw → no legal moves → clock). Legality is **not** checked: a
+    /// pseudo-legal move that explodes the mover's commoner has an extinct
+    /// child and is reported as such.
+    ///
+    /// `state` must be populated for this board. This is a convenience wrapper
+    /// for
+    /// [`EffectContext::terminal_after`](crate::effects::EffectContext::terminal_after)
+    /// for callers that do not keep a context.
+    #[must_use]
+    pub fn terminal_after(&self, m: Move, state: &StateInfo) -> Option<Terminal> {
+        self.effect_context_with_state(state)
+            .terminal_after(self, m)
+    }
+
     /// Return `true` if `m` is a capture on this board.
     #[inline]
     #[must_use]
     pub fn is_capture(&self, m: Move) -> bool {
-        m.move_type() == MoveType::EnPassant
-            || (m.move_type() != MoveType::Castling && self.piece_on(m.to_sq()) != NO_PIECE)
+        self.position_view().is_capture(m)
     }
 
     /// Return the full 3×3 atomic blast area centered on `sq`: the square
@@ -1923,74 +1907,7 @@ impl Board {
     /// calls `do_move` nor allocates.
     #[must_use]
     pub fn blast_casualties(&self, m: Move) -> BlastCasualties {
-        let mut casualties = BlastCasualties::default();
-        if m.move_type() == MoveType::Castling || !self.is_capture(m) {
-            return casualties;
-        }
-
-        let us = self.side_to_move;
-        let from = m.from_sq();
-        let to = m.to_sq();
-        let piece = self.piece_on(from);
-        let Some(pt) = piece.type_of() else {
-            return casualties;
-        };
-
-        let to_bb = Bitboard::square_bb(to);
-        let from_bb = Bitboard::square_bb(from);
-        // Simulated post-capture, pre-blast occupancy and pawns, matching the
-        // state `do_move` uses when it builds the blast set.
-        let mut occupied = self.occupied();
-        let mut pawns = self.by_type[PieceType::Pawn as usize];
-
-        if m.move_type() == MoveType::EnPassant {
-            let victim = match us {
-                Color::White => Square::from_index(to as i8 - 8),
-                Color::Black => Square::from_index(to as i8 + 8),
-            };
-            let victim_bb = Bitboard::square_bb(victim);
-            match us.flip() {
-                Color::White => casualties.white = casualties.white | victim_bb,
-                Color::Black => casualties.black = casualties.black | victim_bb,
-            }
-            casualties.en_passant_victim = Some(victim);
-            occupied = occupied & !victim_bb;
-            pawns = pawns & !victim_bb;
-        } else {
-            // A normal capture always has a piece on the destination.
-            let victim_color = self.piece_on(to).color().unwrap();
-            match victim_color {
-                Color::White => casualties.white = casualties.white | to_bb,
-                Color::Black => casualties.black = casualties.black | to_bb,
-            }
-            occupied = occupied & !to_bb;
-            pawns = pawns & !to_bb;
-        }
-
-        // Relocate the capturer, applying a promotion if any.
-        occupied = (occupied & !from_bb) | to_bb;
-        if m.move_type() == MoveType::Promotion {
-            pawns = pawns & !from_bb;
-        } else if pt == PieceType::Pawn {
-            pawns = (pawns & !from_bb) | to_bb;
-        }
-
-        let area = Self::blast_zone(to) & !pawns;
-        let mut removed = (area & occupied) | to_bb;
-        while !removed.is_empty() {
-            let sq = removed.pop_lsb();
-            let victim_color = if sq == to {
-                us
-            } else {
-                self.piece_on(sq).color().unwrap()
-            };
-            match victim_color {
-                Color::White => casualties.white = casualties.white | Bitboard::square_bb(sq),
-                Color::Black => casualties.black = casualties.black | Bitboard::square_bb(sq),
-            }
-        }
-
-        casualties
+        self.position_view().blast_casualties(m)
     }
 
     /// Return `true` when `m` resets the half-move clock.
@@ -2036,7 +1953,7 @@ impl Board {
         let from = m.from_sq();
         let to = m.to_sq();
         let piece = self.piece_on(from);
-        if piece.color() != Some(self.side_to_move)
+        if piece.color() != Some(self.position.side_to_move)
             || piece.type_of() != Some(PieceType::Pawn)
             || file_of(from) != file_of(to)
             || (to as i8 - from as i8).abs() != 16
@@ -2065,25 +1982,25 @@ impl Board {
 
         // Knight attacks
         let knight_atk = attacks::knight_attacks(sq);
-        attackers = attackers | (knight_atk & (self.by_type[PieceType::Knight as usize]));
+        attackers = attackers | (knight_atk & (self.position.by_type[PieceType::Knight as usize]));
 
         // Bishop/Queen attacks
         let bishop_atk = attacks::bishop_attacks(sq, occupied);
         attackers = attackers
             | (bishop_atk
-                & (self.by_type[PieceType::Bishop as usize]
-                    | self.by_type[PieceType::Queen as usize]));
+                & (self.position.by_type[PieceType::Bishop as usize]
+                    | self.position.by_type[PieceType::Queen as usize]));
 
         // Rook/Queen attacks
         let rook_atk = attacks::rook_attacks(sq, occupied);
         attackers = attackers
             | (rook_atk
-                & (self.by_type[PieceType::Rook as usize]
-                    | self.by_type[PieceType::Queen as usize]));
+                & (self.position.by_type[PieceType::Rook as usize]
+                    | self.position.by_type[PieceType::Queen as usize]));
 
         // Commoner (king) attacks
         let king_atk = attacks::king_attacks(sq);
-        attackers = attackers | (king_atk & self.by_type[PieceType::Commoner as usize]);
+        attackers = attackers | (king_atk & self.position.by_type[PieceType::Commoner as usize]);
 
         attackers
     }
@@ -2097,75 +2014,17 @@ impl Board {
     }
 
     pub(crate) fn compute_checkers(&self, us: Color) -> Bitboard {
-        let them = us.flip();
-        let commoners = self.commoners(us);
-        let them_commoners = self.commoners(them);
-
-        // Legal atomic positions have at most one commoner per side. If either
-        // side has none, the game is already over, so there is no check.
-        if commoners.is_empty() || them_commoners.is_empty() {
-            return Bitboard::EMPTY;
-        }
-        let ksq = commoners.lsb();
-
-        // The two commoners are the sides' only commoners. If they touch,
-        // neither may capture the other: the blast would destroy the
-        // capturer's own commoner. No other enemy piece can capture ours
-        // either, because that blast would also destroy the enemy's only
-        // commoner. Touching therefore makes our commoner immune to *all*
-        // attacks, so it is not in check.
-        if !(them_commoners & attacks::king_attacks(ksq)).is_empty() {
-            return Bitboard::EMPTY;
-        }
-
-        let occupied = self.occupied();
-        let them_bb = self.pieces_color(them);
-        let rook_atk = attacks::rook_attacks(ksq, occupied);
-        let bishop_atk = attacks::bishop_attacks(ksq, occupied);
-        let queen_atk = rook_atk | bishop_atk;
-
-        (rook_atk & self.by_type[PieceType::Rook as usize] & them_bb)
-            | (bishop_atk & self.by_type[PieceType::Bishop as usize] & them_bb)
-            | (queen_atk & self.by_type[PieceType::Queen as usize] & them_bb)
-            | (attacks::knight_attacks(ksq) & self.by_type[PieceType::Knight as usize] & them_bb)
-            | (attacks::pawn_attacks(us, ksq) & self.by_type[PieceType::Pawn as usize] & them_bb)
+        self.position_view().checkers(us)
     }
 
     /// Return the bitboard of enemy pieces checking the side to move.
     #[must_use]
     pub fn checkers(&self) -> Bitboard {
-        self.compute_checkers(self.side_to_move)
+        self.compute_checkers(self.position.side_to_move)
     }
 
     pub(crate) fn compute_pinned(&self, us: Color) -> Bitboard {
-        let mut pinned = Bitboard::EMPTY;
-        let commoners = self.commoners(us);
-        let them = us.flip();
-        let occupied = self.occupied();
-
-        let mut c_iter = commoners;
-        while !c_iter.is_empty() {
-            let ksq = c_iter.pop_lsb();
-
-            let mut snipers = ((self.by_type[PieceType::Rook as usize]
-                | self.by_type[PieceType::Queen as usize])
-                & attacks::rook_attacks(ksq, Bitboard::EMPTY))
-                | ((self.by_type[PieceType::Bishop as usize]
-                    | self.by_type[PieceType::Queen as usize])
-                    & attacks::bishop_attacks(ksq, Bitboard::EMPTY));
-            snipers = snipers & self.pieces_color(them);
-
-            let mut s = snipers;
-            while !s.is_empty() {
-                let sniper_sq = s.pop_lsb();
-                let between = between_bb(ksq, sniper_sq) & occupied;
-                if between.count() == 1 {
-                    pinned = pinned | (between & self.pieces_color(us));
-                }
-            }
-        }
-
-        pinned
+        self.position_view().pinned(us)
     }
 
     /// Return the bitboard of pieces of the given color that are pinned
@@ -2177,11 +2036,12 @@ impl Board {
 
     /// Fill cached state fields (checkers, pinned, commoner counts) for the
     /// current position so that `legal()` can read them instead of recomputing.
+    ///
+    /// The computation lives on the crate-private position view, so the same
+    /// code populates the state of a child position that is derived from
+    /// bitboards.
     pub fn populate_state(&self, state: &mut StateInfo) {
-        state.checkers = self.compute_checkers(self.side_to_move);
-        state.pinned = self.compute_pinned(self.side_to_move);
-        state.commoners_count = self.commoners(self.side_to_move).count();
-        state.them_commoners_count = self.commoners(self.side_to_move.flip()).count();
+        self.position_view().populate_state(state);
     }
 
     /// Make `m` on the board, storing undo information in `state`.
@@ -2197,14 +2057,14 @@ impl Board {
     /// populated `StateInfo`.
     pub fn do_move(&mut self, m: Move, state: &mut StateInfo) {
         state.hash = self.hash;
-        state.castling_rights = self.castling_rights;
-        state.ep_square = self.ep_square;
-        state.rule50 = self.rule50;
+        state.castling_rights = self.position.castling_rights;
+        state.ep_square = self.position.ep_square;
+        state.rule50 = self.position.rule50;
         state.captured_count = 0;
         state.cap_sq = None;
         state.cap_piece = NO_PIECE;
 
-        let us = self.side_to_move;
+        let us = self.position.side_to_move;
         let them = us.flip();
         let from = m.from_sq();
         let to = m.to_sq();
@@ -2229,13 +2089,13 @@ impl Board {
                 us,
                 PieceType::Rook,
             );
-            self.castling_rights &= match us {
+            self.position.castling_rights &= match us {
                 Color::White => !(WK_CASTLE | WQ_CASTLE),
                 Color::Black => !(BK_CASTLE | BQ_CASTLE),
             };
-            self.ep_square = None;
-            self.rule50 += 1;
-            self.side_to_move = them;
+            self.position.ep_square = None;
+            self.position.rule50 += 1;
+            self.position.side_to_move = them;
             self.game_ply += 1;
             self.update_hash_state_transition(state);
             return;
@@ -2272,7 +2132,8 @@ impl Board {
         // Blast on capture
         if is_capture_or_ep {
             // Blast zone = king attacks from `to`, minus pawn squares
-            let blast_zone = attacks::king_attacks(to) & !self.by_type[PieceType::Pawn as usize];
+            let blast_zone =
+                attacks::king_attacks(to) & !self.position.by_type[PieceType::Pawn as usize];
             let mut to_blast = blast_zone & self.occupied();
 
             // Always blast the capturer at ground zero (pawns are NOT immune at `to`).
@@ -2304,8 +2165,8 @@ impl Board {
             self.squares[Square::A8 as usize],
             self.squares[Square::E8 as usize],
         ];
-        self.castling_rights = castling_rights_after(
-            self.castling_rights,
+        self.position.castling_rights = castling_rights_after(
+            self.position.castling_rights,
             from,
             to,
             is_capture_or_ep,
@@ -2313,21 +2174,21 @@ impl Board {
         );
 
         if pt == PieceType::Pawn && (to as i8 - from as i8).abs() == 16 {
-            self.ep_square = Some(match us {
+            self.position.ep_square = Some(match us {
                 Color::White => Square::from_index(from as i8 + 8),
                 Color::Black => Square::from_index(from as i8 - 8),
             });
         } else {
-            self.ep_square = None;
+            self.position.ep_square = None;
         }
 
         if pt == PieceType::Pawn || is_capture {
-            self.rule50 = 0;
+            self.position.rule50 = 0;
         } else {
-            self.rule50 += 1;
+            self.position.rule50 += 1;
         }
 
-        self.side_to_move = them;
+        self.position.side_to_move = them;
         self.game_ply += 1;
         self.update_hash_state_transition(state);
     }
@@ -2337,12 +2198,12 @@ impl Board {
     /// `state` must be the same [`StateInfo`] that was passed to `do_move`. It
     /// is used only for undo data; cached attack fields are not restored.
     pub fn undo_move(&mut self, m: Move, state: &StateInfo) {
-        self.castling_rights = state.castling_rights;
-        self.ep_square = state.ep_square;
-        self.rule50 = state.rule50;
+        self.position.castling_rights = state.castling_rights;
+        self.position.ep_square = state.ep_square;
+        self.position.rule50 = state.rule50;
 
-        self.side_to_move = self.side_to_move.flip();
-        let us = self.side_to_move;
+        self.position.side_to_move = self.position.side_to_move.flip();
+        let us = self.position.side_to_move;
         let from = m.from_sq();
         let to = m.to_sq();
 
@@ -2408,8 +2269,8 @@ impl Board {
         let from_bb = Bitboard::square_bb(from);
         let to_bb = Bitboard::square_bb(to);
 
-        self.by_color[c as usize] = (self.by_color[c as usize] ^ from_bb) | to_bb;
-        self.by_type[pt as usize] = (self.by_type[pt as usize] ^ from_bb) | to_bb;
+        self.position.by_color[c as usize] = (self.position.by_color[c as usize] ^ from_bb) | to_bb;
+        self.position.by_type[pt as usize] = (self.position.by_type[pt as usize] ^ from_bb) | to_bb;
     }
 
     #[inline]
@@ -2421,8 +2282,8 @@ impl Board {
 
         self.squares[sq as usize] = NO_PIECE;
         let sq_bb = Bitboard::square_bb(sq);
-        self.by_color[c as usize] = self.by_color[c as usize] ^ sq_bb;
-        self.by_type[pt as usize] = self.by_type[pt as usize] ^ sq_bb;
+        self.position.by_color[c as usize] = self.position.by_color[c as usize] ^ sq_bb;
+        self.position.by_type[pt as usize] = self.position.by_type[pt as usize] ^ sq_bb;
     }
 
     #[inline]
@@ -2433,8 +2294,8 @@ impl Board {
 
         self.squares[sq as usize] = piece;
         let sq_bb = Bitboard::square_bb(sq);
-        self.by_color[c as usize] = self.by_color[c as usize] | sq_bb;
-        self.by_type[pt as usize] = self.by_type[pt as usize] | sq_bb;
+        self.position.by_color[c as usize] = self.position.by_color[c as usize] | sq_bb;
+        self.position.by_type[pt as usize] = self.position.by_type[pt as usize] | sq_bb;
     }
 
     /// Toggle the Zobrist hash for a change in side to move, castling rights,
@@ -2446,11 +2307,11 @@ impl Board {
     fn update_hash_state_transition(&mut self, state: &StateInfo) {
         self.hash ^= crate::zobrist::ZOBRIST.side;
         self.hash ^= crate::zobrist::ZOBRIST.castling[state.castling_rights as usize];
-        self.hash ^= crate::zobrist::ZOBRIST.castling[self.castling_rights as usize];
+        self.hash ^= crate::zobrist::ZOBRIST.castling[self.position.castling_rights as usize];
         if let Some(sq) = state.ep_square {
             self.hash ^= crate::zobrist::ZOBRIST.ep[crate::types::file_of(sq) as usize];
         }
-        if let Some(sq) = self.ep_square {
+        if let Some(sq) = self.position.ep_square {
             self.hash ^= crate::zobrist::ZOBRIST.ep[crate::types::file_of(sq) as usize];
         }
     }
@@ -2467,6 +2328,11 @@ impl Board {
     /// `state` must contain up-to-date cached fields for the current position.
     /// A terminal board (either side has no commoner) has no legal moves.
     ///
+    /// The rule body lives on the crate-private position view, shared with the
+    /// move generator, the fast-legality ladder, the effect path, and the
+    /// effect context's child queries (which feed it a bitboard view of the
+    /// child instead of a board).
+    ///
     /// # Preconditions
     ///
     /// This is the low-level predicate used by the move generator. It assumes
@@ -2477,97 +2343,7 @@ impl Board {
     /// move shape first.
     #[must_use]
     pub fn legal(&self, m: Move, state: &StateInfo) -> bool {
-        // A board with only one commoner is terminal.
-        if state.commoners_count == 0 || state.them_commoners_count == 0 {
-            return false;
-        }
-
-        let from = m.from_sq();
-        let to = m.to_sq();
-        let us = self.side_to_move;
-        let them = us.flip();
-
-        let piece = self.piece_on(from);
-        if piece == NO_PIECE {
-            return false;
-        }
-
-        let is_capture = m.move_type() != MoveType::Castling
-            && (m.move_type() == MoveType::EnPassant || self.piece_on(to) != NO_PIECE);
-
-        if m.move_type() == MoveType::Castling {
-            let ksq = from;
-            let occupied = self.occupied();
-            let pass_through = if to > ksq {
-                [ksq, Square::from_index(ksq as i8 + 1)]
-            } else {
-                [Square::from_index(ksq as i8 - 1), ksq]
-            };
-            let enemy_commoners = self.commoners(them);
-            for &sq in &pass_through {
-                // A commoner adjacent to this square makes the commoner
-                // immune to every attack while it stands there.
-                if !(enemy_commoners & attacks::king_attacks(sq)).is_empty() {
-                    continue;
-                }
-                if square_attacked_by(self, sq, occupied, self.by_color[them as usize]) {
-                    return false;
-                }
-            }
-        }
-
-        let mut occupied = self.occupied() ^ Bitboard::square_bb(from);
-        let mut kto = to;
-
-        if m.move_type() == MoveType::Castling {
-            let (_, kto_actual, rfrom, rto) = castling_squares(us, to > from);
-            kto = kto_actual;
-            occupied = occupied ^ Bitboard::square_bb(rfrom);
-            occupied = occupied | Bitboard::square_bb(rto);
-        } else if m.move_type() == MoveType::EnPassant {
-            let capsq = match us {
-                Color::White => Square::from_index(to as i8 - 8),
-                Color::Black => Square::from_index(to as i8 + 8),
-            };
-            occupied = occupied & !Bitboard::square_bb(capsq);
-        }
-
-        occupied = occupied | Bitboard::square_bb(kto);
-
-        if is_capture {
-            let pre_pawns = self.by_type[PieceType::Pawn as usize];
-            let pre_non_pawns = self.occupied() ^ pre_pawns;
-            let blast_adjacent = attacks::king_attacks(kto) & pre_non_pawns;
-            occupied = occupied & !(blast_adjacent | Bitboard::square_bb(kto));
-        }
-
-        let pre_commoners = self.commoners(us);
-        let mut our_commoners = pre_commoners & occupied;
-
-        if !is_capture && piece == make_piece(us, PieceType::Commoner) {
-            our_commoners = our_commoners | Bitboard::square_bb(kto);
-        }
-
-        // A move may not destroy any of our commoners. In a legal position
-        // there is exactly one, so this is the usual self-explosion check.
-        if our_commoners.count() != pre_commoners.count() {
-            return false;
-        }
-
-        // Capturing the enemy's only commoner wins immediately; the mover's
-        // own commoner cannot be in check after the game has ended.
-        let enemy_commoners = self.commoners(them) & occupied;
-        if enemy_commoners.is_empty() {
-            return true;
-        }
-
-        let ksq = our_commoners.lsb();
-        // Touching the enemy commoner grants immunity to every attack.
-        if !(enemy_commoners & attacks::king_attacks(ksq)).is_empty() {
-            return true;
-        }
-
-        !square_attacked_by(self, ksq, occupied, self.by_color[them as usize] & occupied)
+        crate::position::legal_in_view(self.position_view(), m, state)
     }
 
     /// Check whether `m` is fully legal on this board.
@@ -2630,7 +2406,7 @@ impl Board {
             return false;
         }
 
-        let us = self.side_to_move;
+        let us = self.position.side_to_move;
         let piece = self.piece_on(from);
         if piece == NO_PIECE || piece.color() != Some(us) {
             return false;
@@ -2677,7 +2453,7 @@ impl Board {
     /// Pawn branch of [`is_pseudo_legal`](Self::is_pseudo_legal), mirroring
     /// the pawn generator exactly.
     fn is_pseudo_legal_pawn(&self, m: Move) -> bool {
-        let us = self.side_to_move;
+        let us = self.position.side_to_move;
         let them = us.flip();
         let from = m.from_sq();
         let to = m.to_sq();
@@ -2705,7 +2481,7 @@ impl Board {
                     Color::White => Rank::R6,
                     Color::Black => Rank::R3,
                 };
-                if to_rank != expected_rank || self.ep_square != Some(to) {
+                if to_rank != expected_rank || self.position.ep_square != Some(to) {
                     return false;
                 }
                 if (attacks_bb & Bitboard::square_bb(to)).is_empty() {
@@ -2751,7 +2527,7 @@ impl Board {
     /// encoded destination is the rook home square; attacked pass-through
     /// squares are deliberately left to [`legal`](Self::legal).
     fn is_pseudo_legal_castling(&self, from: Square, to: Square) -> bool {
-        let us = self.side_to_move;
+        let us = self.position.side_to_move;
         let (
             king_right,
             queen_right,
@@ -2792,7 +2568,7 @@ impl Board {
             return false;
         };
 
-        self.castling_rights & right != 0
+        self.position.castling_rights & right != 0
             && self.piece_on(king_sq) == make_piece(us, PieceType::Commoner)
             && self.piece_on(rook_sq) == make_piece(us, PieceType::Rook)
             && path_clear
@@ -2852,7 +2628,7 @@ impl Board {
     /// Map a normal-looking move onto the current en-passant target to the
     /// internal en-passant encoding.
     fn resolve_en_passant_uci(&self, m: Move) -> Option<Move> {
-        if m.move_type() != MoveType::Normal || self.ep_square != Some(m.to_sq()) {
+        if m.move_type() != MoveType::Normal || self.position.ep_square != Some(m.to_sq()) {
             return None;
         }
         Some(Move::make_enpassant(m.from_sq(), m.to_sq()))
@@ -3084,11 +2860,11 @@ impl Board {
 
         // 2. Castling, in both spelling variants (and only if it is legal).
         let castling_uci = match body {
-            "O-O" | "0-0" => Some(match self.side_to_move {
+            "O-O" | "0-0" => Some(match self.position.side_to_move {
                 Color::White => "e1g1",
                 Color::Black => "e8g8",
             }),
-            "O-O-O" | "0-0-0" => Some(match self.side_to_move {
+            "O-O-O" | "0-0-0" => Some(match self.position.side_to_move {
                 Color::White => "e1c1",
                 Color::Black => "e8c8",
             }),
@@ -3267,18 +3043,6 @@ fn write_sq(out: &mut impl fmt::Write, sq: Square) -> fmt::Result {
     out.write_char(rank_char(sq))
 }
 
-/// Return `true` if an enemy non-commoner piece attacks `sq` on `occupied`.
-///
-/// Mirrors the attacker categories of the previous private `attackers_to`
-/// helper, but exits at the first matching category. Commoner attacks are
-/// intentionally excluded; callers handle adjacent enemy commoners separately.
-#[inline(always)]
-fn square_attacked_by(board: &Board, sq: Square, occupied: Bitboard, enemy_bb: Bitboard) -> bool {
-    // `board.side_to_move` is the side whose commoner is being tested, which
-    // is the pawn direction the attack table needs.
-    is_attacked_by(sq, occupied, &board.by_type, enemy_bb, board.side_to_move)
-}
-
 /// Return `true` when the piece standing on `sq` is attacked by one of
 /// `attackers`.
 ///
@@ -3382,7 +3146,7 @@ fn piece_key(sq: Square, piece: Piece) -> u64 {
 /// `post_blast` holds the piece on H1, A1, E1, H8, A8, E8 *after* the move
 /// (blast removals included); when `is_capture` is set, rights whose rook or
 /// commoner no longer occupies its home square are dropped.
-fn castling_rights_after(
+pub(crate) fn castling_rights_after(
     old_rights: u8,
     from: Square,
     to: Square,
@@ -3481,6 +3245,8 @@ pub(crate) struct TrivialLegality {
     /// Squares that are neither own commoners nor pinned, or [`Bitboard::EMPTY`]
     /// when the side to move has no commoner left.
     safe_origins: Bitboard,
+    /// The node's occupancy, hoisted out of the per-candidate capture test.
+    occupied: Bitboard,
 }
 
 impl TrivialLegality {
@@ -3489,9 +3255,10 @@ impl TrivialLegality {
     /// All inputs are only read, so the resulting value stays valid for every
     /// candidate move of the node.
     #[inline(always)]
-    pub(crate) fn new(board: &Board, state: &StateInfo) -> Self {
+    pub(crate) fn new(view: &PositionView, state: &StateInfo) -> Self {
+        let us = view.side_to_move();
         debug_assert!(
-            state.commoners_count == 0 || !board.commoners(board.side_to_move()).is_empty(),
+            state.commoners_count == 0 || !view.commoners(us).is_empty(),
             "StateInfo.commoners_count disagrees with the board"
         );
         let safe_origins = if state.commoners_count == 0 {
@@ -3499,11 +3266,12 @@ impl TrivialLegality {
             // rejects all of them (matching the old `commoners_count == 0` guard).
             Bitboard::EMPTY
         } else {
-            !(board.commoners(board.side_to_move()) | state.pinned)
+            !(view.commoners(us) | state.pinned)
         };
         Self {
             checkers: state.checkers,
             safe_origins,
+            occupied: view.occupied(),
         }
     }
 
@@ -3513,7 +3281,7 @@ impl TrivialLegality {
     /// destination squares); this is a crate-private precondition, not an input
     /// validation point.
     #[inline(always)]
-    pub(crate) fn is_trivially_legal(&self, board: &Board, m: Move) -> bool {
+    pub(crate) fn is_trivially_legal(&self, m: Move) -> bool {
         debug_assert!(m != Move::NONE);
         if !self.checkers.is_empty() {
             return false; // in check: every move needs the full check
@@ -3521,7 +3289,7 @@ impl TrivialLegality {
         if m.needs_full_legal_check() {
             return false; // en passant and castling
         }
-        if board.squares[m.dest_index()] != NO_PIECE {
+        if self.occupied.contains(m.dest_index()) {
             return false; // capture
         }
         // Origin must be neither a commoner nor pinned.
@@ -3573,6 +3341,8 @@ pub(crate) struct WidenedLegality {
     their_commoners: Bitboard,
     /// Every occupied non-pawn square: the pieces a blast can destroy.
     non_pawns: Bitboard,
+    /// The node's occupancy.
+    occupied: Bitboard,
     /// Lazily computed aligned enemy sliders and their blockers.
     snipers: Cell<Option<(Bitboard, Bitboard)>>,
 }
@@ -3580,17 +3350,18 @@ pub(crate) struct WidenedLegality {
 impl WidenedLegality {
     /// Snapshot the node-constant placement data.
     ///
-    /// `board` must not change while the value is in use. Occupancy, the
+    /// `view` must not change while the value is in use. Occupancy, the
     /// per-type sets, and the pawn set of a node are fixed, so every field is
     /// valid for all candidates.
     #[inline(always)]
-    pub(crate) fn new(board: &Board) -> Self {
-        let us = board.side_to_move;
+    pub(crate) fn new(view: &PositionView) -> Self {
+        let us = view.side_to_move();
         let them = us.flip();
         Self {
-            our_commoners: board.commoners(us),
-            their_commoners: board.commoners(them),
-            non_pawns: board.occupied() & !board.by_type[PieceType::Pawn as usize],
+            our_commoners: view.commoners(us),
+            their_commoners: view.commoners(them),
+            non_pawns: view.occupied() & !view.pieces_pt(PieceType::Pawn),
+            occupied: view.occupied(),
             snipers: Cell::new(None),
         }
     }
@@ -3602,7 +3373,7 @@ impl WidenedLegality {
     /// `m` must come from the pseudo-legal generator (crate-private
     /// precondition, not an input validation point).
     #[inline(always)]
-    pub(crate) fn decide(&self, board: &Board, m: Move) -> Option<bool> {
+    pub(crate) fn decide(&self, view: &PositionView, m: Move) -> Option<bool> {
         debug_assert!(m != Move::NONE);
         let move_type = m.move_type();
         if move_type == MoveType::Castling {
@@ -3614,11 +3385,10 @@ impl WidenedLegality {
         let to = m.to_sq();
         let from_bb = Bitboard::square_bb(from);
         let to_bb = Bitboard::square_bb(to);
-        let is_capture =
-            move_type == MoveType::EnPassant || board.squares[m.dest_index()] != NO_PIECE;
+        let is_capture = move_type == MoveType::EnPassant || self.occupied.contains(m.dest_index());
 
         if !(self.our_commoners & from_bb).is_empty() {
-            return self.decide_commoner_move(board, from, to, is_capture);
+            return self.decide_commoner_move(view, from, to, is_capture);
         }
 
         // Every square the move empties.
@@ -3626,7 +3396,7 @@ impl WidenedLegality {
         if is_capture {
             emptied = emptied | to_bb | (attacks::king_attacks(to) & self.non_pawns);
             if move_type == MoveType::EnPassant {
-                let victim = match board.side_to_move {
+                let victim = match view.side_to_move() {
                     Color::White => Square::from_index(to as i8 - 8),
                     Color::Black => Square::from_index(to as i8 + 8),
                 };
@@ -3653,13 +3423,13 @@ impl WidenedLegality {
 
         // No piece blocking an enemy slider's ray to our commoner is emptied, so
         // the commoner stays as safe as it is now (checked by the caller).
-        let (snipers, sensitive) = self.sniper_data(board);
+        let (snipers, sensitive) = self.sniper_data(view);
         if (emptied & sensitive).is_empty() {
             return Some(true);
         }
         // A blocker on a sniper ray is emptied; the ray is still closed when the
         // sniper itself is removed or another blocker remains.
-        if self.rays_stay_closed(board, snipers, emptied) {
+        if self.rays_stay_closed(snipers, emptied) {
             return Some(true);
         }
         None
@@ -3669,7 +3439,7 @@ impl WidenedLegality {
     #[inline]
     fn decide_commoner_move(
         &self,
-        board: &Board,
+        view: &PositionView,
         from: Square,
         to: Square,
         is_capture: bool,
@@ -3689,14 +3459,13 @@ impl WidenedLegality {
         }
         // The one-square relocation empties `from` and fills `to`; the arrival
         // cannot block an attack on `to`, so only the origin matters.
-        let occupied_after =
-            (board.occupied() & !Bitboard::square_bb(from)) | Bitboard::square_bb(to);
-        let us = board.side_to_move;
+        let occupied_after = (self.occupied & !Bitboard::square_bb(from)) | Bitboard::square_bb(to);
+        let us = view.side_to_move();
         Some(!is_attacked_by(
             to,
             occupied_after,
-            &board.by_type,
-            board.pieces_color(us.flip()),
+            view.by_type(),
+            view.pieces_color(us.flip()),
             us,
         ))
     }
@@ -3704,12 +3473,12 @@ impl WidenedLegality {
     /// The node's aligned enemy sliders and the pieces blocking their rays,
     /// computed on first use.
     #[inline]
-    fn sniper_data(&self, board: &Board) -> (Bitboard, Bitboard) {
+    fn sniper_data(&self, view: &PositionView) -> (Bitboard, Bitboard) {
         if let Some(data) = self.snipers.get() {
             return data;
         }
         debug_assert_eq!(self.our_commoners.count(), 1);
-        let data = compute_sniper_data(board, self.our_commoners.lsb());
+        let data = compute_sniper_data(view, self.our_commoners.lsb());
         self.snipers.set(Some(data));
         data
     }
@@ -3721,8 +3490,8 @@ impl WidenedLegality {
     /// on the move's destination is not counted as a blocker. That is sound:
     /// the arrival can only close a ray, so ignoring it can only make a ray look
     /// more open, and an open ray falls back to [`Board::legal`].
-    fn rays_stay_closed(&self, board: &Board, snipers: Bitboard, emptied: Bitboard) -> bool {
-        let occupied = board.occupied();
+    fn rays_stay_closed(&self, snipers: Bitboard, emptied: Bitboard) -> bool {
+        let occupied = self.occupied;
         let ksq = self.our_commoners.lsb();
         let mut remaining = snipers & !emptied;
         while !remaining.is_empty() {
@@ -3744,16 +3513,14 @@ impl WidenedLegality {
 /// blast empties squares of either colour. A blocker square may block two
 /// snipers at once; [`WidenedLegality::rays_stay_closed`] resolves those cases
 /// per sniper.
-fn compute_sniper_data(board: &Board, ksq: Square) -> (Bitboard, Bitboard) {
-    let occupied = board.occupied();
-    let them_bb = board.pieces_color(board.side_to_move.flip());
+fn compute_sniper_data(view: &PositionView, ksq: Square) -> (Bitboard, Bitboard) {
+    let occupied = view.occupied();
+    let them_bb = view.pieces_color(view.side_to_move().flip());
     // Rook-lines and bishop-lines are disjoint for a single square, so a slider
     // is a sniper exactly when its own line type reaches `ksq`.
-    let orthogonal = (board.by_type[PieceType::Rook as usize]
-        | board.by_type[PieceType::Queen as usize])
+    let orthogonal = (view.pieces_pt(PieceType::Rook) | view.pieces_pt(PieceType::Queen))
         & attacks::rook_attacks(ksq, Bitboard::EMPTY);
-    let diagonal = (board.by_type[PieceType::Bishop as usize]
-        | board.by_type[PieceType::Queen as usize])
+    let diagonal = (view.pieces_pt(PieceType::Bishop) | view.pieces_pt(PieceType::Queen))
         & attacks::bishop_attacks(ksq, Bitboard::EMPTY);
     let snipers = (orthogonal | diagonal) & them_bb;
 
@@ -3790,9 +3557,9 @@ pub(crate) struct FastLegality {
 impl FastLegality {
     /// Derive the node-constant ladder data from a populated [`StateInfo`].
     #[inline(always)]
-    pub(crate) fn new(board: &Board, state: &StateInfo) -> Self {
+    pub(crate) fn new(view: &PositionView, state: &StateInfo) -> Self {
         Self {
-            trivial: TrivialLegality::new(board, state),
+            trivial: TrivialLegality::new(view, state),
             widened: OnceCell::new(),
             in_check: !state.checkers.is_empty(),
             playable: state.commoners_count != 0 && state.them_commoners_count != 0,
@@ -3805,25 +3572,25 @@ impl FastLegality {
     /// the same populated `state`. `m` must come from the pseudo-legal generator
     /// (crate-private precondition, not an input validation point).
     #[inline(always)]
-    pub(crate) fn is_legal(&self, board: &Board, m: Move, state: &StateInfo) -> bool {
+    pub(crate) fn is_legal(&self, view: &PositionView, m: Move, state: &StateInfo) -> bool {
         // The trivial quiet fast path stays a leaf: it accepts most candidates
         // without touching the widened state or the oracle.
-        self.trivial.is_trivially_legal(board, m) || self.is_legal_widened(board, m, state)
+        self.trivial.is_trivially_legal(m) || self.is_legal_widened(view, m, state)
     }
 
     /// The widened rules plus the oracle fallback.
-    fn is_legal_widened(&self, board: &Board, m: Move, state: &StateInfo) -> bool {
+    fn is_legal_widened(&self, view: &PositionView, m: Move, state: &StateInfo) -> bool {
         if !self.playable {
             // Terminal position: `Board::legal` rejects every move.
             return false;
         }
         if self.in_check {
-            return board.legal(m, state);
+            return crate::position::legal_in_view(view, m, state);
         }
-        let widened = self.widened.get_or_init(|| WidenedLegality::new(board));
-        match widened.decide(board, m) {
+        let widened = self.widened.get_or_init(|| WidenedLegality::new(view));
+        match widened.decide(view, m) {
             Some(verdict) => verdict,
-            None => board.legal(m, state),
+            None => crate::position::legal_in_view(view, m, state),
         }
     }
 }
@@ -3868,9 +3635,9 @@ impl fmt::Display for Board {
             writeln!(f)?;
         }
         writeln!(f, "   a b c d e f g h")?;
-        writeln!(f, "Side to move: {:?}", self.side_to_move)?;
-        writeln!(f, "Castling: {:b}", self.castling_rights)?;
-        writeln!(f, "EP: {:?}", self.ep_square)?;
+        writeln!(f, "Side to move: {:?}", self.position.side_to_move)?;
+        writeln!(f, "Castling: {:b}", self.position.castling_rights)?;
+        writeln!(f, "EP: {:?}", self.position.ep_square)?;
         writeln!(f, "FEN: {}", self.fen())?;
         Ok(())
     }
@@ -3888,7 +3655,7 @@ mod tests {
         assert_eq!(board.piece_on(Square::E8), B_COMMONER);
         assert_eq!(board.side_to_move(), Color::White);
         assert_eq!(
-            board.castling_rights,
+            board.castling_rights(),
             WK_CASTLE | WQ_CASTLE | BK_CASTLE | BQ_CASTLE
         );
     }
@@ -5553,14 +5320,14 @@ mod tests {
             let board = Board::from_fen(fen).unwrap();
             let mut state = StateInfo::new();
             board.populate_state(&mut state);
-            let trivial = TrivialLegality::new(&board, &state);
+            let trivial = TrivialLegality::new(board.position_view(), &state);
 
             let mut moves = MoveList::new();
             crate::movegen::generate_pseudo_legal(&board, &mut moves);
 
             for &m in moves.as_slice() {
                 assert_eq!(
-                    trivial.is_trivially_legal(&board, m),
+                    trivial.is_trivially_legal(m),
                     is_move_trivially_legal_reference(&board, m, &state),
                     "fast path diverged on FEN {fen}, move {m:?}"
                 );
@@ -5574,13 +5341,13 @@ mod tests {
             let board = Board::from_fen(fen).unwrap();
             let mut state = StateInfo::new();
             board.populate_state(&mut state);
-            let trivial = TrivialLegality::new(&board, &state);
+            let trivial = TrivialLegality::new(board.position_view(), &state);
 
             let mut moves = MoveList::new();
             crate::movegen::generate_pseudo_legal(&board, &mut moves);
 
             for &m in moves.as_slice() {
-                if trivial.is_trivially_legal(&board, m) {
+                if trivial.is_trivially_legal(m) {
                     assert!(
                         board.legal(m, &state),
                         "fast path accepted an illegal move on FEN {fen}, move {m:?}"
@@ -5604,7 +5371,7 @@ mod tests {
             let board = Board::from_fen(fen).unwrap();
             let mut state = StateInfo::new();
             board.populate_state(&mut state);
-            let trivial = TrivialLegality::new(&board, &state);
+            let trivial = TrivialLegality::new(board.position_view(), &state);
             if !state.checkers.is_empty() {
                 with_checkers += 1;
             }
@@ -5620,7 +5387,7 @@ mod tests {
                 with_special_moves += 1;
             }
             for &m in moves.as_slice() {
-                if trivial.is_trivially_legal(&board, m) {
+                if trivial.is_trivially_legal(m) {
                     accepted += 1;
                 } else {
                     rejected += 1;
@@ -5689,7 +5456,7 @@ mod tests {
     /// Written by scanning the board, deliberately unlike the bitboard-driven
     /// [`compute_sniper_data`], so a mistake in either finds the other.
     fn sniper_data_reference(board: &Board, ksq: Square) -> (Bitboard, Bitboard) {
-        let them = board.side_to_move.flip();
+        let them = board.side_to_move().flip();
         let mut snipers = Bitboard::EMPTY;
         let mut blockers = Bitboard::EMPTY;
         for idx in 0..64u8 {
@@ -5723,7 +5490,7 @@ mod tests {
     /// Mirrors [`WidenedLegality::decide`] decision for decision, so a future
     /// edit cannot silently change which moves the ladder accepts.
     fn widened_legality_reference(board: &Board, m: Move) -> Option<bool> {
-        let us = board.side_to_move;
+        let us = board.side_to_move();
         let them = us.flip();
         let our_commoners = board.commoners(us);
         let their_commoners = board.commoners(them);
@@ -5795,14 +5562,14 @@ mod tests {
             // rejects everything here.
             return;
         }
-        let widened = WidenedLegality::new(board);
+        let widened = WidenedLegality::new(board.position_view());
         let mut pseudo = MoveList::new();
         crate::movegen::generate_pseudo_legal(board, &mut pseudo);
         for &m in pseudo.as_slice() {
             // `decide` is only well-defined when the side to move is not in
             // check; the reference mirrors that precondition.
             let decided = if state.checkers.is_empty() {
-                widened.decide(board, m)
+                widened.decide(board.position_view(), m)
             } else {
                 None
             };
@@ -5830,13 +5597,13 @@ mod tests {
         }
 
         // The ladder as used by the generator must reproduce the legal list.
-        let fast = FastLegality::new(board, state);
+        let fast = FastLegality::new(board.position_view(), state);
         let mut legal = MoveList::new();
         crate::movegen::generate_legal_with_state(board, state, &mut legal);
         let expected = |m: Move| legal.as_slice().contains(&m);
         for &m in pseudo.as_slice() {
             assert_eq!(
-                fast.is_legal(board, m, state),
+                fast.is_legal(board.position_view(), m, state),
                 expected(m),
                 "FastLegality disagrees with the legal list on {} at {}",
                 m.to_uci(),
@@ -5912,7 +5679,11 @@ mod tests {
         board.populate_state(&mut state);
         let m = pseudo_move(&board, Square::H4, Square::B4);
         assert!(board.is_capture(m));
-        assert!(WidenedLegality::new(&board).decide(&board, m).is_none());
+        assert!(
+            WidenedLegality::new(board.position_view())
+                .decide(board.position_view(), m)
+                .is_none()
+        );
         assert!(!board.legal(m, &state));
 
         // En passant empties two blockers on the same ray (d4 victim, e4
@@ -5921,7 +5692,11 @@ mod tests {
         let mut state = StateInfo::new();
         board.populate_state(&mut state);
         let m = pseudo_move(&board, Square::E4, Square::D3);
-        assert!(WidenedLegality::new(&board).decide(&board, m).is_none());
+        assert!(
+            WidenedLegality::new(board.position_view())
+                .decide(board.position_view(), m)
+                .is_none()
+        );
         assert!(!board.legal(m, &state));
     }
 
@@ -5964,17 +5739,17 @@ mod tests {
                 continue;
             }
 
-            let us = board.side_to_move;
-            let widened = WidenedLegality::new(&board);
-            let trivial = TrivialLegality::new(&board, &state);
+            let us = board.side_to_move();
+            let widened = WidenedLegality::new(board.position_view());
+            let trivial = TrivialLegality::new(board.position_view(), &state);
             let mut pseudo = MoveList::new();
             crate::movegen::generate_pseudo_legal(&board, &mut pseudo);
             for &m in pseudo.as_slice() {
-                if trivial.is_trivially_legal(&board, m) {
+                if trivial.is_trivially_legal(m) {
                     coverage.accepted_quiet += 1;
                     continue;
                 }
-                match widened.decide(&board, m) {
+                match widened.decide(board.position_view(), m) {
                     Some(true) => {
                         let is_capture = board.is_capture(m);
                         let emptied =
@@ -6061,12 +5836,15 @@ mod tests {
             let board = Board::from_fen(fen).expect("FEN must parse");
             let mut state = StateInfo::new();
             board.populate_state(&mut state);
-            let fast = FastLegality::new(&board, &state);
+            let fast = FastLegality::new(board.position_view(), &state);
             let mut pseudo = MoveList::new();
             crate::movegen::generate_pseudo_legal(&board, &mut pseudo);
             for &m in pseudo.as_slice() {
                 checked += 1;
-                assert!(!fast.is_legal(&board, m, &state), "{fen} {m}");
+                assert!(
+                    !fast.is_legal(board.position_view(), m, &state),
+                    "{fen} {m}"
+                );
             }
         }
         assert!(checked > 0, "no pseudo-legal move reached the ladder");

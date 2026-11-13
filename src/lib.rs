@@ -74,6 +74,17 @@
 //! [`Board::outcome_after`]) is exactly the child's [`Board::outcome`] for
 //! legal input.
 //!
+//! [`EffectContext::terminal_after`] (also reachable as
+//! [`Board::terminal_after`]) answers the child's *terminal state* — outcome
+//! **and** reason — without building the child, for every pseudo-legal move.
+//! The child is described by the same crate-private placement view the rules
+//! read, so “does the child have a legal move?” needs no board write.
+//! [`EffectContext::is_terminal_after`] mirrors [`Board::is_terminal`] on the
+//! child and [`EffectContext::has_legal_move_after`] answers the existence
+//! query alone. Note that [`EffectContext::outcome_after`] returns `None` both
+//! for an illegal move and for an undecided child; the two are distinguished by
+//! [`EffectContext::is_legal`] and [`EffectContext::terminal_after`].
+//!
 //! # Interchange: SAN and piece sets
 //!
 //! [`Board::san`] / [`Board::write_san`] format a **legal** move in standard
@@ -146,6 +157,9 @@
 //!   [`Board::rule50_after`], [`Board::outcome`], [`Board::outcome_with_state`],
 //!   [`Board::outcome_with`], [`Board::terminal`], [`Board::terminal_with_state`],
 //!   [`Board::terminal_with`], [`Board::is_terminal`],
+//!   [`Board::outcome_after`], [`Board::terminal_after`],
+//!   [`EffectContext::effect`], [`EffectContext::is_legal`],
+//!   [`EffectContext::terminal_after`], [`EffectContext::outcome_after`],
 //!   [`Board::blast_casualties`], [`Board::attackers_to`],
 //!   [`Board::attackers_to_color`], and [`Move::write_uci`].
 //! - Allocations are allowed in interchange ([`Board::fen`], [`Move::to_uci`],
@@ -185,6 +199,7 @@ pub mod conformance;
 pub mod effects;
 pub(crate) mod magic;
 pub mod movegen;
+pub(crate) mod position;
 pub mod setup;
 pub mod types;
 pub(crate) mod util;

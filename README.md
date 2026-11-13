@@ -55,6 +55,12 @@ reference implementation.
   agrees with `Board::legal` for pseudo-legal input, and
   `EffectContext::outcome_after` / `Board::outcome_after()` agree with the
   child's `Board::outcome()` for legal input
+- Child terminality without a board write: `EffectContext::terminal_after` (and
+  `Board::terminal_after()`) return the child's `Terminal { outcome, reason }`
+  for every pseudo-legal move, exactly as a cloned `do_move` child's
+  `Board::terminal()` would, with no clone and no `MoveList`. Companion
+  queries: `is_terminal_after()` (the literal `is_terminal()` mirror) and
+  `has_legal_move_after()`
 - Incremental Zobrist hashing (`Board::hash()`) and FSF-compatible FEN output
 - Canonical en-passant keys and FEN output: `Board::legal_ep_square()` and
   `EnPassantMode::Legal` via `hash_with()`, `fen_with()`, and
@@ -191,13 +197,34 @@ assert!(effect.is_legal);
 assert_eq!(ctx.outcome_after(&board, m), Some(Outcome::Loss));
 ```
 
-`MoveEffect` never calls `do_move`; castling is the only case that delegates to
-`Board::legal` (its pass-through-square rule is a separate rule surface), and
-`outcome_after` falls back to a cloned board only where the child's
-“has a legal move?” answer decides checkmate or stalemate. The effect path is
-validated against `Board::legal` and against a cloned `do_move` child for every
-pseudo-legal move of the 41-position perft corpus and of seeded random
-play-outs (`tests/effects.rs`).
+`MoveEffect` never calls `do_move` and never clones the board; every child
+question — including “does the child have a legal move?” — is answered on a
+bitboard view of the child that the rules read through the same functions the
+board uses. The effect path is validated against `Board::legal` and against a
+cloned `do_move` child for every pseudo-legal move of the 41-position perft
+corpus and of seeded random play-outs (`tests/effects.rs`,
+`tests/terminal_after.rs`).
+
+The child's terminal state needs no child board either:
+
+```rust
+use atomic_movegen::{Board, Move, Outcome, TerminalReason};
+
+let board = Board::from_fen("7k/8/8/5N2/3K4/8/8/R6R w - - 99 60").unwrap();
+let ctx = board.effect_context();
+
+// Mate outranks the 50-move clock, on the child's clock (100).
+let m = Move::from_uci("a1g1").unwrap();
+let terminal = ctx.terminal_after(&board, m).unwrap();
+assert_eq!(terminal.outcome, Outcome::Loss);
+assert_eq!(terminal.reason, TerminalReason::NoMovesInCheck);
+
+// `None` = the child is not decided (never "the move is illegal").
+assert_eq!(ctx.terminal_after(&board, Move::from_uci("h1h2").unwrap()), None);
+```
+
+`outcome_after` returns `None` for an illegal **or** an undecided child; use
+`is_legal` and `terminal_after` when the difference matters.
 
 For SAN interchange and piece-set construction:
 

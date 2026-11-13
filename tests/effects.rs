@@ -64,110 +64,9 @@ const FIXTURES: &[&str] = &[
     "rnb1kbnr/pppp2pp/5q2/4ppN1/3P4/8/PPP1PPPP/RNBQKB1R w KQkq - 0 1",
 ];
 
-/// Playout start positions: capture-rich, promotion-heavy, en-passant, castling
-/// and bare-endgame boards.
-const PLAYOUT_FENS: &[&str] = &[
-    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-    "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
-    "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2",
-    "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
-    "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1",
-    "rnb1kbnr/pppp2pp/5q2/4ppN1/3P4/8/PPP1PPPP/RNBQKB1R w KQkq - 0 1",
-];
+mod common;
 
-/// Read the FEN column of the perft table (the 41-position oracle corpus).
-fn perft_corpus() -> Vec<String> {
-    let content = std::fs::read_to_string("tests/perft_values.md")
-        .expect("tests/perft_values.md must be readable");
-    let mut fens = Vec::new();
-    for line in content.lines() {
-        if !line.starts_with('|') {
-            continue;
-        }
-        let Some(start) = line.find('`') else {
-            continue;
-        };
-        let Some(len) = line[start + 1..].find('`') else {
-            continue;
-        };
-        fens.push(line[start + 1..start + 1 + len].to_owned());
-    }
-    assert_eq!(fens.len(), 41, "expected 41 perft corpus positions");
-    fens
-}
-
-/// Deterministic xorshift64 PRNG (no dev-dependency, reproducible play-outs).
-struct Xorshift(u64);
-
-impl Xorshift {
-    fn new(seed: u64) -> Self {
-        Xorshift(seed | 1)
-    }
-
-    fn next(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.0 = x;
-        x
-    }
-}
-
-/// Visit every position of a random legal play-out from each start FEN.
-fn walk_positions(
-    start_fens: &[&str],
-    seeds: u64,
-    depth: u32,
-    visit: &mut impl FnMut(&Board, &StateInfo),
-) -> u64 {
-    let mut visited = 0;
-    let mut state = StateInfo::new();
-    for (i, fen) in start_fens.iter().enumerate() {
-        for seed in 0..seeds {
-            let mut board = Board::from_fen(fen).expect("play-out FEN must parse");
-            let mut rng = Xorshift::new(0x9E37_79B9_7F4A_7C15 ^ ((i as u64) << 32) ^ seed);
-            for _ in 0..=depth {
-                board.populate_state(&mut state);
-                visit(&board, &state);
-                visited += 1;
-
-                let mut list = MoveList::new();
-                generate_legal_with_state(&board, &state, &mut list);
-                if list.is_empty() {
-                    break;
-                }
-                let idx = (rng.next() % list.len() as u64) as usize;
-                board.do_move(list.as_slice()[idx], &mut state);
-            }
-        }
-    }
-    visited
-}
-
-/// Visit random legal play-outs: long ones from the play-out starts and short
-/// ones from every perft-corpus position.
-fn walk_playouts(visit: &mut impl FnMut(&Board, &StateInfo)) -> u64 {
-    let corpus = perft_corpus();
-    let corpus_refs: Vec<&str> = corpus.iter().map(String::as_str).collect();
-    walk_positions(PLAYOUT_FENS, 16, 300, visit) + walk_positions(&corpus_refs, 2, 60, visit)
-}
-
-/// Visit the perft corpus and the deterministic fixtures once each.
-fn walk_corpus_and_fixtures(visit: &mut impl FnMut(&Board, &StateInfo)) {
-    let corpus = perft_corpus();
-    let fens: Vec<&str> = corpus
-        .iter()
-        .map(String::as_str)
-        .chain(FIXTURES.iter().copied())
-        .collect();
-    for fen in fens {
-        let board = Board::from_fen(fen).expect("corpus FEN must parse");
-        let mut state = StateInfo::new();
-        board.populate_state(&mut state);
-        visit(&board, &state);
-    }
-}
+use common::{walk_corpus_and_fixtures, walk_playouts};
 
 #[test]
 fn effect_is_legal_matches_board_legal() {
@@ -195,7 +94,7 @@ fn effect_is_legal_matches_board_legal() {
         positions += 1;
     };
 
-    walk_corpus_and_fixtures(&mut check);
+    walk_corpus_and_fixtures(FIXTURES, &mut check);
     let played = walk_playouts(&mut check);
     assert!(
         played > 5_000,
@@ -229,7 +128,7 @@ fn effect_is_legal_never_accepts_illegal() {
         }
     };
 
-    walk_corpus_and_fixtures(&mut check);
+    walk_corpus_and_fixtures(FIXTURES, &mut check);
     walk_playouts(&mut check);
     assert!(
         accepted > 10_000,
@@ -299,7 +198,7 @@ fn effect_fields_match_child() {
         }
     };
 
-    walk_corpus_and_fixtures(&mut check);
+    walk_corpus_and_fixtures(FIXTURES, &mut check);
     walk_playouts(&mut check);
     assert!(checked > 50_000, "expected many candidates, got {checked}");
     eprintln!("checked {checked} candidates against a cloned child");
@@ -350,7 +249,7 @@ fn outcome_after_matches_do_move() {
         positions += 1;
     };
 
-    walk_corpus_and_fixtures(&mut check);
+    walk_corpus_and_fixtures(FIXTURES, &mut check);
     walk_playouts(&mut check);
     assert!(decided > 500, "expected decided children, got {decided}");
     eprintln!("outcome_after checked at {positions} positions, {decided} decided");
@@ -387,7 +286,7 @@ fn for_each_legal_matches_generate_legal() {
         total += expected.len() as u64;
     };
 
-    walk_corpus_and_fixtures(&mut check);
+    walk_corpus_and_fixtures(FIXTURES, &mut check);
     walk_playouts(&mut check);
     assert!(total > 50_000, "expected many legal moves, got {total}");
 }

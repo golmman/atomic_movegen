@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Child terminality without a board write. `EffectContext::terminal_after()`
+  (and the `Board::terminal_after()` wrapper) return the child position's
+  `Terminal { outcome, reason }` for every **pseudo-legal** move, equal to
+  `{ let mut c = board.clone(); c.do_move(m, &mut st); c.terminal() }`, with no
+  clone, no `MoveList`, and no allocation. The child is described by a
+  crate-private bitboard view (placement, side to move, en-passant target,
+  castling rights, and the child clock), so “does the child have a legal
+  move?” is answered by the same rules code the board uses. Illegal moves are
+  not rejected — a pseudo-legal move whose blast removes the mover's own
+  commoner has an extinct child and is reported as such.
+- `EffectContext::is_terminal_after()` (the literal `Board::is_terminal()`
+  mirror on the child, i.e. without the commoner-only material shortcut) and
+  `EffectContext::has_legal_move_after()`.
+
+### Changed
+
+- `EffectContext::outcome_after()` lost its clone fallback: it is now
+  `is_legal(..)` followed by `terminal_after(..)`, so no board is written or
+  cloned for any child.
+- The rules live on one crate-private `PositionView`. `Board` stores that view
+  as its placement, and `Board::legal`, `populate_state`, `compute_checkers`,
+  `compute_pinned`, `is_material_draw`, `blast_casualties`, `is_capture`, the
+  move generator, and the fast-legality ladder all read it. No public API,
+  ordering, perft value, hash, FEN output, or `Outcome`/`Terminal` semantics
+  changed.
+
+### Fixed
+
+- Property documentation: `EffectContext::outcome_after()` and
+  `Board::outcome_after()` now document that `None` means *illegal* **or**
+  *undecided*, and point at the queries that separate the two.
+
 ## [2.6.0] - 2026-11-13
 
 ### Added

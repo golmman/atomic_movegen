@@ -788,7 +788,8 @@ impl Move {
         ((self.0 >> 6) & 0x3f) as usize
     }
 
-    /// Raw destination-square index (`0..64`) without the [`SQUARES`] conversion.
+    /// Raw destination-square index (`0..64`) without the [`SQUARES`]
+    /// conversion.
     ///
     /// Only valid for moves produced by the move generator; see
     /// [`origin_index`](Self::origin_index).

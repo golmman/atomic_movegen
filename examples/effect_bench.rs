@@ -1,6 +1,18 @@
 //! Microbenchmark for the effect context (`EffectContext`) against the
 //! board-writing path, plus the legal move stream against the legal list.
 //!
+//! Three groups are reported per bench position:
+//!
+//! 1. per pseudo-legal move: `effect`/`is_legal` against `Board::legal`;
+//! 2. per child: `terminal_after` (and `outcome_after`) against cloning the
+//!    board and playing the move — both against `terminal()` and against
+//!    `generate_legal_with_state`, the two shapes a downstream
+//!    "is this child over?" question takes;
+//! 3. the **decided share**: the fraction of children answered `Some` over a
+//!    seeded play-out walk. This is this crate's own tree, not a downstream
+//!    search tree; it exists so the crate publishes what `terminal_after`
+//!    decides, not as a claim about any consumer.
+//!
 //! Usage:
 //! ```sh
 //! cargo run --release --example effect_bench [repeats] [iterations]
@@ -53,6 +65,73 @@ fn bench(mut f: impl FnMut(), repeats: usize, iterations: usize) -> f64 {
         samples.push(start.elapsed().as_nanos() / iterations as u128);
     }
     median(&mut samples) as f64
+}
+
+/// Deterministic xorshift64 PRNG for the play-out walk.
+struct Xorshift(u64);
+
+impl Xorshift {
+    fn new(seed: u64) -> Self {
+        Xorshift(seed | 1)
+    }
+
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+}
+
+/// The share of children answered `Some` by `terminal_after` over seeded random
+/// play-outs, for pseudo-legal and for legal candidates separately.
+///
+/// # Panics
+///
+/// Panics when a start FEN does not parse.
+fn decided_share(start_fens: &[&str], seeds: u64, depth: u32) -> (u64, u64, u64, u64) {
+    let mut pseudo_children = 0u64;
+    let mut pseudo_decided = 0u64;
+    let mut legal_children = 0u64;
+    let mut legal_decided = 0u64;
+    let mut state = StateInfo::new();
+    for (i, fen) in start_fens.iter().enumerate() {
+        for seed in 0..seeds {
+            let mut board = Board::from_fen(fen).expect("play-out FEN must parse");
+            let mut rng = Xorshift::new(0x9E37_79B9_7F4A_7C15 ^ ((i as u64) << 32) ^ seed);
+            for _ in 0..=depth {
+                board.populate_state(&mut state);
+                let ctx = board.effect_context_with_state(&state);
+                let mut pseudo = MoveList::new();
+                generate_pseudo_legal(&board, &mut pseudo);
+                for &m in pseudo.as_slice() {
+                    let decided = ctx.terminal_after(&board, m).is_some();
+                    pseudo_children += 1;
+                    pseudo_decided += u64::from(decided);
+                    if ctx.is_legal(&board, m) {
+                        legal_children += 1;
+                        legal_decided += u64::from(decided);
+                    }
+                }
+
+                let mut legal = MoveList::new();
+                generate_legal_with_state(&board, &state, &mut legal);
+                if legal.is_empty() {
+                    break;
+                }
+                let m = legal.as_slice()[(rng.next() % legal.len() as u64) as usize];
+                board.do_move(m, &mut state);
+            }
+        }
+    }
+    (
+        pseudo_children,
+        pseudo_decided,
+        legal_children,
+        legal_decided,
+    )
 }
 
 fn main() {
@@ -134,6 +213,69 @@ fn main() {
             repeats,
             iterations,
         );
+        let mut i = 0usize;
+        let terminal_after_ns = bench(
+            || {
+                let m = pseudo[i % pseudo.len()];
+                i += 1;
+                black_box(ctx.terminal_after(&board, m));
+            },
+            repeats,
+            iterations,
+        );
+        let mut i = 0usize;
+        let terminal_clone_ns = bench(
+            || {
+                let m = pseudo[i % pseudo.len()];
+                i += 1;
+                let mut child = board.clone();
+                let mut st = StateInfo::new();
+                child.do_move(m, &mut st);
+                black_box(child.terminal());
+            },
+            repeats,
+            iterations,
+        );
+        let mut i = 0usize;
+        let terminal_clone_legal_ns = bench(
+            || {
+                let m = pseudo[i % pseudo.len()];
+                i += 1;
+                let mut child = board.clone();
+                let mut st = StateInfo::new();
+                child.do_move(m, &mut st);
+                child.populate_state(&mut st);
+                let mut list = MoveList::new();
+                generate_legal_with_state(&child, &st, &mut list);
+                black_box(list.len());
+            },
+            repeats,
+            iterations,
+        );
+        let mut i = 0usize;
+        let has_move_after_ns = bench(
+            || {
+                let m = pseudo[i % pseudo.len()];
+                i += 1;
+                black_box(ctx.has_legal_move_after(&board, m));
+            },
+            repeats,
+            iterations,
+        );
+        let mut i = 0usize;
+        let has_move_clone_ns = bench(
+            || {
+                let m = pseudo[i % pseudo.len()];
+                i += 1;
+                let mut child = board.clone();
+                let mut st = StateInfo::new();
+                child.do_move(m, &mut st);
+                child.populate_state(&mut st);
+                black_box(has_legal_move_with_state(&child, &st));
+            },
+            repeats,
+            iterations,
+        );
         let generate_legal_ns = bench(
             || {
                 let mut list = MoveList::new();
@@ -182,6 +324,15 @@ fn main() {
              clone+do_move+outcome {outcome_clone:>9.1}"
         );
         println!(
+            "  per child (pseudo):    terminal_after {terminal_after_ns:>9.1}  \
+             clone+do_move+terminal {terminal_clone_ns:>9.1}  \
+             clone+do_move+legal {terminal_clone_legal_ns:>9.1}"
+        );
+        println!(
+            "  has legal move after:  {has_move_after_ns:>9.1}  \
+             clone+do_move+has {has_move_clone_ns:>9.1}"
+        );
+        println!(
             "  per node:              generate_legal {generate_legal_ns:>9.1}  \
              for_each_legal {stream_legal_ns:>9.1}  has_legal_move {has_legal_ns:>9.1}"
         );
@@ -191,4 +342,27 @@ fn main() {
         );
         println!();
     }
+
+    let mut start_fens: Vec<&str> = POSITIONS.iter().map(|(_, fen)| *fen).collect();
+    start_fens.push("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+    let (pseudo_children, pseudo_decided, legal_children, legal_decided) =
+        decided_share(&start_fens, 8, 60);
+    let pct = |decided: u64, total: u64| {
+        if total == 0 {
+            0.0
+        } else {
+            100.0 * decided as f64 / total as f64
+        }
+    };
+    println!("decided share over seeded play-outs (8 seeds x depth 60 x 4 start FENs):");
+    println!(
+        "  pseudo-legal children: {pseudo_children:>8}  decided {pseudo_decided:>8}  \
+         ({:.2} %)",
+        pct(pseudo_decided, pseudo_children)
+    );
+    println!(
+        "  legal children:        {legal_children:>8}  decided {legal_decided:>8}  \
+         ({:.2} %)",
+        pct(legal_decided, legal_children)
+    );
 }

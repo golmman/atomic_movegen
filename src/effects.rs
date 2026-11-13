@@ -11,8 +11,33 @@
 //! The rules live in one place only: the effect path is differentially
 //! validated against [`Board::legal`] and against a cloned `do_move` child for
 //! every pseudo-legal move of the fixture corpus and of seeded random
-//! play-outs (`tests/effects.rs`). Castling keeps the [`Board::legal`] fallback
-//! because its pass-through-square rule is a separate rule surface.
+//! play-outs (`tests/effects.rs`). Castling is decided by the same
+//! [`Board::legal`] body, fed the context's view.
+//!
+//! # Child terminality
+//!
+//! [`EffectContext::terminal_after`] answers "is the position reached by this
+//! move decided, and why?" from the same bitboard view of the child, with no
+//! clone and no board write. It is exactly
+//! `{ let mut c = board.clone(); c.do_move(m, &mut st); c.terminal() }` for
+//! every pseudo-legal move, and `None` when the child is not decided:
+//!
+//! ```
+//! use atomic_movegen::{Board, Move, Outcome, TerminalReason};
+//!
+//! let board = Board::from_fen("7k/8/8/5N2/3K4/8/8/R6R w - - 99 60").unwrap();
+//! let ctx = board.effect_context();
+//!
+//! let m = Move::from_uci("a1g1").unwrap();
+//! let terminal = ctx.terminal_after(&board, m).expect("mate on the clock");
+//! assert_eq!(terminal.outcome, Outcome::Loss);
+//! assert_eq!(terminal.reason, TerminalReason::NoMovesInCheck);
+//!
+//! // A quiet move that leaves the game running is not decided.
+//! let board = Board::new();
+//! let ctx = board.effect_context();
+//! assert_eq!(ctx.terminal_after(&board, Move::from_uci("e2e4").unwrap()), None);
+//! ```
 //!
 //! ```
 //! use atomic_movegen::{Board, Move};
@@ -30,7 +55,8 @@
 //! ```
 
 use crate::attacks;
-use crate::board::{BlastCasualties, Board, StateInfo, castling_squares, is_attacked_by};
+use crate::board::{BlastCasualties, Board, StateInfo, is_attacked_by};
+use crate::position::{self, PositionView};
 use crate::types::*;
 
 /// Node-constant data for classifying moves without mutating the board.
@@ -41,30 +67,21 @@ use crate::types::*;
 /// a snapshot: it stays valid while `board` does not change and holds no
 /// reference to it.
 ///
-/// The context deliberately stores only data the rules need (piece
-/// placement, side to move, and the populated [`StateInfo`]) — never a search
-/// concept. The node-constant `checkers`/`pinned` data of [`StateInfo`] is not
-/// part of the snapshot because the effect path derives post-move attacks
-/// directly; callers that need pins read them from [`StateInfo`].
+/// The context deliberately stores only data the rules need — a snapshot of the
+/// position's placement, side to move, en-passant target, castling rights and
+/// clock, plus the “game is already over” flag read from the [`StateInfo`] it
+/// was built from — never a search concept. The node-constant
+/// `checkers`/`pinned` data of [`StateInfo`] is not part of the snapshot because
+/// the effect path derives post-move attacks directly; callers that need pins
+/// read them from [`StateInfo`].
 #[derive(Debug, Clone, Copy)]
 pub struct EffectContext {
-    /// The side to move in the context position.
-    us: Color,
-    /// The opponent of the side to move.
-    them: Color,
-    /// Occupied squares in the context position.
-    occupied: Bitboard,
-    /// Per-color piece bitboards in the context position.
-    by_color: [Bitboard; Color::NB],
-    /// Per-type piece bitboards in the context position.
-    by_type: [Bitboard; PieceType::NB],
-    /// The commoners of the side to move.
-    our_commoners: Bitboard,
+    /// Placement, side to move, castling rights and clock of the context
+    /// position.
+    view: PositionView,
     /// `true` when either side has no commoner, i.e. the game is already over
     /// and [`Board::legal`] rejects every move.
     game_over: bool,
-    /// Copy of the populated state, used only for the castling fallback.
-    state: StateInfo,
 }
 
 /// The rules effects of one pseudo-legal move.
@@ -108,20 +125,9 @@ impl EffectContext {
     /// [`Board::legal`].
     #[must_use]
     pub fn new(board: &Board, state: &StateInfo) -> Self {
-        let us = board.side_to_move();
-        let them = us.flip();
         Self {
-            us,
-            them,
-            occupied: board.occupied(),
-            by_color: [
-                board.pieces_color(Color::White),
-                board.pieces_color(Color::Black),
-            ],
-            by_type: PIECE_TYPES.map(|pt| board.pieces_pt(pt)),
-            our_commoners: board.commoners(us),
+            view: PositionView::of(board),
             game_over: state.commoners_count == 0 || state.them_commoners_count == 0,
-            state: *state,
         }
     }
 
@@ -129,7 +135,25 @@ impl EffectContext {
     #[inline]
     #[must_use]
     pub fn side_to_move(&self) -> Color {
-        self.us
+        self.view.side_to_move()
+    }
+
+    /// The side to move in the context position.
+    #[inline(always)]
+    fn us(&self) -> Color {
+        self.view.side_to_move()
+    }
+
+    /// The opponent of the side to move in the context position.
+    #[inline(always)]
+    fn them(&self) -> Color {
+        self.view.side_to_move().flip()
+    }
+
+    /// The commoners of the side to move in the context position.
+    #[inline(always)]
+    fn our_commoners(&self) -> Bitboard {
+        self.view.commoners(self.us())
     }
 
     /// Classify `m` without mutating `board`.
@@ -137,18 +161,19 @@ impl EffectContext {
     /// `m` must be a pseudo-legal move for this position (as produced by
     /// [`generate_pseudo_legal`](crate::movegen::generate_pseudo_legal) or
     /// accepted by [`Board::is_pseudo_legal`]). For malformed input — a
-    /// [`Move::NONE`] or an empty origin square — every field except
-    /// `is_capture` is `false`/empty and `is_legal` is `false`; use
-    /// [`Board::is_legal`] for untrusted single moves.
+    /// [`Move::NONE`], an empty origin square, or an origin that does not hold
+    /// a piece of the side to move — every field except `is_capture` is
+    /// `false`/empty and `is_legal` is `false`; use [`Board::is_legal`] for
+    /// untrusted single moves.
     ///
-    /// This never calls [`Board::do_move`] or [`Board::legal`], except for
-    /// castling, which falls back to [`Board::legal`] to reuse the
-    /// pass-through-square rule.
+    /// This never calls [`Board::do_move`], and it calls [`Board::legal`] for
+    /// no move type: castling uses the shared pass-through-square rule on the
+    /// context's view.
     #[must_use]
     pub fn effect(&self, board: &Board, m: Move) -> MoveEffect {
         let Some(post) = self.analyze(board, m) else {
             return MoveEffect {
-                is_capture: board.is_capture(m),
+                is_capture: self.view.is_capture(m),
                 casualties: BlastCasualties::default(),
                 checks_enemy: false,
                 explodes_enemy_commoner: false,
@@ -157,14 +182,14 @@ impl EffectContext {
             };
         };
 
-        let is_legal = self.is_legal_from(board, m, &post);
+        let is_legal = self.is_legal_from(m, &post);
         MoveEffect {
             is_capture: post.is_capture,
             casualties: post.casualties,
             checks_enemy: self.checks_enemy(&post),
             explodes_enemy_commoner: !self.their_commoners().is_empty()
-                && post.commoners(self.them).is_empty(),
-            leaves_own_commoner: !post.commoners(self.us).is_empty(),
+                && post.view.commoners(self.them()).is_empty(),
+            leaves_own_commoner: !post.view.commoners(self.us()).is_empty(),
             is_legal,
         }
     }
@@ -182,67 +207,115 @@ impl EffectContext {
         }
         match self.analyze(board, m) {
             None => false,
-            Some(post) => self.is_legal_from(board, m, &post),
+            Some(post) => self.is_legal_from(m, &post),
         }
     }
 
     /// The outcome of the child position after `m`, from the child side-to-move
     /// perspective, without building the child.
     ///
-    /// Returns `None` when `m` is not legal on this board. For every legal `m`
-    /// the result is exactly
+    /// # Contract
+    ///
+    /// `None` means **either** that `m` is not legal on this board **or** that
+    /// the child is not decided (the game continues). For every legal `m` with
+    /// a decided child the result is exactly
     /// `{ let mut b = board.clone(); b.do_move(m, &mut st); b.outcome() }`.
     ///
-    /// The immediate cases are answered from the effect: extinction of the
-    /// enemy commoner is a loss for the child, the commoner-only material draw
-    /// and the non-check 50-move draw are read from the blast casualties and
-    /// [`Board::rule50_after`]. A child that still needs “does the child have a
-    /// legal move?” — checkmate and stalemate — falls back to a cloned board
-    /// and [`Board::outcome`]; see the module docs.
+    /// Two distinct questions map to `None` here; use the dedicated queries when
+    /// the difference matters:
+    ///
+    /// - [`is_legal`](Self::is_legal) answers "is `m` legal?";
+    /// - [`terminal_after`](Self::terminal_after) answers "is the child
+    ///   decided, and why?" and never returns `None` for an undecided child of
+    ///   a legal move unless the child is genuinely undecided.
+    ///
+    /// This is `terminal_after(..).map(|t| t.outcome)` after the legality
+    /// gate; it never clones the board.
     #[must_use]
     pub fn outcome_after(&self, board: &Board, m: Move) -> Option<Outcome> {
-        if self.game_over {
+        if !self.is_legal(board, m) {
             return None;
         }
-        let post = self.analyze(board, m)?;
-        if !self.is_legal_from(board, m, &post) {
-            return None;
-        }
+        self.terminal_after(board, m).map(|t| t.outcome)
+    }
 
-        // The child has no commoner: the side to move there (the opponent)
-        // loses immediately. The mover's own commoner is guaranteed alive by
-        // the legality check above.
-        if post.commoners(self.them).is_empty() {
-            return Some(Outcome::Loss);
-        }
-
-        // Commoner-only material draw, from the child's piece count.
-        let child_pieces = (self.occupied & !post.casualties.all()).count();
-        if child_pieces == 2
-            && !post.commoners(Color::White).is_empty()
-            && !post.commoners(Color::Black).is_empty()
-        {
-            return Some(Outcome::Draw);
-        }
-
-        // 50-move rule. When the child is in check, mate outranks the clock, so
-        // the remaining question needs the full outcome path.
-        if board.rule50_after(m) >= 100 && !self.checks_enemy(&post) {
-            return Some(Outcome::Draw);
-        }
-
-        // Fallback: checkmate and stalemate both require the child's “has a
-        // legal move?” answer, which needs a board write today.
-        let mut child = board.clone();
+    /// The terminal state of the child position after `m`, from the child
+    /// side-to-move perspective, without building the child.
+    ///
+    /// `None` means the child is not decided. For every **pseudo-legal** `m`
+    /// this is exactly
+    /// `{ let mut c = board.clone(); c.do_move(m, &mut st); c.terminal() }` —
+    /// the same precedence (extinction → material draw → no legal moves →
+    /// clock) and the same child clock, which comes from
+    /// [`Board::rule50_after`].
+    ///
+    /// # Legality is not checked
+    ///
+    /// This does not reject illegal moves: a pseudo-legal move that explodes
+    /// the mover's own commoner has an extinct child and is reported as such.
+    /// When the move's legality is the question, use [`is_legal`](Self::is_legal)
+    /// (or [`Board::is_legal`]); the two-level answer that separates *illegal*
+    /// from *undecided* builds on this query in a later release.
+    ///
+    /// Malformed input — a [`Move::NONE`] or an empty origin square — returns
+    /// `None`.
+    ///
+    /// The child's [`StateInfo`] is populated internally (checkers, pins,
+    /// commoner counts); no board is written and nothing is allocated.
+    #[must_use]
+    pub fn terminal_after(&self, board: &Board, m: Move) -> Option<Terminal> {
+        let child = self.analyze(board, m)?;
         let mut state = StateInfo::new();
-        child.do_move(m, &mut state);
-        child.outcome()
+        child.view.populate_state(&mut state);
+        position::terminal_in_view(&child.view, &state, None)
+    }
+
+    /// The literal [`Board::is_terminal`] mirror on the child position after
+    /// `m`, without building the child.
+    ///
+    /// For every pseudo-legal `m` this is exactly
+    /// `{ let mut c = board.clone(); c.do_move(m, &mut st); c.is_terminal() }`:
+    /// extinction, the 100-ply clock, or no legal move. Unlike
+    /// [`terminal_after`](Self::terminal_after) it does **not** include the
+    /// commoner-only material shortcut, so a K-vs-K child that
+    /// [`terminal_after`](Self::terminal_after) reports as
+    /// `Some(MaterialDraw)` is `false` here.
+    ///
+    /// Malformed input returns `None`.
+    #[must_use]
+    pub fn is_terminal_after(&self, board: &Board, m: Move) -> Option<bool> {
+        let child = self.analyze(board, m)?;
+        let view = &child.view;
+        let us = view.side_to_move();
+        if view.commoners(us).is_empty()
+            || view.commoners(us.flip()).is_empty()
+            || view.rule50() >= 100
+        {
+            return Some(true);
+        }
+        let mut state = StateInfo::new();
+        view.populate_state(&mut state);
+        Some(!crate::movegen::has_legal_move_in_view(view, &state))
+    }
+
+    /// Whether the child position after `m` has at least one legal move,
+    /// without building the child.
+    ///
+    /// For every pseudo-legal `m` this is exactly
+    /// `{ let mut c = board.clone(); c.do_move(m, &mut st);
+    /// crate::movegen::has_legal_move(&c) }`. Malformed input returns `None`.
+    #[must_use]
+    pub fn has_legal_move_after(&self, board: &Board, m: Move) -> Option<bool> {
+        let child = self.analyze(board, m)?;
+        let mut state = StateInfo::new();
+        child.view.populate_state(&mut state);
+        Some(crate::movegen::has_legal_move_in_view(&child.view, &state))
     }
 
     /// The opponent's commoners in the context position.
     #[inline]
     fn their_commoners(&self) -> Bitboard {
-        self.by_color[self.them as usize] & self.by_type[PieceType::Commoner as usize]
+        self.view.commoners(self.them())
     }
 
     /// `true` when the move is legal, assuming the effect path decides it.
@@ -252,23 +325,23 @@ impl EffectContext {
     /// destroyed, exploding the enemy commoner wins at once, touching commoners
     /// are immune, and otherwise the mover's commoner may not stand on an
     /// attacked square after the move and blast.
-    fn is_legal_from(&self, board: &Board, m: Move, post: &PostMove) -> bool {
+    fn is_legal_from(&self, m: Move, post: &PostMove) -> bool {
         if self.game_over {
             return false;
         }
         if m.move_type() == MoveType::Castling {
-            // Pass-through-square attacks are a separate rule surface; keep the
-            // oracle until a differential proves the effect path sufficient.
-            return board.legal(m, &self.state);
+            // Pass-through-square attacks are their own rule surface; the
+            // shared view implementation already answers them from bitboards.
+            return position::legal_with_counts(&self.view, m);
         }
 
-        let our_after = post.commoners(self.us);
+        let our_after = post.view.commoners(self.us());
         // A move may not destroy any of our commoners. In a legal position
         // there is exactly one, so this is the usual self-explosion check.
-        if our_after.count() != self.our_commoners.count() {
+        if our_after.count() != self.our_commoners().count() {
             return false;
         }
-        let their_after = post.commoners(self.them);
+        let their_after = post.view.commoners(self.them());
         if their_after.is_empty() {
             return true;
         }
@@ -284,12 +357,13 @@ impl EffectContext {
             return true;
         }
 
+        let view = &post.view;
         !is_attacked_by(
             ksq,
-            post.occupied,
-            &post.by_type,
-            post.by_color[self.them as usize],
-            self.us,
+            view.occupied(),
+            view.by_type(),
+            view.pieces_color(self.them()),
+            self.us(),
         )
     }
 
@@ -299,8 +373,9 @@ impl EffectContext {
     /// is gone, no check when the commoners touch, and commoner attacks are
     /// excluded from the attacker query because an adjacent commoner touches.
     fn checks_enemy(&self, post: &PostMove) -> bool {
-        let their_after = post.commoners(self.them);
-        let our_after = post.commoners(self.us);
+        let view = &post.view;
+        let their_after = view.commoners(self.them());
+        let our_after = view.commoners(self.us());
         if their_after.is_empty() || our_after.is_empty() {
             return false;
         }
@@ -310,115 +385,40 @@ impl EffectContext {
         }
         is_attacked_by(
             ksq,
-            post.occupied,
-            &post.by_type,
-            post.by_color[self.us as usize],
-            self.them,
+            view.occupied(),
+            view.by_type(),
+            view.pieces_color(self.us()),
+            self.them(),
         )
     }
 
-    /// Derive the post-move, post-blast piece placement of `m` without
-    /// touching the board, or `None` for a move with no origin piece.
+    /// Derive the child position of `m` without touching the board, or `None`
+    /// for a move with no origin piece.
     fn analyze(&self, board: &Board, m: Move) -> Option<PostMove> {
-        if m == Move::NONE {
+        // Malformed input: no move and no origin piece. Checked before the
+        // child clock, which is only defined for a real origin piece.
+        if m == Move::NONE || self.view.piece_on(m.from_sq()) == NO_PIECE {
             return None;
         }
-        let from = m.from_sq();
-        let to = m.to_sq();
-        let moving = board.piece_on(from);
-        if moving == NO_PIECE {
-            return None;
-        }
-
-        let us = self.us;
-        let is_capture = board.is_capture(m);
-        let casualties = board.blast_casualties(m);
-        let removed = casualties.all();
-        let from_bb = Bitboard::square_bb(from);
-        let to_bb = Bitboard::square_bb(to);
-
-        let mut post = PostMove {
-            occupied: self.occupied & !removed,
-            by_color: [
-                self.by_color[Color::White as usize] & !removed,
-                self.by_color[Color::Black as usize] & !removed,
-            ],
-            by_type: self.by_type.map(|bb| bb & !removed),
-            is_capture,
-            casualties,
-        };
-
-        match m.move_type() {
-            MoveType::Castling => {
-                let (kfrom, kto, rfrom, rto) = castling_squares(us, to > from);
-                let kfrom_bb = Bitboard::square_bb(kfrom);
-                let rfrom_bb = Bitboard::square_bb(rfrom);
-                let kto_bb = Bitboard::square_bb(kto);
-                let rto_bb = Bitboard::square_bb(rto);
-                post.occupied = (post.occupied & !(kfrom_bb | rfrom_bb)) | kto_bb | rto_bb;
-                post.by_color[us as usize] =
-                    (post.by_color[us as usize] & !(kfrom_bb | rfrom_bb)) | kto_bb | rto_bb;
-                post.by_type[PieceType::Commoner as usize] =
-                    (post.by_type[PieceType::Commoner as usize] & !kfrom_bb) | kto_bb;
-                post.by_type[PieceType::Rook as usize] =
-                    (post.by_type[PieceType::Rook as usize] & !rfrom_bb) | rto_bb;
-            }
-            _ if post.is_capture => {
-                // Every capture — normal, en passant, and capturing promotion —
-                // destroys the capturer at ground zero: the origin square empties
-                // and nothing appears on `to`. (The capturer's removal is
-                // recorded in `casualties` at `to`, not at `from`.)
-                post.occupied = post.occupied & !from_bb;
-                post.by_color[us as usize] = post.by_color[us as usize] & !from_bb;
-                if let Some(pt) = moving.type_of() {
-                    post.by_type[pt as usize] = post.by_type[pt as usize] & !from_bb;
-                }
-            }
-            MoveType::Promotion => {
-                let promoted = m.promotion_type();
-                post.occupied = (post.occupied & !from_bb) | to_bb;
-                post.by_color[us as usize] = (post.by_color[us as usize] & !from_bb) | to_bb;
-                post.by_type[PieceType::Pawn as usize] =
-                    post.by_type[PieceType::Pawn as usize] & !from_bb;
-                post.by_type[promoted as usize] = post.by_type[promoted as usize] | to_bb;
-            }
-            // En passant is always a capture, so the guarded arm above handles
-            // it; this arm only satisfies the match exhaustiveness check.
-            MoveType::EnPassant => {}
-            MoveType::Normal => {
-                if let Some(pt) = moving.type_of() {
-                    post.occupied = (post.occupied & !from_bb) | to_bb;
-                    post.by_color[us as usize] = (post.by_color[us as usize] & !from_bb) | to_bb;
-                    post.by_type[pt as usize] = (post.by_type[pt as usize] & !from_bb) | to_bb;
-                }
-            }
-        }
-
-        Some(post)
+        let child = position::child_view(&self.view, m, board.rule50_after(m))?;
+        Some(PostMove {
+            view: child.view,
+            is_capture: child.is_capture,
+            casualties: child.casualties,
+        })
     }
 }
 
-/// The piece placement of a child position, derived without a board write.
+/// The child position of one move: placement, side to move, clock, and the
+/// pieces the move removed.
 #[derive(Debug, Clone, Copy)]
 struct PostMove {
-    /// Occupied squares after the move and blast.
-    occupied: Bitboard,
-    /// Per-color piece bitboards after the move and blast.
-    by_color: [Bitboard; Color::NB],
-    /// Per-type piece bitboards after the move and blast.
-    by_type: [Bitboard; PieceType::NB],
-    /// The move removes a piece.
+    /// The child position, derived without a board write.
+    view: PositionView,
+    /// The move removes a piece (normal capture or en passant).
     is_capture: bool,
     /// The pieces the move's blast removes.
     casualties: BlastCasualties,
-}
-
-impl PostMove {
-    /// The commoners of `c` in the child position.
-    #[inline]
-    fn commoners(&self, c: Color) -> Bitboard {
-        self.by_color[c as usize] & self.by_type[PieceType::Commoner as usize]
-    }
 }
 
 #[cfg(test)]
