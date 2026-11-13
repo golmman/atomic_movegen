@@ -74,6 +74,17 @@
 //! [`Board::outcome_after`]) is exactly the child's [`Board::outcome`] for
 //! legal input.
 //!
+//! # Interchange: SAN and piece sets
+//!
+//! [`Board::san`] / [`Board::write_san`] format a **legal** move in standard
+//! algebraic notation (castling as `O-O`/`O-O-O`, standard disambiguation, and a
+//! `#`/`+` suffix taken from the child outcome), and [`Board::move_from_san`]
+//! resolves SAN text back to exactly one legal move. The commoner's SAN letter
+//! is `K`, like its FEN label. [`Setup`] builds a position piece by piece
+//! instead of parsing a FEN string, and [`Board::pieces`] iterates the
+//! placement in ascending square order. `Setup` is a data builder only: it
+//! duplicates no move generation or legality logic.
+//!
 //! # Position keys and en passant
 //!
 //! [`Board::hash`] and [`Board::fen`] follow Fairy-Stockfish and include the
@@ -111,14 +122,17 @@ pub mod board;
 pub mod effects;
 pub(crate) mod magic;
 pub mod movegen;
+pub mod setup;
 pub mod types;
 pub(crate) mod util;
 pub(crate) mod zobrist;
 
 pub use board::{BlastCasualties, Board, FenLoadError, FenPolicy, StateInfo, ValidationErrors};
 pub use effects::{EffectContext, MoveEffect};
+pub use setup::{Setup, SetupError};
 pub use types::{
-    Bitboard, CastlingSide, Color, EnPassantMode, Move, MoveList, Outcome, PieceType, Square,
+    Bitboard, CastlingSide, Color, EnPassantMode, Move, MoveList, NO_PIECE, Outcome, Piece,
+    PieceType, Square, make_piece,
 };
 
 /// Count the number of legal moves at each node to the given depth (perft).

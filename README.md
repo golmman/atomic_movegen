@@ -19,6 +19,15 @@ reference implementation.
   board-aware `Board::move_from_uci()` (resolves castling and en passant),
   allocation-free `Move::write_uci()`, and `Display`
 - FEN parsing and output (standard notation only — `K`/`k` label the commoner)
+- SAN parsing and formatting: `Board::san()` / `Board::write_san()` emit
+  `O-O`/`O-O-O`, standard disambiguation, `=Q`-style promotions, and a
+  `#`/`+` suffix taken from the child outcome; `Board::move_from_san()` resolves
+  SAN text to exactly one legal move (and rejects ambiguous text). The commoner
+  uses the letter `K`, as in FEN
+- Piece-set construction without a FEN string: `Setup` (+ `Board::from_setup()`
+  and the validating `Board::from_setup_with()`) builds a board from
+  `(Square, Piece)` pairs and state fields, and `Board::pieces()` iterates the
+  placement in ascending square order without allocating
 - Opt-in semantic validation for untrusted FENs: `Board::validate()`,
   `Board::from_fen_with()`, `FenPolicy`, and `ValidationErrors`. The default
   `Board::from_fen()` stays permissive and unchanged.
@@ -119,6 +128,38 @@ validated against `Board::legal` and against a cloned `do_move` child for every
 pseudo-legal move of the 41-position perft corpus and of seeded random
 play-outs (`tests/effects.rs`).
 
+For SAN interchange and piece-set construction:
+
+```rust
+use atomic_movegen::{Board, Setup};
+
+let board = Board::from_fen(
+    "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+).unwrap();
+let short = board.move_from_uci("e1g1").unwrap();
+assert_eq!(board.san(short).as_deref(), Some("O-O"));
+assert_eq!(board.move_from_san("0-0"), Some(short)); // zero variant accepted
+
+// Build the same position piece by piece.
+let mut setup = Setup::new();
+for (square, piece) in board.pieces() {
+    setup.place(square, piece);
+}
+setup
+    .set_side_to_move(board.side_to_move())
+    .set_castling_rights(board.castling_rights());
+let rebuilt = Board::from_setup(&setup).unwrap();
+assert_eq!(rebuilt.fen(), board.fen());
+assert_eq!(rebuilt.hash(), board.hash());
+```
+
+`Board::move_from_san()` returns `None` for ambiguous, malformed, or illegal
+text — it never picks one of several candidates. It accepts `O-O`/`O-O-O` and
+`0-0`/`0-0-0`, one trailing `+`/`#`, an optional capture `x`, promotions as
+`=Q`/`Q` (either case; `K` is rejected because the commoner is not a promotion
+target), and disambiguation by file, rank, both, or a full origin square.
+`Board::san()` and `Board::write_san()` only format **legal** moves.
+
 ## Usage (CLI perft)
 
 ```sh
@@ -157,7 +198,15 @@ cargo run --example debug_moves "FEN"         # pseudo-legal vs. legal counts, d
 cargo run --example pawn_debug "FEN"          # pawn inspections and manual move checks
 cargo run --example test_d5g8                 # attack-table sanity check (hardcoded position)
 cargo run --release --example effect_bench    # effect-path vs board-write microbenchmark
+cargo run --example san "FEN"                 # legal moves as SAN + UCI (round-trip checked)
+cargo run --release --example verify_san [DEPTH] [PATH]  # SAN/Setup round-trip over the perft corpus
 ```
+
+`verify_san` walks every corpus position in `tests/perft_values.md` to `DEPTH`
+(default 3) and checks, for every legal move, that SAN round-trips and that a
+`Setup`-rebuilt board matches the original FEN, key, and legal move list. At
+depth 3 that is ~507 k positions and ~14 M moves in ~6 s (release). It exits 0
+if everything passes and 1 otherwise.
 
 ## Feature flags
 

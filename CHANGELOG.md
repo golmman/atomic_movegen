@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- SAN parsing and formatting. `Board::san()` (allocating) and
+  `Board::write_san()` (allocation-free) format a **legal** move in standard
+  algebraic notation: `O-O`/`O-O-O`, standard disambiguation by origin file,
+  then rank, then both, `=Q`/`=R`/`=B`/`=N` promotions, pawn-capture origin
+  files, and a trailing `#`/`+` taken from the child outcome (extinction and
+  mate/stalemate loss are `#`, a check that continues is `+`). The commoner's
+  letter is `K`, as in FEN. `Board::move_from_san()` resolves SAN text to
+  exactly one legal move and returns `None` for ambiguous, malformed, or
+  illegal input; it accepts `O-O`/`O-O-O` and `0-0`/`0-0-0`, one trailing
+  `+`/`#`, an optional capture `x`, `=Q` and bare `Q` promotion forms (either
+  case, `K` rejected), and disambiguation by file, rank, both, or a full
+  origin square. Both directions are round-trip tested over the 41-position
+  perft corpus (`tests/interchange.rs`, `examples/verify_san.rs`).
+- Piece-set construction and inspection. `Setup` (`atomic_movegen::setup`)
+  builds a position from `(Square, Piece)` pairs plus the side to move,
+  castling rights, en-passant target, half-move clock, and game ply.
+  `Board::from_setup()` mirrors the permissiveness of `Board::from_fen()` and
+  reports structural problems as `SetupError` (`InvalidCastlingRight`,
+  `InvalidEnPassant`, `InvalidGamePly`); `Board::from_setup_with()` applies the
+  existing `FenPolicy`/`ValidationErrors` layer. `Board::pieces()` and
+  `Setup::pieces()` iterate the placement in ascending square order without
+  allocating. `Setup` is a data builder only: it duplicates no move generation
+  or legality logic.
+- `Piece`, `NO_PIECE`, and `make_piece` are re-exported at the crate root, so a
+  piece set can be built without naming the `types` module.
+- `examples/san.rs` prints the legal moves of a position as SAN + UCI and
+  verifies the SAN round-trip; `examples/verify_san.rs` runs the SAN and
+  `Setup` round-trips over the whole perft corpus (depth 3 in ~6 s release).
 - `EffectContext` and `MoveEffect` (`atomic_movegen::effects`): a
   position-constant context plus a read-only per-move classification — capture,
   blast casualties, checks the enemy commoner, explodes the enemy commoner,

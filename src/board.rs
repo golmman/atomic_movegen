@@ -722,7 +722,10 @@ impl Board {
     }
 
     /// Accumulate semantic validation errors for `policy`.
-    fn validation_errors(&self, policy: FenPolicy) -> ValidationErrors {
+    ///
+    /// Crate-internal so that [`Board::from_setup_with`](crate::Board::from_setup_with)
+    /// can reuse the FEN validation vocabulary for piece-set construction.
+    pub(crate) fn validation_errors(&self, policy: FenPolicy) -> ValidationErrors {
         if policy == FenPolicy::Permissive {
             return ValidationErrors::empty();
         }
@@ -984,6 +987,45 @@ impl Board {
         self.hash = self.recomputed_hash();
     }
 
+    /// Build a board from a raw square array and position state, deriving the
+    /// color/type bitboards and the Zobrist hash.
+    ///
+    /// This is the crate-private constructor behind
+    /// [`Board::from_setup`](crate::Board::from_setup); it performs no
+    /// validation and allocates nothing.
+    pub(crate) fn from_setup_parts(
+        squares: [Piece; 64],
+        side_to_move: Color,
+        castling_rights: u8,
+        ep_square: Option<Square>,
+        rule50: u16,
+        game_ply: u16,
+    ) -> Board {
+        let mut by_color = [Bitboard::EMPTY; 2];
+        let mut by_type = [Bitboard::EMPTY; 6];
+        for (idx, piece) in squares.iter().enumerate() {
+            let Some(color) = piece.color() else { continue };
+            let Some(pt) = piece.type_of() else { continue };
+            let bb = Bitboard::square_bb(SQUARES[idx]);
+            by_color[color as usize] = by_color[color as usize] | bb;
+            by_type[pt as usize] = by_type[pt as usize] | bb;
+        }
+
+        let mut board = Board {
+            squares,
+            by_color,
+            by_type,
+            side_to_move,
+            castling_rights,
+            ep_square,
+            rule50,
+            game_ply,
+            hash: 0,
+        };
+        board.recompute_hash();
+        board
+    }
+
     /// Return the piece on a square (or [`NO_PIECE`] if empty or `Square::NONE`).
     #[inline(always)]
     #[must_use]
@@ -992,6 +1034,31 @@ impl Board {
             return NO_PIECE;
         }
         self.squares[sq as usize]
+    }
+
+    /// Iterate over the occupied squares in ascending square order.
+    ///
+    /// Yields `(square, piece)` pairs and skips empty squares, so the sequence
+    /// is exactly the piece placement of [`fen`](Self::fen) read from `a1`
+    /// upwards. The iterator borrows the board and allocates nothing.
+    ///
+    /// ```
+    /// use atomic_movegen::{Board, Color, PieceType, Square, make_piece, Piece};
+    ///
+    /// let board = Board::new();
+    /// assert_eq!(board.pieces().count(), 32);
+    /// assert_eq!(
+    ///     board.pieces().next(),
+    ///     Some((Square::A1, make_piece(Color::White, PieceType::Rook)))
+    /// );
+    /// assert!(board.pieces().any(|(sq, piece): (Square, Piece)| {
+    ///     sq == Square::E1 && piece == make_piece(Color::White, PieceType::Commoner)
+    /// }));
+    /// ```
+    pub fn pieces(&self) -> impl Iterator<Item = (Square, Piece)> + '_ {
+        SQUARES.iter().copied().filter_map(move |sq| {
+            Some((sq, self.squares[sq as usize])).filter(|&(_, p)| p != NO_PIECE)
+        })
     }
 
     /// Return `true` if the given square is empty.
@@ -2694,6 +2761,414 @@ impl Board {
         }
         Some(Move::make_enpassant(m.from_sq(), m.to_sq()))
     }
+
+    /// Return the SAN (standard algebraic notation) of `m`.
+    ///
+    /// Returns `None` unless `m` is one of this position's legal moves, so the
+    /// text is always unambiguous and always parses back to `m` with
+    /// [`move_from_san`](Self::move_from_san).
+    ///
+    /// # Grammar
+    ///
+    /// - Castling is written `O-O` / `O-O-O` (the internal commoner-takes-rook
+    ///   encoding is translated, exactly like [`Move::write_uci`]).
+    /// - Pawn pushes are the destination square (`e4`); pawn captures prefix the
+    ///   origin file (`exd5`, including en passant); promotions append
+    ///   `=Q`, `=R`, `=B`, or `=N` (`e8=Q`, `exd8=R`).
+    /// - Piece moves write the piece letter (`N`, `B`, `R`, `Q`, `K` — `K` is
+    ///   the atomic **commoner**, not a FIDE king), then standard
+    ///   disambiguation by origin file, else origin rank, else both
+    ///   (`Nbd2`, `R1a3`, `Qh4e1`), then `x` for a capture, then the
+    ///   destination.
+    /// - A trailing `#` is written when the move leaves the opponent with
+    ///   [`Outcome::Loss`] (the enemy commoner exploded away, or the opponent
+    ///   has no legal move while their commoner is attacked), and `+` when the
+    ///   opponent's commoner is attacked but the game goes on.
+    ///
+    /// The suffix is computed with the same rules as [`Board::outcome`] and
+    /// [`Board::checkers`], via [`EffectContext`](crate::EffectContext); the
+    /// `#`/`+` decision never changes legality.
+    ///
+    /// This allocates one `String`; use [`write_san`](Self::write_san) to
+    /// format without allocating.
+    ///
+    /// ```
+    /// use atomic_movegen::{Board, Move};
+    ///
+    /// let board = Board::new();
+    /// let e4 = Move::from_uci("e2e4").unwrap();
+    /// assert_eq!(board.san(e4).as_deref(), Some("e4"));
+    /// assert_eq!(board.move_from_san("e4"), Some(e4));
+    /// ```
+    #[must_use]
+    pub fn san(&self, m: Move) -> Option<String> {
+        let mut state = StateInfo::new();
+        self.populate_state(&mut state);
+        if !self.is_legal_with_state(m, &state) {
+            return None;
+        }
+        let mut text = String::with_capacity(8);
+        self.write_san_legal(m, &state, &mut text)
+            .expect("writing to a String cannot fail");
+        Some(text)
+    }
+
+    /// Write the SAN of `m` without allocating.
+    ///
+    /// `m` must be one of this position's legal moves; an illegal move makes
+    /// this return [`fmt::Error`] (the same error a failing writer produces, so
+    /// there is no separate SAN error type). [`san`](Self::san) is the
+    /// validating, allocating counterpart.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`fmt::Error`] when `m` is not legal or when the writer fails.
+    ///
+    /// ```
+    /// use atomic_movegen::{Board, Move};
+    ///
+    /// let board = Board::new();
+    /// let mut text = String::new();
+    /// board
+    ///     .write_san(Move::from_uci("g1f3").unwrap(), &mut text)
+    ///     .unwrap();
+    /// assert_eq!(text, "Nf3");
+    /// ```
+    pub fn write_san(&self, m: Move, out: &mut impl fmt::Write) -> fmt::Result {
+        let mut state = StateInfo::new();
+        self.populate_state(&mut state);
+        if !self.is_legal_with_state(m, &state) {
+            return Err(fmt::Error);
+        }
+        self.write_san_legal(m, &state, out)
+    }
+
+    /// SAN writer for a move that is known to be legal and for a populated
+    /// `state`; the single implementation shared by [`san`](Self::san) and
+    /// [`write_san`](Self::write_san).
+    fn write_san_legal(
+        &self,
+        m: Move,
+        state: &StateInfo,
+        out: &mut impl fmt::Write,
+    ) -> fmt::Result {
+        debug_assert!(self.is_legal_with_state(m, state), "SAN needs a legal move");
+
+        if m.is_castling() {
+            // The internal encoding is commoner-origin -> rook square.
+            return out.write_str(if file_of(m.to_sq()) == File::H {
+                "O-O"
+            } else {
+                "O-O-O"
+            });
+        }
+
+        let from = m.from_sq();
+        let to = m.to_sq();
+        let Some(pt) = self.piece_on(from).type_of() else {
+            debug_assert!(false, "legal move with an empty origin");
+            return Err(fmt::Error);
+        };
+        let capture = self.is_capture(m);
+
+        if pt == PieceType::Pawn {
+            if capture {
+                out.write_char(file_char(from))?;
+                out.write_char('x')?;
+            }
+            write_sq(out, to)?;
+            if m.is_promotion() {
+                out.write_char('=')?;
+                out.write_char(san_piece_char(m.promotion_type()).expect("promotion piece"))?;
+            }
+        } else {
+            out.write_char(san_piece_char(pt).expect("non-pawn piece"))?;
+            self.write_san_disambiguation(m, state, out)?;
+            if capture {
+                out.write_char('x')?;
+            }
+            write_sq(out, to)?;
+        }
+
+        // The suffix is decided by the child position. `checks_enemy` is
+        // exactly "the child is in check" (differentially tested in
+        // `tests/effects.rs`), and a child `Outcome::Loss` is checkmate,
+        // stalemate while attacked, or commoner extinction.
+        let ctx = crate::effects::EffectContext::new(self, state);
+        let effect = ctx.effect(self, m);
+        match ctx.outcome_after(self, m) {
+            Some(crate::types::Outcome::Loss) => out.write_char('#'),
+            _ if effect.checks_enemy => out.write_char('+'),
+            _ => Ok(()),
+        }
+    }
+
+    /// Write the origin disambiguator for a non-pawn, non-castling move.
+    ///
+    /// Standard SAN: nothing when `m` is the only legal move of that piece type
+    /// to the destination, otherwise the origin file when that is unique,
+    /// else the origin rank, else the whole origin square.
+    fn write_san_disambiguation(
+        &self,
+        m: Move,
+        state: &StateInfo,
+        out: &mut impl fmt::Write,
+    ) -> fmt::Result {
+        let from = m.from_sq();
+        let to = m.to_sq();
+        let pt = self.piece_on(from).type_of();
+        let mut rivals = 0u32;
+        let mut same_file = false;
+        let mut same_rank = false;
+        let _ = crate::movegen::for_each_legal_with_state::<()>(self, state, &mut |cand| {
+            if cand.move_type() != MoveType::Castling
+                && cand.to_sq() == to
+                && cand.from_sq() != from
+                && self.piece_on(cand.from_sq()).type_of() == pt
+            {
+                rivals += 1;
+                same_file |= file_of(cand.from_sq()) == file_of(from);
+                same_rank |= rank_of(cand.from_sq()) == rank_of(from);
+            }
+            std::ops::ControlFlow::Continue(())
+        });
+
+        if rivals == 0 {
+            Ok(())
+        } else if !same_file {
+            out.write_char(file_char(from))
+        } else if !same_rank {
+            out.write_char(rank_char(from))
+        } else {
+            write_sq(out, from)
+        }
+    }
+
+    /// Resolve SAN text to one of this position's legal moves.
+    ///
+    /// The accepted grammar is the one [`san`](Self::san) emits, plus the
+    /// interoperability variants below. Returns `None` for malformed text,
+    /// illegal moves, and ambiguity — a text that matches more than one legal
+    /// move is never resolved by picking one.
+    ///
+    /// - Castling accepts `O-O` / `O-O-O` and `0-0` / `0-0-0`.
+    /// - One trailing `+`, `#`, or `++` is stripped and otherwise ignored.
+    /// - Pawn pushes are the destination square, pawn captures prefix the origin
+    ///   file; the `x` of a capture is optional.
+    /// - Promotions accept `=Q`, `=R`, `=B`, `=N` and the suffix-less `Q`, `R`,
+    ///   `B`, `N` forms (either case). Promotion to the commoner (`K`) is
+    ///   rejected: it is not an atomic move.
+    /// - Piece moves accept the piece letters `N`, `B`, `R`, `Q`, `K` and
+    ///   optional origin disambiguation by file, by rank, by both, or by a full
+    ///   origin square (`Nb1d2`).
+    ///
+    /// ```
+    /// use atomic_movegen::{Board, Move};
+    ///
+    /// let board = Board::new();
+    /// assert_eq!(board.move_from_san("e4"), board.move_from_uci("e2e4"));
+    /// assert_eq!(board.move_from_san("Nf3+"), board.move_from_uci("g1f3"));
+    /// assert_eq!(board.move_from_san("Qf3"), None);
+    /// ```
+    #[must_use]
+    pub fn move_from_san(&self, text: &str) -> Option<Move> {
+        if text.is_empty() || !text.is_ascii() {
+            return None;
+        }
+
+        // 1. Strip the check/mate suffix. Any other trailing punctuation stays
+        //    in the text and makes the destination parse fail.
+        let mut body = text;
+        while let Some(stripped) = body.strip_suffix(['+', '#']) {
+            body = stripped;
+        }
+        if body.is_empty() {
+            return None;
+        }
+
+        // 2. Castling, in both spelling variants (and only if it is legal).
+        let castling_uci = match body {
+            "O-O" | "0-0" => Some(match self.side_to_move {
+                Color::White => "e1g1",
+                Color::Black => "e8g8",
+            }),
+            "O-O-O" | "0-0-0" => Some(match self.side_to_move {
+                Color::White => "e1c1",
+                Color::Black => "e8c8",
+            }),
+            _ => None,
+        };
+        if let Some(uci) = castling_uci {
+            return self.move_from_uci(uci);
+        }
+
+        // 3. Strip the promotion suffix in its `=Q` and bare `Q` forms.
+        let mut promotion = None;
+        let mut rest = body;
+        for candidate in ["=Q", "=R", "=B", "=N", "Q", "R", "B", "N"] {
+            if let Some(stripped) = rest.strip_suffix(candidate) {
+                promotion = san_piece_type(candidate.as_bytes()[candidate.len() - 1]);
+                rest = stripped;
+                break;
+            }
+        }
+        if promotion.is_none() {
+            // Lower-case promotion letters are accepted too, but only behind an
+            // `=`, so a destination square such as `b4` is never misread.
+            for candidate in ["=q", "=r", "=b", "=n"] {
+                if let Some(stripped) = rest.strip_suffix(candidate) {
+                    promotion = san_piece_type(candidate.as_bytes()[1]);
+                    rest = stripped;
+                    break;
+                }
+            }
+        }
+        // A promotion letter may not be mistaken for the destination of a
+        // piece move: only a pawn destination is ever followed by one.
+        if promotion.is_some() && rest.len() < 2 {
+            return None;
+        }
+
+        // 4. Destination, then the optional capture marker.
+        if rest.len() < 2 {
+            return None;
+        }
+        let split = rest.len() - 2;
+        let to = crate::types::parse_sq(&rest[split..])?;
+        let mut prefix = &rest[..split];
+        let mut capture = None;
+        if let Some(stripped) = prefix.strip_suffix('x') {
+            capture = Some(true);
+            prefix = stripped;
+        }
+
+        // 5. Origin: a piece letter with optional disambiguation, a capture file
+        //    letter, or nothing (a pawn push).
+        let mut piece_type = Some(PieceType::Pawn);
+        let mut from_file = None;
+        let mut from_rank = None;
+        let mut from_sq = None;
+        let first = prefix.as_bytes().first().copied();
+        match first {
+            None => {}
+            Some(c @ (b'N' | b'B' | b'R' | b'Q' | b'K')) => {
+                piece_type = san_piece_type(c);
+                if promotion.is_some() {
+                    // Only a pawn promotes.
+                    return None;
+                }
+                let disambiguation = &prefix[1..];
+                match disambiguation.len() {
+                    0 => {}
+                    1 => {
+                        let c = disambiguation.as_bytes()[0];
+                        if let Some(file) = parse_file_char(c) {
+                            from_file = Some(file);
+                        } else {
+                            from_rank = Some(parse_rank_char(c)?);
+                        }
+                    }
+                    2 => {
+                        let sq = crate::types::parse_sq(disambiguation)?;
+                        from_sq = Some(sq);
+                    }
+                    _ => return None,
+                }
+            }
+            Some(c) => {
+                // A pawn capture: exactly one file letter.
+                if prefix.len() != 1 {
+                    return None;
+                }
+                from_file = Some(parse_file_char(c)?);
+            }
+        }
+
+        // 6. Filter the legal moves; exactly one candidate must survive.
+        let mut state = StateInfo::new();
+        self.populate_state(&mut state);
+        let mut found = None;
+        let _ = crate::movegen::for_each_legal_with_state::<()>(self, &state, &mut |candidate| {
+            let matches = candidate.to_sq() == to
+                && self.piece_on(candidate.from_sq()).type_of() == piece_type
+                && match promotion {
+                    Some(pt) => candidate.is_promotion() && candidate.promotion_type() == pt,
+                    None => !candidate.is_promotion(),
+                }
+                && capture.is_none_or(|_| self.is_capture(candidate))
+                && from_file.is_none_or(|f| file_of(candidate.from_sq()) == f)
+                && from_rank.is_none_or(|r| rank_of(candidate.from_sq()) == r)
+                && from_sq.is_none_or(|sq| candidate.from_sq() == sq);
+            if matches {
+                if found.is_some() {
+                    found = Some(Move::NONE);
+                    return std::ops::ControlFlow::Break(());
+                }
+                found = Some(candidate);
+            }
+            std::ops::ControlFlow::Continue(())
+        });
+
+        found.filter(|&m| m != Move::NONE)
+    }
+}
+
+/// Return the SAN piece letter for a non-pawn piece type.
+///
+/// The commoner uses `K`, the same letter as the FEN label.
+fn san_piece_char(pt: PieceType) -> Option<char> {
+    match pt {
+        PieceType::Knight => Some('N'),
+        PieceType::Bishop => Some('B'),
+        PieceType::Rook => Some('R'),
+        PieceType::Queen => Some('Q'),
+        PieceType::Commoner => Some('K'),
+        PieceType::Pawn => None,
+    }
+}
+
+/// Inverse of [`san_piece_char`].
+fn san_piece_type(c: u8) -> Option<PieceType> {
+    match c.to_ascii_uppercase() {
+        b'N' => Some(PieceType::Knight),
+        b'B' => Some(PieceType::Bishop),
+        b'R' => Some(PieceType::Rook),
+        b'Q' => Some(PieceType::Queen),
+        b'K' => Some(PieceType::Commoner),
+        _ => None,
+    }
+}
+
+/// Parse a SAN file letter (`a`–`h`).
+fn parse_file_char(c: u8) -> Option<File> {
+    match c {
+        b'a'..=b'h' => Some(file_of(Square::from_u8(c - b'a'))),
+        _ => None,
+    }
+}
+
+/// Parse a SAN rank digit (`1`–`8`).
+fn parse_rank_char(c: u8) -> Option<Rank> {
+    match c {
+        b'1'..=b'8' => Some(rank_of(Square::from_u8((c - b'1') << 3))),
+        _ => None,
+    }
+}
+
+/// Write the file letter of a square.
+fn file_char(sq: Square) -> char {
+    (b'a' + file_of(sq) as u8) as char
+}
+
+/// Write the rank digit of a square.
+fn rank_char(sq: Square) -> char {
+    (b'1' + rank_of(sq) as u8) as char
+}
+
+/// Write a square in algebraic notation without allocating.
+fn write_sq(out: &mut impl fmt::Write, sq: Square) -> fmt::Result {
+    out.write_char(file_char(sq))?;
+    out.write_char(rank_char(sq))
 }
 
 /// Return `true` if an enemy non-commoner piece attacks `sq` on `occupied`.
@@ -5890,5 +6365,335 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- SAN: formatting, parsing, and the round-trip contract ---------------
+
+    /// A deterministic xorshift64 PRNG for the SAN round-trip play-outs.
+    struct SanRng(u64);
+
+    impl SanRng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+    }
+
+    /// Resolve a UCI string on `board`, panicking with the FEN on failure.
+    fn uci(board: &Board, text: &str) -> Move {
+        board
+            .move_from_uci(text)
+            .unwrap_or_else(|| panic!("{}: {text} must be legal", board.fen()))
+    }
+
+    /// Assert that `m` formats to exactly `expected` SAN.
+    fn assert_san(fen: &str, m: &str, expected: &str) {
+        let board = Board::from_fen(fen).expect("fixture FEN must parse");
+        let mv = uci(&board, m);
+        assert_eq!(board.san(mv).as_deref(), Some(expected), "{fen} / {m}");
+        assert_eq!(
+            board.move_from_san(expected),
+            Some(mv),
+            "{fen} / {expected}: parse"
+        );
+    }
+
+    /// Assert the SAN of `m` with any trailing `+`/`#` removed.
+    fn assert_san_body(fen: &str, m: &str, expected: &str) {
+        let board = Board::from_fen(fen).expect("fixture FEN must parse");
+        let mv = uci(&board, m);
+        let san = board
+            .san(mv)
+            .unwrap_or_else(|| panic!("{fen} / {m}: no SAN"));
+        let body = san.trim_end_matches(['+', '#']);
+        assert_eq!(body, expected, "{fen} / {m}");
+        assert_eq!(
+            board.move_from_san(expected),
+            Some(mv),
+            "{fen} / {expected}"
+        );
+    }
+
+    #[test]
+    fn san_start_position() {
+        let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+        assert_san(fen, "e2e4", "e4");
+        assert_san(fen, "e2e3", "e3");
+        assert_san(fen, "g1f3", "Nf3");
+        assert_san(fen, "b1c3", "Nc3");
+        assert_san(fen, "b1a3", "Na3");
+        assert_san(fen, "d2d4", "d4");
+        let board = Board::from_fen(fen).unwrap();
+        // No SAN text for a non-move or for the wrong side to move.
+        assert_eq!(board.san(Move::NONE), None);
+        assert_eq!(board.san(Move::from_uci("e7e5").unwrap()), None);
+        assert_eq!(board.move_from_san("e5"), None);
+    }
+
+    #[test]
+    fn san_disambiguation() {
+        // Knights reaching d2 from b1 and f3: the origin file decides.
+        let fen = "4k3/8/8/8/8/5N2/8/1N2K3 w - - 0 1";
+        assert_san_body(fen, "b1d2", "Nbd2");
+        assert_san_body(fen, "f3d2", "Nfd2");
+        // A lone knight needs no disambiguation.
+        let fen = "4k3/8/8/8/8/8/8/1N2K3 w - - 0 1";
+        assert_san_body(fen, "b1d2", "Nd2");
+
+        // Rooks sharing the a-file: the origin rank decides.
+        let fen = "4k3/8/8/8/8/R7/8/R3K3 w - - 0 1";
+        assert_san_body(fen, "a1a2", "R1a2");
+        assert_san_body(fen, "a3a2", "R3a2");
+        // Rooks on rank 1 with distinct destinations: nothing to disambiguate.
+        let fen = "4k3/8/8/8/8/8/8/R3K2R w - - 0 1";
+        assert_san_body(fen, "a1d1", "Rd1");
+        assert_san_body(fen, "h1h5", "Rh5");
+
+        // Queens on the a-file and on the fourth rank: one rival shares the
+        // file, another the rank, so both coordinates are written.
+        let fen = "4k3/8/8/8/Q6Q/8/Q7/4K3 w - - 0 1";
+        assert_san_body(fen, "a4c4", "Qa4c4");
+        assert_san_body(fen, "a2c2", "Q2c2");
+        assert_san_body(fen, "h4c4", "Qhc4");
+
+        // Only one of the two knights can reach d4: `e2` is pinned to the
+        // commoner by the rook on e8, so `f3` needs no disambiguation.
+        let fen = "4r1k1/8/8/8/8/5N2/4N3/4K3 w - - 0 1";
+        assert_san_body(fen, "f3d4", "Nd4");
+        let board = Board::from_fen(fen).unwrap();
+        assert!(!board.pinned(Color::White).is_empty());
+        // ... the pinned knight's text is rejected, and `Nd4` still resolves
+        // (unambiguously, to the one legal knight move) instead of failing.
+        assert_eq!(board.move_from_san("Nc3"), None);
+        assert_eq!(board.move_from_san("Nd4"), Some(uci(&board, "f3d4")));
+    }
+
+    #[test]
+    fn san_castling() {
+        let fen = "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1";
+        assert_san(fen, "e1g1", "O-O");
+        assert_san(fen, "e1c1", "O-O-O");
+        let board = Board::from_fen(fen).unwrap();
+        // The zero variants are accepted on input and never emitted.
+        assert_eq!(board.move_from_san("0-0"), board.move_from_uci("e1g1"));
+        assert_eq!(board.move_from_san("0-0-0"), board.move_from_uci("e1c1"));
+        assert_eq!(board.move_from_san("O-O+"), board.move_from_uci("e1g1"));
+
+        let fen = "r3k2r/8/8/8/8/8/8/R3K2R b KQkq - 0 1";
+        assert_san(fen, "e8g8", "O-O");
+        assert_san(fen, "e8c8", "O-O-O");
+        let board = Board::from_fen(fen).unwrap();
+        assert_eq!(board.move_from_san("0-0"), board.move_from_uci("e8g8"));
+        assert_eq!(board.move_from_san("0-0-0"), board.move_from_uci("e8c8"));
+
+        // Without the right, castling text resolves to nothing.
+        let board = Board::from_fen("r3k2r/8/8/8/8/8/8/R3K2R w - - 0 1").unwrap();
+        assert_eq!(board.move_from_san("O-O"), None);
+        assert_eq!(board.move_from_san("0-0-0"), None);
+        // A rook move that shares the castling square is still resolved.
+        let board = Board::from_fen("r3k2r/8/8/8/8/8/8/R3K2R w - - 0 1").unwrap();
+        assert_eq!(board.move_from_san("Rh1g1"), board.move_from_uci("h1g1"));
+    }
+
+    #[test]
+    fn san_pawn_capture_en_passant() {
+        // Normal pawn capture.
+        assert_san("4k3/8/8/2p5/3P4/8/8/4K3 w - - 0 1", "d4c5", "dxc5");
+        let fen = "rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3";
+        let board = Board::from_fen(fen).unwrap();
+        assert_eq!(board.move_from_san("exd6"), board.move_from_uci("e5d6"));
+        // The capture marker is optional on input for pawn captures too.
+        assert_eq!(board.move_from_san("ed6"), board.move_from_uci("e5d6"));
+
+        // En passant, both colours, including a checking one.
+        let fen = "rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3";
+        assert_san(fen, "e5d6", "exd6");
+        let fen = "rnbqkbnr/pppp1ppp/8/8/3Pp3/8/PPP1PPPP/RNBQKBNR b KQkq d3 0 3";
+        assert_san(fen, "e4d3", "exd3");
+    }
+
+    #[test]
+    fn san_promotion() {
+        let fen = "8/4P3/8/8/8/8/k7/4K3 w - - 0 1";
+        assert_san(fen, "e7e8q", "e8=Q");
+        assert_san(fen, "e7e8r", "e8=R");
+        assert_san(fen, "e7e8b", "e8=B");
+        assert_san(fen, "e7e8n", "e8=N");
+        let board = Board::from_fen(fen).unwrap();
+        // Suffix-less and lower-case input forms.
+        assert_eq!(board.move_from_san("e8Q"), board.move_from_uci("e7e8q"));
+        assert_eq!(board.move_from_san("e8=q"), board.move_from_uci("e7e8q"));
+        // Promotion to the commoner is not an atomic move.
+        assert_eq!(board.move_from_san("e8=K"), None);
+        assert_eq!(board.move_from_san("e8K"), None);
+
+        // Capture promotions keep the origin file.
+        let fen = "3r4/4P3/8/8/8/8/k7/4K3 w - - 0 1";
+        assert_san(fen, "e7d8q", "exd8=Q");
+        assert_san(fen, "e7d8n", "exd8=N");
+        let board = Board::from_fen(fen).unwrap();
+        assert_eq!(board.move_from_san("exd8R"), board.move_from_uci("e7d8r"));
+    }
+
+    #[test]
+    fn san_check_and_mate_suffix() {
+        // A quiet check that is not mate.
+        assert_san("4k3/8/8/8/8/8/8/R3K3 w - - 0 1", "a1a8", "Ra8+");
+        // A mate: the opponent has no legal move while attacked. It also needs
+        // disambiguation (two rooks reach g1), so the suffix follows the move.
+        assert_san("7k/8/8/5N2/3K4/8/8/R6R w - - 0 1", "a1g1", "Rag1#");
+        // An explosion of the enemy commoner is `#` even though the child is
+        // not in check: the blast on f7 also removes the commoner on g8.
+        assert_san("6k1/5n2/8/8/8/8/8/K4R2 w - - 0 1", "f1f7", "Rxf7#");
+        // No suffix for a quiet move into a drawn, unprotected position.
+        assert_san("4k3/8/8/8/8/8/8/4K2R w - - 0 1", "h1h2", "Rh2");
+    }
+
+    #[test]
+    fn san_rejects_ambiguous_and_illegal() {
+        let fen = "4k3/8/8/8/8/5N2/8/1N2K3 w - - 0 1";
+        let board = Board::from_fen(fen).unwrap();
+        // `Nd2` is ambiguous between b1 and f3.
+        assert_eq!(board.move_from_san("Nd2"), None);
+        // Wrong side, blocked, impossible, malformed, trailing junk.
+        assert_eq!(board.move_from_san("e5"), None);
+        assert_eq!(board.move_from_san("Nf7"), None);
+        assert_eq!(board.move_from_san("Nz3"), None);
+        assert_eq!(board.move_from_san(""), None);
+        assert_eq!(board.move_from_san("e4!"), None);
+        assert_eq!(board.move_from_san("e4 e5"), None);
+        assert_eq!(board.move_from_san("§"), None);
+        assert_eq!(board.move_from_san("#"), None);
+        assert_eq!(board.move_from_san("Ke3"), None);
+        // Two queens can reach c3: even the rank-suffixed text is not enough.
+        let board = Board::from_fen("4k3/8/8/8/Q6Q/8/Q7/4K3 w - - 0 1").unwrap();
+        assert_eq!(board.move_from_san("Qc3"), None);
+        // A pinned piece cannot move, so its text is rejected.
+        let board = Board::from_fen("4r1k1/8/8/8/8/8/4N3/4K3 w - - 0 1").unwrap();
+        assert_eq!(board.move_from_san("Nc3"), None);
+    }
+
+    #[test]
+    fn write_san_matches_san() {
+        const FENS: &[&str] = &[
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+            "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1",
+            "rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3",
+            "4k3/8/8/8/8/5N2/8/1N2K3 w - - 0 1",
+        ];
+        for fen in FENS {
+            let board = Board::from_fen(fen).expect("fixture FEN must parse");
+            let mut legal = MoveList::new();
+            crate::movegen::generate_legal(&board, &mut legal);
+            assert!(!legal.is_empty(), "{fen}");
+            for &m in legal.as_slice() {
+                let mut written = String::new();
+                board.write_san(m, &mut written).expect("legal move writes");
+                assert_eq!(Some(written.clone()), board.san(m), "{fen} / {m}");
+                assert_eq!(board.move_from_san(&written), Some(m), "{fen} / {m}");
+            }
+            // An illegal move is an error, not a silent empty write.
+            let mut written = String::new();
+            assert!(board.write_san(Move::NONE, &mut written).is_err());
+            assert!(written.is_empty());
+        }
+    }
+
+    #[test]
+    fn san_roundtrips_every_legal_move() {
+        const FENS: &[&str] = &[
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1",
+            "r4b1r/p1N1k1p1/2pNp2p/5p2/1n1P1P2/6PP/PP6/R1B1K3 b Q - 4 17",
+            "r1b1Brk1/ppp5/6pp/3p4/5p2/P3PP2/1P4PP/R4RK1 b - - 1 15",
+            "7k/pp6/8/1PP5/6pp/7P/P3b3/4R1K1 b - - 0 28",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            "rnb1kbnr/pppp2pp/5q2/4ppN1/3P4/8/PPP1PPPP/RNBQKB1R w KQkq - 0 1",
+        ];
+        let mut checked = 0u64;
+        let mut with_suffix = 0u64;
+        let mut with_disambiguation = 0u64;
+        for fen in FENS {
+            let board = Board::from_fen(fen).expect("fixture FEN must parse");
+            let mut legal = MoveList::new();
+            crate::movegen::generate_legal(&board, &mut legal);
+            for &m in legal.as_slice() {
+                let san = board
+                    .san(m)
+                    .unwrap_or_else(|| panic!("{fen} / {m}: no SAN"));
+                assert_eq!(board.move_from_san(&san), Some(m), "{fen} / {san}");
+                checked += 1;
+                if san.ends_with('+') || san.ends_with('#') {
+                    with_suffix += 1;
+                }
+                if san.len() > 4
+                    && !san.starts_with("O-O")
+                    && !san.contains('=')
+                    && san.starts_with(['N', 'B', 'R', 'Q', 'K'])
+                {
+                    with_disambiguation += 1;
+                }
+            }
+        }
+        assert!(checked > 150, "expected a real corpus, got {checked}");
+        // Non-vacuity: the corpus exercises both the suffix and the
+        // disambiguation paths.
+        assert!(with_suffix > 0, "no checking or mating SAN");
+        assert!(with_disambiguation > 0, "no disambiguated SAN");
+
+        // Seeded play-outs: the round-trip must survive moves that are only
+        // reachable after other moves.
+        let mut played = 0u64;
+        for seed in 0..4u64 {
+            let mut board = Board::new();
+            let mut state = StateInfo::new();
+            let mut rng = SanRng(0x5DEE_CE66_D1CE_4E5B ^ seed);
+            for _ in 0..120 {
+                board.populate_state(&mut state);
+                let mut legal = MoveList::new();
+                crate::movegen::generate_legal_with_state(&board, &state, &mut legal);
+                if legal.is_empty() {
+                    break;
+                }
+                for &m in legal.as_slice() {
+                    let san = board.san(m).expect("legal move has SAN");
+                    assert_eq!(
+                        board.move_from_san(&san),
+                        Some(m),
+                        "{} / {san} / {m}",
+                        board.fen()
+                    );
+                }
+                let pick = (rng.next() % legal.len() as u64) as usize;
+                board.do_move(legal.as_slice()[pick], &mut state);
+                played += 1;
+            }
+        }
+        assert!(played > 100, "expected a real play-out, got {played}");
+    }
+
+    #[test]
+    fn san_promotion_with_mate_suffix() {
+        // The capture promotion on c8 blasts the commoner on d7 away, so it is
+        // a mate and gets the `#` suffix after the promotion piece.
+        let fen = "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1";
+        assert_san(fen, "b7c8q", "bxc8=Q#");
+        assert_san(fen, "b7c8n", "bxc8=N#");
+        let board = Board::from_fen(fen).unwrap();
+        assert_eq!(board.move_from_san("bxc8=Q#"), board.move_from_uci("b7c8q"));
+        assert_eq!(board.move_from_san("bxc8=N"), board.move_from_uci("b7c8n"));
+    }
+
+    #[test]
+    fn san_keeps_commoner_letter() {
+        // The commoner is `K` in SAN as in FEN.
+        assert_san("4k3/8/8/8/8/8/8/4K3 w - - 0 1", "e1e2", "Ke2");
+        assert_san("4k3/8/8/8/8/8/8/4K3 b - - 0 1", "e8e7", "Ke7");
     }
 }
