@@ -1,7 +1,7 @@
 //! Pseudo-legal and legal move generation for atomic chess.
 
 use crate::attacks;
-use crate::board::{BK_CASTLE, BQ_CASTLE, Board, StateInfo, TrivialLegality, WK_CASTLE, WQ_CASTLE};
+use crate::board::{BK_CASTLE, BQ_CASTLE, Board, FastLegality, StateInfo, WK_CASTLE, WQ_CASTLE};
 use crate::types::*;
 use std::ops::ControlFlow;
 
@@ -88,8 +88,12 @@ pub fn for_each_pseudo_legal<B>(
         f,
     )?;
 
-    // Castling moves
-    generate_castling(board, us, f)
+    // Castling moves. Most nodes have no castling rights for the side to move,
+    // so skip the whole path with one test.
+    if board.castling_rights() & castling_rights_mask(us) != 0 {
+        generate_castling(board, us, f)?;
+    }
+    ControlFlow::Continue(())
 }
 
 #[inline(always)]
@@ -190,6 +194,15 @@ fn generate_pawn_moves_for<B>(
     ControlFlow::Continue(())
 }
 
+/// The castling-right bits that belong to `us`.
+#[inline(always)]
+fn castling_rights_mask(us: Color) -> u8 {
+    match us {
+        Color::White => WK_CASTLE | WQ_CASTLE,
+        Color::Black => BK_CASTLE | BQ_CASTLE,
+    }
+}
+
 fn generate_castling<B>(
     board: &Board,
     us: Color,
@@ -263,8 +276,11 @@ fn generate_castling<B>(
 
 /// Generate all fully legal moves for the side to move.
 ///
-/// Wraps [`generate_pseudo_legal`] and filters out illegal moves using
-/// [`Board::legal`] and a fast-path trivial-legality check.
+/// Wraps [`generate_pseudo_legal`] and filters out illegal moves with the
+/// per-node fast-legality ladder: quiet moves, captures, explosions,
+/// self-explosions, en-passant blasts, and quiet commoner relocations are
+/// decided from node-constant bitboards, and only the remaining candidates
+/// reach [`Board::legal`].
 pub fn generate_legal(board: &Board, moves: &mut MoveList) {
     let mut state = StateInfo::new();
     board.populate_state(&mut state);
@@ -287,21 +303,22 @@ pub fn generate_legal_with_state(board: &Board, state: &StateInfo, moves: &mut M
 
     generate_pseudo_legal(board, moves);
 
-    // In-place compaction: fast-path accept without legal() call.
+    // In-place compaction: the ladder accepts most moves without a `legal()`
+    // call.
     let orig_len = moves.len();
     if orig_len == 0 {
         return;
     }
 
-    // Node-constant fast-path data, hoisted out of the compaction loop.
-    let trivial = TrivialLegality::new(board, state);
+    // Node-constant fast-legality data, hoisted out of the compaction loop.
+    let fast = FastLegality::new(board, state);
 
     let new_len = {
         let ms = moves.as_mut_slice();
         let mut write_idx = 0;
         for read_idx in 0..orig_len {
             let m = ms[read_idx];
-            if trivial.is_trivially_legal(board, m) || board.legal(m, state) {
+            if fast.is_legal(board, m, state) {
                 ms[write_idx] = m;
                 write_idx += 1;
             }
@@ -317,10 +334,9 @@ pub fn generate_legal_with_state(board: &Board, state: &StateInfo, moves: &mut M
 ///
 /// The stream visits exactly the moves that [`generate_legal`] collects, in the
 /// same order: it walks [`for_each_pseudo_legal`] and keeps the candidates that
-/// are trivially legal (the quiet fast path) or legal under
-/// [`EffectContext::is_legal`](crate::effects::EffectContext::is_legal). No
-/// [`MoveList`] is built and nothing is allocated. `f` must not mutate the
-/// board.
+/// the shared fast-legality ladder accepts, falling back to [`Board::legal`] for
+/// the rest. No [`MoveList`] is built and nothing is allocated. `f` must not
+/// mutate the board.
 ///
 /// Positions where the game is already over (either side has no commoner) emit
 /// nothing, matching [`generate_legal`]. This populates one temporary
@@ -356,13 +372,13 @@ pub fn for_each_legal_with_state<B>(
         return ControlFlow::Continue(());
     }
 
-    // Node-constant data, built once per node. The trivial quiet fast path is
-    // checked first so quiet moves do not pay for the effect computation.
-    let trivial = TrivialLegality::new(board, state);
-    let effects = crate::effects::EffectContext::new(board, state);
+    // Node-constant data, built once per node. The same ladder as
+    // `generate_legal_with_state`: the trivial quiet fast path first, then the
+    // widened rules, then `Board::legal`.
+    let fast = FastLegality::new(board, state);
 
     for_each_pseudo_legal(board, &mut |m| {
-        if trivial.is_trivially_legal(board, m) || effects.is_legal(board, m) {
+        if fast.is_legal(board, m, state) {
             f(m)
         } else {
             ControlFlow::Continue(())
@@ -398,9 +414,9 @@ pub fn has_legal_move_with_state(board: &Board, state: &StateInfo) -> bool {
         return false;
     }
 
-    let trivial = TrivialLegality::new(board, state);
+    let fast = FastLegality::new(board, state);
     for_each_pseudo_legal::<()>(board, &mut |m| {
-        if trivial.is_trivially_legal(board, m) || board.legal(m, state) {
+        if fast.is_legal(board, m, state) {
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(())
@@ -741,6 +757,26 @@ mod tests {
             });
             assert!(flow.is_continue());
             assert_eq!(streamed, expected.as_slice(), "{fen}");
+        }
+    }
+
+    #[test]
+    fn legal_stream_matches_legal_list() {
+        // The legal stream must visit exactly the legal list, in order: both go
+        // through the same fast-legality ladder.
+        for fen in STREAM_CORPUS {
+            let board = Board::from_fen(fen).expect("corpus FEN must parse");
+            let mut expected = MoveList::new();
+            generate_legal(&board, &mut expected);
+
+            let mut streamed = Vec::new();
+            let flow = for_each_legal::<()>(&board, &mut |m| {
+                streamed.push(m);
+                ControlFlow::Continue(())
+            });
+            assert!(flow.is_continue());
+            assert_eq!(streamed, expected.as_slice(), "{fen}");
+            assert_eq!(has_legal_move(&board), !expected.is_empty(), "{fen}");
         }
     }
 

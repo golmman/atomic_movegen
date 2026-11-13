@@ -41,6 +41,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Faster legal move generation. `generate_legal`, `generate_legal_with_state`,
+  `for_each_legal`, `for_each_legal_with_state`, and `has_legal_move_with_state`
+  share one per-node fast-legality ladder that decides more candidates from
+  node-constant bitboards instead of calling `Board::legal`: captures that empty
+  no blocker of an enemy slider's ray to the mover's commoner, blasts that
+  remove every enemy commoner, self-explosions, quiet commoner relocations, and
+  commoner captures are now decided directly. `Board::legal` remains the oracle
+  for everything the ladder cannot decide (checks, castling, pinned origins,
+  blasts that open a slider ray). No public API, move order, perft value,
+  Zobrist key, FEN output, or `Outcome` changed. Measured on the 41-position
+  perft corpus at depth 5: 10–12 % fewer instructions and ~4 % less wall time;
+  the legal stream (`for_each_legal`) is ~40 % cheaper per node than before.
+- `movegen::for_each_legal` / `for_each_legal_with_state` now filter with the
+  shared ladder instead of `EffectContext::is_legal`. The visited sequence is
+  unchanged (still exactly the `generate_legal` list, in order).
+- The pseudo-legal generator skips the castling path when the side to move has
+  no castling rights, instead of walking the castling checks per node. Order is
+  unchanged.
 - The “is this square attacked?” rule is now one shared helper
   (`board::is_attacked_by`) used by `Board::legal` and the effect path. No
   move-generation, perft, hash, FEN, or `Outcome` behaviour changed.

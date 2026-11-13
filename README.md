@@ -6,7 +6,11 @@ reference implementation.
 
 ## Features
 
-- Legal move generation (pseudo-legal + legality filtering)
+- Legal move generation (pseudo-legal + legality filtering) with a
+  per-node fast-legality ladder: quiet moves, captures, en-passant blasts,
+  commoner relocations, explosions, and self-explosions are decided from
+  node-constant bitboards, and only the remaining candidates reach
+  `Board::legal`
 - Single-move queries without building a move list: `Board::is_pseudo_legal()`,
   `Board::is_legal()`, and state-aware `Board::is_legal_with_state()`
 - Stable 16-bit `Move` wire encoding (`Move::to_bits()` / `Move::from_bits()`),
@@ -33,7 +37,8 @@ reference implementation.
   `movegen::for_each_pseudo_legal()` and `movegen::for_each_legal()` streams,
   typed `Board::has_castling_right()` with `CastlingSide`, and
   `attacks::between()` / `attacks::xray_*_attacks()` for engine-side legality
-  shortcuts
+  shortcuts. `movegen::for_each_legal()` and `movegen::has_legal_move()` use the
+  same fast-legality ladder as `generate_legal()`
 - Move effects without a board write: `EffectContext` (built once per position
   with `Board::effect_context()`) classifies every pseudo-legal candidate into a
   `MoveEffect` — capture, blast casualties, checks or explodes the enemy

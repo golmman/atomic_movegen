@@ -4,6 +4,7 @@
 use crate::attacks;
 use crate::bitboard::*;
 use crate::types::*;
+use std::cell::{Cell, OnceCell};
 use std::error::Error;
 use std::fmt;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
@@ -2957,6 +2958,305 @@ impl TrivialLegality {
     }
 }
 
+/// Widened part of the fast-legality ladder: node-constant data plus
+/// accept/reject rules for the moves [`TrivialLegality`] cannot decide.
+///
+/// The rules are sufficient conditions, never a second rules implementation:
+/// anything undecided falls back to [`Board::legal`], which stays the oracle.
+/// They rest on two facts about atomic chess.
+///
+/// 1. **Only removals matter for a commoner that stays put.** Enemy pieces
+///    never move inside one move, so the enemy's attacks on our commoner can
+///    only grow when the move *removes* a piece that blocked a slider's ray.
+///    Only the pieces between our commoner and an aligned enemy slider, of
+///    either colour (`sensitive` below), can do that: if the move empties none
+///    of them, our commoner cannot become attacked — provided it is not
+///    attacked now (`state.checkers` empty) and it does not move itself. When
+///    a blocker is emptied, [`WidenedLegality::rays_stay_closed`] refines the
+///    answer per sniper.
+/// 2. **A quiet commoner move is a one-square relocation.** The post-move
+///    occupancy is the pre-move occupancy with the origin emptied and the
+///    destination filled. Whether the *destination* is attacked does not depend
+///    on the destination being occupied (a piece cannot block an attack on its
+///    own square), so the shared attack query with the origin emptied answers
+///    it exactly.
+///
+/// The move's *emptied* set is `{from}` for quiet moves and promotions, and
+/// `{from, to} ∪ (non-pawns adjacent to to) ∪ {en passant victim}` for
+/// captures, which is exactly the [`Board::blast_casualties`] set plus the
+/// capturer's origin square (the capturer dies at ground zero).
+///
+/// A move that leaves the mover with fewer commoners is illegal (atomic
+/// self-explosion). A capture that removes every enemy commoner ends the game
+/// at once, so it is legal regardless of the mover's own exposure — the same
+/// branch order as [`Board::legal`] (own-commoner count first, then enemy
+/// extinction, then the attack query).
+///
+/// Multi-commoner boards (not reachable in legal play) fall back: the rules
+/// above reason about one commoner square, while [`Board::legal`] uses the
+/// lowest commoner of the post-move set.
+pub(crate) struct WidenedLegality {
+    /// The commoners of the side to move (`Board::commoners(us)`).
+    our_commoners: Bitboard,
+    /// The commoners of the opponent (`Board::commoners(them)`).
+    their_commoners: Bitboard,
+    /// Every occupied non-pawn square: the pieces a blast can destroy.
+    non_pawns: Bitboard,
+    /// Lazily computed aligned enemy sliders and their blockers.
+    snipers: Cell<Option<(Bitboard, Bitboard)>>,
+}
+
+impl WidenedLegality {
+    /// Snapshot the node-constant placement data.
+    ///
+    /// `board` must not change while the value is in use. Occupancy, the
+    /// per-type sets, and the pawn set of a node are fixed, so every field is
+    /// valid for all candidates.
+    #[inline(always)]
+    pub(crate) fn new(board: &Board) -> Self {
+        let us = board.side_to_move;
+        let them = us.flip();
+        Self {
+            our_commoners: board.commoners(us),
+            their_commoners: board.commoners(them),
+            non_pawns: board.occupied() & !board.by_type[PieceType::Pawn as usize],
+            snipers: Cell::new(None),
+        }
+    }
+
+    /// Decide a non-castling pseudo-legal move below the oracle, or return
+    /// `None` when the ladder cannot decide it.
+    ///
+    /// `state.checkers` must be empty: in check, every move needs the oracle.
+    /// `m` must come from the pseudo-legal generator (crate-private
+    /// precondition, not an input validation point).
+    #[inline(always)]
+    pub(crate) fn decide(&self, board: &Board, m: Move) -> Option<bool> {
+        debug_assert!(m != Move::NONE);
+        let move_type = m.move_type();
+        if move_type == MoveType::Castling {
+            // Pass-through-square attacks are a separate rule surface.
+            return None;
+        }
+
+        let from = m.from_sq();
+        let to = m.to_sq();
+        let from_bb = Bitboard::square_bb(from);
+        let to_bb = Bitboard::square_bb(to);
+        let is_capture =
+            move_type == MoveType::EnPassant || board.squares[m.dest_index()] != NO_PIECE;
+
+        if !(self.our_commoners & from_bb).is_empty() {
+            return self.decide_commoner_move(board, from, to, is_capture);
+        }
+
+        // Every square the move empties.
+        let mut emptied = from_bb;
+        if is_capture {
+            emptied = emptied | to_bb | (attacks::king_attacks(to) & self.non_pawns);
+            if move_type == MoveType::EnPassant {
+                let victim = match board.side_to_move {
+                    Color::White => Square::from_index(to as i8 - 8),
+                    Color::Black => Square::from_index(to as i8 + 8),
+                };
+                emptied = emptied | Bitboard::square_bb(victim);
+            }
+        }
+
+        // Losing a commoner is self-explosion (or, on a multi-commoner board,
+        // an undecided count change).
+        let lost_commoners = self.our_commoners & emptied;
+        if !lost_commoners.is_empty() {
+            return if lost_commoners.count() == self.our_commoners.count() {
+                Some(false)
+            } else {
+                None
+            };
+        }
+
+        // The blast removes every enemy commoner: the game ends immediately, so
+        // the mover's own exposure no longer matters.
+        if is_capture && (self.their_commoners & !emptied).is_empty() {
+            return Some(true);
+        }
+
+        // No piece blocking an enemy slider's ray to our commoner is emptied, so
+        // the commoner stays as safe as it is now (checked by the caller).
+        let (snipers, sensitive) = self.sniper_data(board);
+        if (emptied & sensitive).is_empty() {
+            return Some(true);
+        }
+        // A blocker on a sniper ray is emptied; the ray is still closed when the
+        // sniper itself is removed or another blocker remains.
+        if self.rays_stay_closed(board, snipers, emptied) {
+            return Some(true);
+        }
+        None
+    }
+
+    /// Decide a move of the mover's commoner (`from` is in `our_commoners`).
+    #[inline]
+    fn decide_commoner_move(
+        &self,
+        board: &Board,
+        from: Square,
+        to: Square,
+        is_capture: bool,
+    ) -> Option<bool> {
+        if self.our_commoners.count() != 1 {
+            // `Board::legal` reasons about the lowest commoner of the post-move
+            // set; a single commoner keeps this branch exact.
+            return None;
+        }
+        if is_capture {
+            // The capturing commoner is destroyed at ground zero.
+            return Some(false);
+        }
+        if !(self.their_commoners & attacks::king_attacks(to)).is_empty() {
+            // Touching the enemy commoner grants immunity to every attack.
+            return Some(true);
+        }
+        // The one-square relocation empties `from` and fills `to`; the arrival
+        // cannot block an attack on `to`, so only the origin matters.
+        let occupied_after =
+            (board.occupied() & !Bitboard::square_bb(from)) | Bitboard::square_bb(to);
+        let us = board.side_to_move;
+        Some(!is_attacked_by(
+            to,
+            occupied_after,
+            &board.by_type,
+            board.pieces_color(us.flip()),
+            us,
+        ))
+    }
+
+    /// The node's aligned enemy sliders and the pieces blocking their rays,
+    /// computed on first use.
+    #[inline]
+    fn sniper_data(&self, board: &Board) -> (Bitboard, Bitboard) {
+        if let Some(data) = self.snipers.get() {
+            return data;
+        }
+        debug_assert_eq!(self.our_commoners.count(), 1);
+        let data = compute_sniper_data(board, self.our_commoners.lsb());
+        self.snipers.set(Some(data));
+        data
+    }
+
+    /// Returns `true` when every sniper in `snipers` that survives `emptied`
+    /// still has a blocker on its ray after `emptied` is removed.
+    ///
+    /// Blocker squares are read from the node's occupancy, so a piece arriving
+    /// on the move's destination is not counted as a blocker. That is sound:
+    /// the arrival can only close a ray, so ignoring it can only make a ray look
+    /// more open, and an open ray falls back to [`Board::legal`].
+    fn rays_stay_closed(&self, board: &Board, snipers: Bitboard, emptied: Bitboard) -> bool {
+        let occupied = board.occupied();
+        let ksq = self.our_commoners.lsb();
+        let mut remaining = snipers & !emptied;
+        while !remaining.is_empty() {
+            let sniper = remaining.pop_lsb();
+            if (between_bb(ksq, sniper) & occupied & !emptied).is_empty() {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// The aligned enemy sliders of the commoner on `ksq` and the squares that
+/// block their rays, as `(snipers, blockers)`.
+///
+/// A sniper is an enemy rook, bishop, or queen on a `ksq` ray of its own line
+/// type. `blockers` holds every occupied square strictly between `ksq` and a
+/// sniper, both colours: only removals can open a slider's ray, and a capture's
+/// blast empties squares of either colour. A blocker square may block two
+/// snipers at once; [`WidenedLegality::rays_stay_closed`] resolves those cases
+/// per sniper.
+fn compute_sniper_data(board: &Board, ksq: Square) -> (Bitboard, Bitboard) {
+    let occupied = board.occupied();
+    let them_bb = board.pieces_color(board.side_to_move.flip());
+    // Rook-lines and bishop-lines are disjoint for a single square, so a slider
+    // is a sniper exactly when its own line type reaches `ksq`.
+    let orthogonal = (board.by_type[PieceType::Rook as usize]
+        | board.by_type[PieceType::Queen as usize])
+        & attacks::rook_attacks(ksq, Bitboard::EMPTY);
+    let diagonal = (board.by_type[PieceType::Bishop as usize]
+        | board.by_type[PieceType::Queen as usize])
+        & attacks::bishop_attacks(ksq, Bitboard::EMPTY);
+    let snipers = (orthogonal | diagonal) & them_bb;
+
+    let mut remaining = snipers;
+    let mut blockers = Bitboard::EMPTY;
+    while !remaining.is_empty() {
+        let sniper = remaining.pop_lsb();
+        blockers = blockers | (between_bb(ksq, sniper) & occupied);
+    }
+    (snipers, blockers)
+}
+
+/// The fast-legality ladder of a node: the trivial quiet fast path first, then
+/// the widened rules, then [`Board::legal`] as the oracle.
+///
+/// Build once per node and ask [`is_legal`](Self::is_legal) for every
+/// pseudo-legal candidate. The ladder never overrides the oracle: every branch
+/// either reproduces a [`Board::legal`] outcome for a proven reason (see
+/// [`WidenedLegality`]) or delegates to it. The widened state is created on
+/// first use, so nodes whose candidates are all trivially legal pay nothing for
+/// it.
+pub(crate) struct FastLegality {
+    /// Quiet-move fast path (checked first: it is the cheapest rule).
+    trivial: TrivialLegality,
+    /// Widened rules, created on first non-trivial candidate.
+    widened: OnceCell<WidenedLegality>,
+    /// `state.checkers` is non-empty: every move needs the oracle.
+    in_check: bool,
+    /// Both sides still have a commoner. `false` means the game is already over
+    /// and no move is legal.
+    playable: bool,
+}
+
+impl FastLegality {
+    /// Derive the node-constant ladder data from a populated [`StateInfo`].
+    #[inline(always)]
+    pub(crate) fn new(board: &Board, state: &StateInfo) -> Self {
+        Self {
+            trivial: TrivialLegality::new(board, state),
+            widened: OnceCell::new(),
+            in_check: !state.checkers.is_empty(),
+            playable: state.commoners_count != 0 && state.them_commoners_count != 0,
+        }
+    }
+
+    /// Returns `true` when the pseudo-legal move `m` is legal.
+    ///
+    /// Exactly membership in `generate_legal_with_state(board, state, ..)` for
+    /// the same populated `state`. `m` must come from the pseudo-legal generator
+    /// (crate-private precondition, not an input validation point).
+    #[inline(always)]
+    pub(crate) fn is_legal(&self, board: &Board, m: Move, state: &StateInfo) -> bool {
+        // The trivial quiet fast path stays a leaf: it accepts most candidates
+        // without touching the widened state or the oracle.
+        self.trivial.is_trivially_legal(board, m) || self.is_legal_widened(board, m, state)
+    }
+
+    /// The widened rules plus the oracle fallback.
+    fn is_legal_widened(&self, board: &Board, m: Move, state: &StateInfo) -> bool {
+        if !self.playable {
+            // Terminal position: `Board::legal` rejects every move.
+            return false;
+        }
+        if self.in_check {
+            return board.legal(m, state);
+        }
+        let widened = self.widened.get_or_init(|| WidenedLegality::new(board));
+        match widened.decide(board, m) {
+            Some(verdict) => verdict,
+            None => board.legal(m, state),
+        }
+    }
+}
+
 impl fmt::Display for Board {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f)?;
@@ -4586,6 +4886,434 @@ mod tests {
             without_commoner > 0,
             "corpus never exercises the no-commoner guard"
         );
+    }
+
+    // --- widened fast-legality ladder (MG4) ---
+
+    /// Positions that exercise every branch of the widened ladder in addition
+    /// to the trivial-legality corpus: captures that open a slider ray, a
+    /// capture that removes an enemy blocker of an enemy slider, en passant
+    /// that empties two blockers on one ray, exploding the enemy commoner,
+    /// self-explosion, pins, and a bare-commoner endgame.
+    const WIDENED_LEGALITY_CORPUS: &[&str] = &[
+        // Enemy blocker of an enemy slider: Rb4 removes the a4 knight, which
+        // alone blocks the a8 rook's ray to the a1 commoner. Illegal.
+        "r6k/8/8/8/nb5R/8/8/K7 w - - 0 1",
+        // En passant empties *two* blockers (d4 victim, e4 capturer) on the
+        // h4 queen's rank-4 ray to the a4 commoner. Illegal.
+        "8/8/8/8/k2Pp2Q/8/8/3K4 b - d3 0 1",
+        // Exploding the enemy commoner wins regardless of own exposure.
+        "k7/8/3npn2/4P3/8/8/3nnn2/3nKn2 w - - 0 1",
+        // Self-exploding commoner capture is illegal.
+        "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+        // Single-check position: every move needs the oracle.
+        "7k/5P2/8/8/8/8/8/K6R b - - 0 1",
+        // Pinned knight: its quiet moves all fall back.
+        "4k3/8/8/8/8/4r3/4N3/4K3 w - - 0 1",
+        // Bare commoners: every quiet commoner move is decided by the map.
+        "k7/8/8/8/8/8/8/7K w - - 0 1",
+        // Castling: always the oracle.
+        "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+    ];
+
+    /// Deterministic play-out starts for the widened-ladder differential.
+    const WIDENED_PLAYOUT_FENS: &[&str] = &[
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2",
+        "r6k/8/8/8/nb5R/8/8/K7 w - - 0 1",
+        "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1",
+        "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+    ];
+
+    /// Reference implementation of the *node-constant* data of the widened
+    /// ladder: the aligned enemy sliders of the commoner on `ksq` and the
+    /// squares that block their rays.
+    ///
+    /// Written by scanning the board, deliberately unlike the bitboard-driven
+    /// [`compute_sniper_data`], so a mistake in either finds the other.
+    fn sniper_data_reference(board: &Board, ksq: Square) -> (Bitboard, Bitboard) {
+        let them = board.side_to_move.flip();
+        let mut snipers = Bitboard::EMPTY;
+        let mut blockers = Bitboard::EMPTY;
+        for idx in 0..64u8 {
+            let sq = Square::from_u8(idx);
+            let piece = board.piece_on(sq);
+            if piece.color() != Some(them) {
+                continue;
+            }
+            let sq_bb = Bitboard::square_bb(sq);
+            let on_rook_line = !(attacks::rook_attacks(ksq, Bitboard::EMPTY) & sq_bb).is_empty();
+            let on_bishop_line =
+                !(attacks::bishop_attacks(ksq, Bitboard::EMPTY) & sq_bb).is_empty();
+            let aligned = match piece.type_of() {
+                Some(PieceType::Rook) => on_rook_line,
+                Some(PieceType::Bishop) => on_bishop_line,
+                Some(PieceType::Queen) => on_rook_line || on_bishop_line,
+                _ => false,
+            };
+            if aligned {
+                snipers = snipers | Bitboard::square_bb(sq);
+                blockers = blockers | (between_bb(ksq, sq) & board.occupied());
+            }
+        }
+        (snipers, blockers)
+    }
+
+    /// Verbatim reference of the intended widened rules, written against the
+    /// public board API only (`blast_casualties` instead of a hand-built blast
+    /// set, `attackers_to_color` instead of `is_attacked_by`).
+    ///
+    /// Mirrors [`WidenedLegality::decide`] decision for decision, so a future
+    /// edit cannot silently change which moves the ladder accepts.
+    fn widened_legality_reference(board: &Board, m: Move) -> Option<bool> {
+        let us = board.side_to_move;
+        let them = us.flip();
+        let our_commoners = board.commoners(us);
+        let their_commoners = board.commoners(them);
+        if our_commoners.is_empty() || their_commoners.is_empty() {
+            return None;
+        }
+        let ksq = our_commoners.lsb();
+        let move_type = m.move_type();
+        if move_type == MoveType::Castling {
+            return None;
+        }
+        let from = m.from_sq();
+        let to = m.to_sq();
+        let is_capture = board.is_capture(m);
+
+        if board.piece_on(from) == make_piece(us, PieceType::Commoner) {
+            if our_commoners.count() != 1 {
+                return None;
+            }
+            if is_capture {
+                return Some(false);
+            }
+            if !(their_commoners & attacks::king_attacks(to)).is_empty() {
+                return Some(true);
+            }
+            // The origin empties; the arrival cannot block an attack on itself.
+            let occupied_after =
+                (board.occupied() & !Bitboard::square_bb(from)) | Bitboard::square_bb(to);
+            let attackers = board.attackers_to_color(to, them, occupied_after) & !their_commoners;
+            return Some(attackers.is_empty());
+        }
+
+        // Every square the move empties: the origin plus every blast casualty.
+        let emptied = Bitboard::square_bb(from) | board.blast_casualties(m).all();
+
+        let lost = our_commoners & emptied;
+        if !lost.is_empty() {
+            return if lost.count() == our_commoners.count() {
+                Some(false)
+            } else {
+                None
+            };
+        }
+        if is_capture && (their_commoners & !emptied).is_empty() {
+            return Some(true);
+        }
+
+        let (snipers, sensitive) = sniper_data_reference(board, ksq);
+        if (emptied & sensitive).is_empty() {
+            return Some(true);
+        }
+        // Some blocker on a sniper ray is emptied: the ray stays closed when the
+        // sniper itself is removed or another blocker remains.
+        let mut remaining = snipers & !emptied;
+        while !remaining.is_empty() {
+            let sniper = remaining.pop_lsb();
+            if (between_bb(ksq, sniper) & board.occupied() & !emptied).is_empty() {
+                return None;
+            }
+        }
+        Some(true)
+    }
+
+    /// Assert that the widened ladder and its reference agree move for move and
+    /// that every decision matches [`Board::legal`].
+    fn assert_widened_legality(board: &Board, state: &StateInfo) {
+        if state.commoners_count == 0 || state.them_commoners_count == 0 {
+            // Terminal positions are filtered by the callers; `Board::legal`
+            // rejects everything here.
+            return;
+        }
+        let widened = WidenedLegality::new(board);
+        let mut pseudo = MoveList::new();
+        crate::movegen::generate_pseudo_legal(board, &mut pseudo);
+        for &m in pseudo.as_slice() {
+            // `decide` is only well-defined when the side to move is not in
+            // check; the reference mirrors that precondition.
+            let decided = if state.checkers.is_empty() {
+                widened.decide(board, m)
+            } else {
+                None
+            };
+            let reference = if state.checkers.is_empty() {
+                widened_legality_reference(board, m)
+            } else {
+                None
+            };
+            assert_eq!(
+                decided,
+                reference,
+                "widened ladder diverged from its reference on {} at {}",
+                m.to_uci(),
+                board.fen()
+            );
+            if let Some(verdict) = decided {
+                assert_eq!(
+                    verdict,
+                    board.legal(m, state),
+                    "widened ladder decided {} as {verdict} but Board::legal disagrees at {}",
+                    m.to_uci(),
+                    board.fen()
+                );
+            }
+        }
+
+        // The ladder as used by the generator must reproduce the legal list.
+        let fast = FastLegality::new(board, state);
+        let mut legal = MoveList::new();
+        crate::movegen::generate_legal_with_state(board, state, &mut legal);
+        let expected = |m: Move| legal.as_slice().contains(&m);
+        for &m in pseudo.as_slice() {
+            assert_eq!(
+                fast.is_legal(board, m, state),
+                expected(m),
+                "FastLegality disagrees with the legal list on {} at {}",
+                m.to_uci(),
+                board.fen()
+            );
+        }
+    }
+
+    fn check_widened_legality_playout(
+        board: &mut Board,
+        rng: &mut Xorshift2,
+        depth: u32,
+        visited: &mut u64,
+    ) {
+        *visited += 1;
+        let mut state = StateInfo::new();
+        board.populate_state(&mut state);
+        assert_widened_legality(board, &state);
+
+        let mut list = MoveList::new();
+        crate::movegen::generate_legal_with_state(board, &state, &mut list);
+        if depth == 0 || list.is_empty() {
+            return;
+        }
+        let idx = (rng.next() % list.len() as u64) as usize;
+        let m = list[idx];
+        board.do_move(m, &mut state);
+        check_widened_legality_playout(board, rng, depth - 1, visited);
+        board.undo_move(m, &state);
+    }
+
+    #[test]
+    fn widened_legality_matches_reference_and_board_legal() {
+        for fen in TRIVIAL_LEGALITY_CORPUS
+            .iter()
+            .chain(WIDENED_LEGALITY_CORPUS.iter())
+        {
+            let board = Board::from_fen(fen).expect("corpus FEN must parse");
+            let mut state = StateInfo::new();
+            board.populate_state(&mut state);
+            assert_widened_legality(&board, &state);
+        }
+
+        let mut visited = 0u64;
+        for (i, fen) in WIDENED_PLAYOUT_FENS.iter().enumerate() {
+            for seed in 0..4u64 {
+                let mut board = Board::from_fen(fen).expect("start FEN must parse");
+                let mut rng = Xorshift2::new(0x2F53_9C1B_7AE4_55D1 ^ ((i as u64) << 32) ^ seed);
+                check_widened_legality_playout(&mut board, &mut rng, 120, &mut visited);
+            }
+        }
+        assert!(visited > 1000, "only visited {visited} positions");
+    }
+
+    /// The generator's own encoding of the pseudo-legal move `from -> to`.
+    fn pseudo_move(board: &Board, from: Square, to: Square) -> Move {
+        let mut pseudo = MoveList::new();
+        crate::movegen::generate_pseudo_legal(board, &mut pseudo);
+        *pseudo
+            .as_slice()
+            .iter()
+            .find(|m| m.from_sq() == from && m.to_sq() == to)
+            .unwrap_or_else(|| panic!("no pseudo-legal move {from:?}{to:?} on {}", board.fen()))
+    }
+
+    #[test]
+    fn widened_legality_blast_that_opens_a_ray_is_undecided() {
+        // Rb4 blasts the a4 knight, the only piece between the a1 commoner and
+        // the a8 rook: the ladder must hand this to `Board::legal`, which
+        // rejects it.
+        let board = Board::from_fen("r6k/8/8/8/nb5R/8/8/K7 w - - 0 1").expect("FEN must parse");
+        let mut state = StateInfo::new();
+        board.populate_state(&mut state);
+        let m = pseudo_move(&board, Square::H4, Square::B4);
+        assert!(board.is_capture(m));
+        assert!(WidenedLegality::new(&board).decide(&board, m).is_none());
+        assert!(!board.legal(m, &state));
+
+        // En passant empties two blockers on the same ray (d4 victim, e4
+        // capturer), which the single-blocker rule must not accept either.
+        let board = Board::from_fen("8/8/8/8/k2Pp2Q/8/8/3K4 b - d3 0 1").expect("FEN must parse");
+        let mut state = StateInfo::new();
+        board.populate_state(&mut state);
+        let m = pseudo_move(&board, Square::E4, Square::D3);
+        assert!(WidenedLegality::new(&board).decide(&board, m).is_none());
+        assert!(!board.legal(m, &state));
+    }
+
+    #[test]
+    fn widened_legality_corpus_covers_every_rule() {
+        // Guard against a vacuous equivalence test: every rule of the ladder
+        // must be reached by the corpus, and every undecided path exercised.
+        #[derive(Default)]
+        struct Coverage {
+            accepted_quiet: u64,
+            accepted_capture: u64,
+            accepted_explosion: u64,
+            accepted_commoner: u64,
+            accepted_check: u64,
+            rejected_self_explosion: u64,
+            rejected_commoner_capture: u64,
+            undecided_pinned_origin: u64,
+            undecided_castling: u64,
+            undecided_en_passant: u64,
+            undecided_quiet: u64,
+            in_check_positions: u64,
+            no_commoner_positions: u64,
+        }
+
+        let mut coverage = Coverage::default();
+        for fen in TRIVIAL_LEGALITY_CORPUS
+            .iter()
+            .chain(WIDENED_LEGALITY_CORPUS.iter())
+            .chain(WIDENED_PLAYOUT_FENS.iter())
+        {
+            let board = Board::from_fen(fen).expect("corpus FEN must parse");
+            let mut state = StateInfo::new();
+            board.populate_state(&mut state);
+            if !state.checkers.is_empty() {
+                coverage.in_check_positions += 1;
+                continue;
+            }
+            if state.commoners_count == 0 || state.them_commoners_count == 0 {
+                coverage.no_commoner_positions += 1;
+                continue;
+            }
+
+            let us = board.side_to_move;
+            let widened = WidenedLegality::new(&board);
+            let trivial = TrivialLegality::new(&board, &state);
+            let mut pseudo = MoveList::new();
+            crate::movegen::generate_pseudo_legal(&board, &mut pseudo);
+            for &m in pseudo.as_slice() {
+                if trivial.is_trivially_legal(&board, m) {
+                    coverage.accepted_quiet += 1;
+                    continue;
+                }
+                match widened.decide(&board, m) {
+                    Some(true) => {
+                        let is_capture = board.is_capture(m);
+                        let emptied =
+                            Bitboard::square_bb(m.from_sq()) | board.blast_casualties(m).all();
+                        if board.piece_on(m.from_sq()) == make_piece(us, PieceType::Commoner) {
+                            coverage.accepted_commoner += 1;
+                        } else if is_capture && (board.commoners(us.flip()) & !emptied).is_empty() {
+                            coverage.accepted_explosion += 1;
+                        } else if is_capture {
+                            coverage.accepted_capture += 1;
+                        } else {
+                            coverage.accepted_quiet += 1;
+                        }
+                        let mut child = board.clone();
+                        let mut child_state = StateInfo::new();
+                        child.do_move(m, &mut child_state);
+                        if !child.checkers().is_empty() {
+                            coverage.accepted_check += 1;
+                        }
+                    }
+                    Some(false) => {
+                        if board.is_capture(m)
+                            && board.piece_on(m.from_sq()) == make_piece(us, PieceType::Commoner)
+                        {
+                            coverage.rejected_commoner_capture += 1;
+                        } else {
+                            coverage.rejected_self_explosion += 1;
+                        }
+                    }
+                    None => match m.move_type() {
+                        MoveType::Castling => coverage.undecided_castling += 1,
+                        MoveType::EnPassant => coverage.undecided_en_passant += 1,
+                        _ => {
+                            if !(state.pinned & Bitboard::square_bb(m.from_sq())).is_empty() {
+                                coverage.undecided_pinned_origin += 1;
+                            } else {
+                                coverage.undecided_quiet += 1;
+                            }
+                        }
+                    },
+                }
+            }
+        }
+
+        assert!(coverage.accepted_quiet > 0, "no accepted quiet move");
+        assert!(coverage.accepted_capture > 0, "no accepted capture");
+        assert!(
+            coverage.accepted_explosion > 0,
+            "no accepted enemy-commoner explosion"
+        );
+        assert!(coverage.accepted_commoner > 0, "no accepted commoner move");
+        assert!(coverage.accepted_check > 0, "no accepted checking move");
+        assert!(
+            coverage.rejected_self_explosion > 0,
+            "no rejected self-explosion"
+        );
+        assert!(
+            coverage.rejected_commoner_capture > 0,
+            "no rejected commoner capture"
+        );
+        assert!(
+            coverage.undecided_pinned_origin > 0,
+            "no undecided pinned-origin move"
+        );
+        assert!(coverage.undecided_castling > 0, "no undecided castling");
+        assert!(coverage.undecided_en_passant > 0, "no undecided en passant");
+        assert!(coverage.undecided_quiet > 0, "no undecided quiet move");
+        assert!(
+            coverage.in_check_positions > 0,
+            "no position with the side to move in check"
+        );
+        assert!(
+            coverage.no_commoner_positions > 0,
+            "no position without a commoner"
+        );
+    }
+
+    #[test]
+    fn fast_legality_handles_terminal_positions() {
+        // `FastLegality` rejects everything when the game is already over, even
+        // when called directly (not through the generator's early return).
+        let mut checked = 0;
+        for fen in ["8/8/8/8/8/8/8/k7 w - - 0 1", "k7/8/8/8/8/8/8/8 b - - 0 1"] {
+            let board = Board::from_fen(fen).expect("FEN must parse");
+            let mut state = StateInfo::new();
+            board.populate_state(&mut state);
+            let fast = FastLegality::new(&board, &state);
+            let mut pseudo = MoveList::new();
+            crate::movegen::generate_pseudo_legal(&board, &mut pseudo);
+            for &m in pseudo.as_slice() {
+                checked += 1;
+                assert!(!fast.is_legal(&board, m, &state), "{fen} {m}");
+            }
+        }
+        assert!(checked > 0, "no pseudo-legal move reached the ladder");
     }
 
     #[test]
