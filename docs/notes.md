@@ -44,3 +44,8 @@ Please see the accompanying reports, perform a final check and prepare a cargo p
 A downstream user of the library provided a wishlist for changes: `docs/plans/feedback/handoff1.md`.
 Please draft one or multiple implementation plans to address the feedback.
 
+---
+
+A downstream user of the library provided a wishlist for changes: `docs/plans/feedback/handoff2.md`.
+Please draft one or multiple implementation plans to address the feedback.
+
