@@ -147,7 +147,7 @@ Add `atomic-movegen` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-atomic-movegen = "2.4.0"
+atomic-movegen = "2.6.0"
 ```
 
 ```rust
