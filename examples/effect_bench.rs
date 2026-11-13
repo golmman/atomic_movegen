@@ -12,7 +12,10 @@
 //!    board and playing the move — both against `terminal()` and against
 //!    `generate_legal_with_state`, the two shapes a downstream
 //!    "is this child over?" question takes, plus the `PostMove` summary against
-//!    cloning and reading the same facts off the child board;
+//!    cloning and reading the same facts off the child board, plus the MG19
+//!    composites: `post_move` + `PostMove::terminal()` (summary + terminality
+//!    from one derivation) and `post_move_and_key` (summary + key from one
+//!    derivation);
 //! 3. the **decided share**: the fraction of children answered `Some` over a
 //!    seeded play-out walk. This is this crate's own tree, not a downstream
 //!    search tree; it exists so the crate publishes what `terminal_after`
@@ -331,6 +334,54 @@ fn main() {
             repeats,
             iterations,
         );
+        // MG19a: the terminal state of an already derived summary.
+        let mut i = 0usize;
+        let post_terminal_ns = bench(
+            || {
+                let m = pseudo[i % pseudo.len()];
+                i += 1;
+                if let Some(post) = ctx.post_move(&board, m) {
+                    black_box(post.terminal());
+                }
+            },
+            repeats,
+            iterations,
+        );
+        // MG19b: summary + key from one derivation, against the key alone.
+        let mut i = 0usize;
+        let post_key_ns = bench(
+            || {
+                let m = pseudo[i % pseudo.len()];
+                i += 1;
+                if let Some((post, key)) = ctx.post_move_and_key(&board, m) {
+                    black_box((post.rule50(), key));
+                }
+            },
+            repeats,
+            iterations,
+        );
+        let mut i = 0usize;
+        let post_and_key_separate_ns = bench(
+            || {
+                let m = pseudo[i % pseudo.len()];
+                i += 1;
+                if let Some(post) = ctx.post_move(&board, m) {
+                    black_box((post.rule50(), board.hash_after(m)));
+                }
+            },
+            repeats,
+            iterations,
+        );
+        let mut i = 0usize;
+        let hash_after_ns = bench(
+            || {
+                let m = pseudo[i % pseudo.len()];
+                i += 1;
+                black_box(board.hash_after(m));
+            },
+            repeats,
+            iterations,
+        );
         let mut i = 0usize;
         let post_clone_ns = bench(
             || {
@@ -456,6 +507,15 @@ fn main() {
         println!(
             "  child summary:         post_move {post_move_ns:>9.1}  \
              clone+do_move+facts {post_clone_ns:>9.1}"
+        );
+        println!(
+            "  summary + terminal:    post_move+terminal {post_terminal_ns:>9.1}  \
+             terminal_after {terminal_after_ns:>9.1}"
+        );
+        println!(
+            "  summary + key:         post_move_and_key {post_key_ns:>9.1}  \
+             post_move+hash_after {post_and_key_separate_ns:>9.1}  \
+             hash_after {hash_after_ns:>9.1}"
         );
         println!(
             "  per node:              generate_legal {generate_legal_ns:>9.1}  \

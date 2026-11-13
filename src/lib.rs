@@ -96,7 +96,12 @@
 //! pieces, its side to move, en-passant target, castling rights and half-move
 //! clock without a board write and without a rules verdict.
 //! [`EffectContext::effect_and_post`] returns both values from one analysis
-//! pass.
+//! pass, and [`PostMove::terminal`] asks a summary that is already in hand for
+//! its child's [`Terminal`] — it is the implementation behind
+//! [`EffectContext::terminal_after`], so a consumer that kept the summary pays
+//! for the child derivation once. [`EffectContext::post_move_and_key`] returns
+//! the summary together with the child's Zobrist key (exactly
+//! [`Board::hash_after`]) from that same derivation.
 //!
 //! [`MoveClassification`] is [`MoveEffect`] without the legality verdict: the
 //! same five rules fields, derived by
@@ -184,7 +189,9 @@
 //!   [`Board::child_outcome`],
 //!   [`EffectContext::effect`], [`EffectContext::effect_and_post`],
 //!   [`EffectContext::classification`], [`MoveEffect::classification`],
-//!   [`EffectContext::post_move`], [`EffectContext::is_legal`],
+//!   [`EffectContext::post_move`], [`PostMove::terminal`],
+//!   [`EffectContext::post_move_and_key`],
+//!   [`EffectContext::is_legal`],
 //!   [`EffectContext::terminal_after`], [`EffectContext::child_outcome`],
 //!   [`EffectContext::outcome_after`],
 //!   [`Board::blast_casualties`], [`Board::attackers_to`],

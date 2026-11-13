@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The child's terminal state on an already derived summary.
+  `PostMove::terminal()` returns the child's `Terminal { outcome, reason }` for
+  every **pseudo-legal** move, equal to a cloned `do_move` child's
+  `Board::terminal()` with the same precedence as
+  `EffectContext::terminal_after()`. It *is* the implementation behind
+  `EffectContext::terminal_after()` and `EffectContext::child_outcome()`, so a
+  consumer that kept the summary pays for the child derivation once instead of
+  calling `post_move()` and `terminal_after()` separately.
+- The child's Zobrist key next to the summary. `EffectContext::post_move_and_key()`
+  returns `(PostMove, u64)` from one derivation; the key is exactly
+  `Board::hash_after()` and exactly the `hash()` of a cloned child (same key
+  table, `EnPassantMode::Always`, so `ZOBRIST_VERSION` and its stability
+  contract apply unchanged). Together with `PostMove::terminal()` and
+  `PostMove::rule50()` one derivation answers "summary + key + terminality".
+
+### Changed
+
+- The child-side terminal precedence no longer populates a `StateInfo` for the
+  child: the two commoner counts and "is the side to move in check" are read
+  from the placement view. The precedence itself is unchanged and now lives in
+  two helpers (`position::terminal_cheap` / `position::terminal_tail`) that the
+  board path and the child path call in the same order; no `Outcome` or
+  `Terminal` semantics changed, and `Board::terminal`/`outcome` behaviour is
+  byte-identical (their inputs are the caller's populated `StateInfo`, as
+  before).
+
 ## [2.7.0] - 2026-11-13
 
 Child terminality without a board write, a two-level child answer, the

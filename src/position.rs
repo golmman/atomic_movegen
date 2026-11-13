@@ -12,7 +12,9 @@
 //!
 //! One terminal precedence lives here too ([`terminal_in_view`]), shared by
 //! [`Board::terminal`] and
-//! [`EffectContext::terminal_after`](crate::EffectContext::terminal_after).
+//! [`EffectContext::terminal_after`](crate::EffectContext::terminal_after), plus
+//! the child-side entry point that feeds the same branches from the placement
+//! view ([`terminal_in_view_light`]).
 //!
 //! The view is crate-private on purpose. [`Board`] remains the public position
 //! representation.
@@ -275,8 +277,20 @@ impl PositionView {
     /// `state` for this view's side to move.
     #[inline]
     pub(crate) fn populate_state(&self, state: &mut StateInfo) {
+        let checkers = self.checkers(self.side_to_move);
+        self.populate_state_with_checkers(state, checkers);
+    }
+
+    /// [`populate_state`](Self::populate_state) with a `checkers` value the
+    /// caller has already computed for this view's side to move.
+    ///
+    /// The child-side terminal path computes `checkers` for the precedence and
+    /// needs a populated state for the existence query as well; this way the
+    /// attacker query is run once instead of twice.
+    #[inline]
+    pub(crate) fn populate_state_with_checkers(&self, state: &mut StateInfo, checkers: Bitboard) {
         let us = self.side_to_move;
-        state.checkers = self.checkers(us);
+        state.checkers = checkers;
         state.pinned = self.pinned(us);
         state.commoners_count = self.commoners(us).count();
         state.them_commoners_count = self.commoners(us.flip()).count();
@@ -645,25 +659,26 @@ fn square_attacked_by(
     is_attacked_by(sq, occupied, view.by_type(), enemy_bb, view.side_to_move)
 }
 
-/// The single terminal-precedence implementation.
+/// The terminal-precedence prefix: the two cheap exits.
 ///
-/// Shared by [`Board::terminal`] and
-/// [`EffectContext::terminal_after`](crate::EffectContext::terminal_after), so a
-/// position on a board and a position derived from bitboards are decided by the
-/// same code in the same order: extinction → opponent extinction → material
-/// draw → clock without check → no legal moves → clock with check.
-pub(crate) fn terminal_in_view(
+/// Extinction of the side to move, extinction of its opponent, and the
+/// commoner-only material draw. These need the two commoner counts and nothing
+/// else — no attacker query, no pins, no movegen — so a caller that has the
+/// counts from anywhere (a populated [`StateInfo`] or two popcounts on a view)
+/// can start here.
+#[inline]
+fn terminal_cheap(
     view: &PositionView,
-    state: &StateInfo,
-    moves_exist: Option<bool>,
+    our_commoners: u32,
+    their_commoners: u32,
 ) -> Option<Terminal> {
-    if state.commoners_count == 0 {
+    if our_commoners == 0 {
         return Some(Terminal {
             outcome: Outcome::Loss,
             reason: TerminalReason::Extinction,
         });
     }
-    if state.them_commoners_count == 0 {
+    if their_commoners == 0 {
         return Some(Terminal {
             outcome: Outcome::Win,
             reason: TerminalReason::Extinction,
@@ -675,23 +690,35 @@ pub(crate) fn terminal_in_view(
             reason: TerminalReason::MaterialDraw,
         });
     }
+    None
+}
 
+/// The terminal-precedence tail: the clock, the existence question, and mate or
+/// stalemate.
+///
+/// `in_check` says whether the side to move is in check; `moves_exist` answers
+/// the existence question and is only called when the answer matters — a
+/// position whose clock is up and whose side to move is *not* in check is
+/// decided without asking it at all.
+#[inline]
+fn terminal_tail(
+    view: &PositionView,
+    in_check: bool,
+    moves_exist: impl FnOnce() -> bool,
+) -> Option<Terminal> {
     // The clock is a draw without movegen when there is no check. When the
     // side to move is in check, mate outranks the clock, so resolve the
     // existence question first (Fairy-Stockfish's `!checkers() || legal`
     // guard).
-    if view.rule50 >= 100 && state.checkers.is_empty() {
+    if view.rule50 >= 100 && !in_check {
         return Some(Terminal {
             outcome: Outcome::Draw,
             reason: TerminalReason::FiftyMoveRule,
         });
     }
 
-    let moves_exist =
-        moves_exist.unwrap_or_else(|| crate::movegen::has_legal_move_in_view(view, state));
-
-    if !moves_exist {
-        return Some(if state.checkers.is_empty() {
+    if !moves_exist() {
+        return Some(if !in_check {
             Terminal {
                 outcome: Outcome::Draw,
                 reason: TerminalReason::Stalemate,
@@ -712,10 +739,61 @@ pub(crate) fn terminal_in_view(
     None
 }
 
+/// The single terminal-precedence implementation.
+///
+/// Shared by [`Board::terminal`] and
+/// [`EffectContext::terminal_after`](crate::EffectContext::terminal_after), so a
+/// position on a board and a position derived from bitboards are decided by the
+/// same code in the same order: extinction → opponent extinction → material
+/// draw → clock without check → no legal moves → clock with check.
+///
+/// The branches themselves live in [`terminal_cheap`] and [`terminal_tail`],
+/// which the child-side [`terminal_in_view_light`] calls in the same order.
+pub(crate) fn terminal_in_view(
+    view: &PositionView,
+    state: &StateInfo,
+    moves_exist: Option<bool>,
+) -> Option<Terminal> {
+    if let Some(terminal) = terminal_cheap(view, state.commoners_count, state.them_commoners_count)
+    {
+        return Some(terminal);
+    }
+    terminal_tail(view, !state.checkers.is_empty(), || {
+        moves_exist.unwrap_or_else(|| crate::movegen::has_legal_move_in_view(view, state))
+    })
+}
+
+/// The child-side terminal-precedence implementation: a view, no [`StateInfo`].
+///
+/// Same precedence as [`terminal_in_view`] and the same branch code, but the
+/// facts it reads come from the view: the two commoner counts (one popcount
+/// each) and “is the side to move in check” (one attacker query, shared with
+/// the existence query further down).
+///
+/// The attacker query is deliberately run only after [`terminal_cheap`]:
+/// extinction and the material draw must not pay for it.
+pub(crate) fn terminal_in_view_light(view: &PositionView) -> Option<Terminal> {
+    let us = view.side_to_move();
+    let our_commoners = view.commoners(us).count();
+    let their_commoners = view.commoners(us.flip()).count();
+    if let Some(terminal) = terminal_cheap(view, our_commoners, their_commoners) {
+        return Some(terminal);
+    }
+
+    let checkers = view.checkers(us);
+    terminal_tail(view, !checkers.is_empty(), || {
+        // The exact existence query, whose ladder wants a populated
+        // `StateInfo`. `checkers` is already known and is passed through.
+        let mut state = StateInfo::new();
+        view.populate_state_with_checkers(&mut state, checkers);
+        crate::movegen::has_legal_move_in_view(view, &state)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::movegen::generate_pseudo_legal;
+    use crate::movegen::{generate_legal_with_state, generate_pseudo_legal};
 
     /// The 41-position perft oracle corpus plus the deterministic fixtures the
     /// effect tests use, so view construction is checked on real and on
@@ -862,5 +940,201 @@ mod tests {
                 assert_eq!(child.rule50(), played.rule50(), "{fen} {m}: rule50");
             }
         }
+    }
+
+    fn view_of(fen: &str) -> PositionView {
+        PositionView::of(&Board::from_fen(fen).expect("FEN must parse"))
+    }
+
+    fn state_of(view: &PositionView) -> StateInfo {
+        let mut state = StateInfo::new();
+        view.populate_state(&mut state);
+        state
+    }
+
+    /// The prefix decides extinction in both directions and the commoner-only
+    /// material draw, and says nothing about any other position.
+    #[test]
+    fn terminal_cheap_branches() {
+        let loss = Terminal {
+            outcome: Outcome::Loss,
+            reason: TerminalReason::Extinction,
+        };
+        let win = Terminal {
+            outcome: Outcome::Win,
+            reason: TerminalReason::Extinction,
+        };
+        let draw = Terminal {
+            outcome: Outcome::Draw,
+            reason: TerminalReason::MaterialDraw,
+        };
+
+        // The side to move has no commoner.
+        assert_eq!(
+            terminal_cheap(&view_of("8/8/8/8/8/8/8/k7 w - - 0 1"), 0, 1),
+            Some(loss)
+        );
+        // The opponent has no commoner.
+        assert_eq!(
+            terminal_cheap(&view_of("8/8/8/8/8/8/8/7K w - - 0 1"), 1, 0),
+            Some(win)
+        );
+        // Both counts are checked in that order: both extinct is a loss.
+        assert_eq!(
+            terminal_cheap(&view_of("8/8/8/8/8/8/8/8 w - - 0 1"), 0, 0),
+            Some(loss)
+        );
+        // K vs K is the only atomic material draw.
+        assert_eq!(
+            terminal_cheap(&view_of("k7/8/8/8/8/8/8/7K w - - 0 1"), 1, 1),
+            Some(draw)
+        );
+        // Two commoners and any other piece is not a material draw.
+        assert_eq!(
+            terminal_cheap(&view_of("k7/8/8/8/8/8/8/R6K w - - 0 1"), 1, 1),
+            None
+        );
+        // Vanilla positions are undecided by the prefix.
+        assert_eq!(terminal_cheap(&PositionView::of(&Board::new()), 1, 1), None);
+    }
+
+    /// The tail: the clock without check, the existence question, mate or
+    /// stalemate, and the clock again.
+    #[test]
+    fn terminal_tail_branches() {
+        let clock = Terminal {
+            outcome: Outcome::Draw,
+            reason: TerminalReason::FiftyMoveRule,
+        };
+        let loaded = view_of("k7/8/8/8/8/8/8/7K w - - 100 60");
+        assert_eq!(loaded.rule50(), 100);
+        let fresh = view_of("k7/8/8/8/8/8/8/7K w - - 0 1");
+        assert_eq!(fresh.rule50(), 0);
+
+        let never = || -> bool { panic!("the existence question must not be asked") };
+        let yes = || true;
+        let no = || false;
+
+        // The clock is a draw without movegen when there is no check.
+        assert_eq!(terminal_tail(&loaded, false, never), Some(clock));
+        // A clock with the side to move in check is resolved by the existence
+        // question first: mate outranks the clock, and so does the clock when
+        // moves exist.
+        assert_eq!(terminal_tail(&loaded, true, yes), Some(clock));
+        assert_eq!(
+            terminal_tail(&loaded, true, no),
+            Some(Terminal {
+                outcome: Outcome::Loss,
+                reason: TerminalReason::NoMovesInCheck,
+            })
+        );
+        // Without the clock: no moves and no check is stalemate.
+        assert_eq!(
+            terminal_tail(&fresh, false, no),
+            Some(Terminal {
+                outcome: Outcome::Draw,
+                reason: TerminalReason::Stalemate,
+            })
+        );
+        // Undecided: moves exist and the clock is not up.
+        assert_eq!(terminal_tail(&fresh, false, yes), None);
+        assert_eq!(terminal_tail(&fresh, true, yes), None);
+    }
+
+    /// The light path and the board path are the same precedence: same answer
+    /// for every position, not just for decided ones.
+    #[test]
+    fn terminal_light_matches_board_path() {
+        let mut checked = 0u64;
+        let mut decided = 0u64;
+        for fen in view_corpus() {
+            let board = Board::from_fen(fen.as_str()).expect("corpus FEN must parse");
+            let view = PositionView::of(&board);
+            let state = state_of(&view);
+
+            let light = terminal_in_view_light(&view);
+            let heavy = terminal_in_view(&view, &state, None);
+            assert_eq!(light, heavy, "{fen}: light vs board path");
+            assert_eq!(light, board.terminal(), "{fen}: light vs Board::terminal");
+            if light.is_some() {
+                decided += 1;
+            }
+            checked += 1;
+
+            // Every child of every corpus position, decided or not.
+            let mut pseudo = MoveList::new();
+            generate_pseudo_legal(&board, &mut pseudo);
+            for &m in pseudo.as_slice() {
+                let child = child_view(&view, m, board.rule50_after(m))
+                    .expect("child")
+                    .view;
+                let child_state = state_of(&child);
+                assert_eq!(
+                    terminal_in_view_light(&child),
+                    terminal_in_view(&child, &child_state, None),
+                    "{fen} {m}: child light vs board path"
+                );
+
+                let mut played = board.clone();
+                let mut played_state = StateInfo::new();
+                played.do_move(m, &mut played_state);
+                assert_eq!(
+                    terminal_in_view_light(&child),
+                    played.terminal(),
+                    "{fen} {m}: child light vs clone"
+                );
+                checked += 1;
+                if terminal_in_view_light(&child).is_some() {
+                    decided += 1;
+                }
+            }
+        }
+        assert!(checked > 1000, "expected many positions, got {checked}");
+        assert!(decided > 20, "expected decided positions, got {decided}");
+    }
+
+    /// A seeded play-out walk: the light path must agree with the board path at
+    /// every visited position, including clock and check branches.
+    #[test]
+    fn terminal_light_matches_board_path_playouts() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut visited = 0u64;
+        for fen in [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/4k3/8/8/8/8/4P3/4K3 w - - 96 60",
+        ] {
+            let mut board = Board::from_fen(fen).expect("FEN must parse");
+            let mut state = StateInfo::new();
+            for _ in 0..200 {
+                board.populate_state(&mut state);
+                let view = board.position_view();
+                assert_eq!(
+                    terminal_in_view_light(view),
+                    terminal_in_view(view, &state, None),
+                    "{}: light vs board path",
+                    board.fen()
+                );
+                assert_eq!(
+                    terminal_in_view_light(view),
+                    board.terminal_with_state(&state),
+                    "{}: light vs board path (state)",
+                    board.fen()
+                );
+                visited += 1;
+
+                let mut legal = MoveList::new();
+                generate_legal_with_state(&board, &state, &mut legal);
+                if legal.is_empty() {
+                    break;
+                }
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let m = legal.as_slice()[(seed % legal.len() as u64) as usize];
+                board.do_move(m, &mut state);
+            }
+        }
+        assert!(visited > 100, "expected a real walk, got {visited}");
     }
 }

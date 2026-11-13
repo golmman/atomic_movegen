@@ -66,6 +66,46 @@
 //! [`MoveEffect::casualties`] remains the effect-path summary of the same
 //! fact for consumers that only need the removed pieces.
 //!
+//! # Terminal state on the summary
+//!
+//! [`PostMove::terminal`] asks an already derived summary for the child's
+//! terminal state, with the same precedence as
+//! [`EffectContext::terminal_after`] — and it *is* that implementation, so a
+//! consumer that kept the summary does not derive the child twice:
+//!
+//! ```
+//! use atomic_movegen::{Board, Move, Outcome, TerminalReason};
+//!
+//! let board = Board::from_fen("7k/7p/pK5P/P7/8/8/2r5/8 b - - 24 55").unwrap();
+//! let ctx = board.effect_context();
+//! let m = Move::from_uci("c2c7").unwrap();
+//!
+//! let post = ctx.post_move(&board, m).unwrap();
+//! assert_eq!(ctx.terminal_after(&board, m), post.terminal());
+//! let terminal = post.terminal().expect("stalemate child");
+//! assert_eq!(terminal.outcome, Outcome::Draw);
+//! assert_eq!(terminal.reason, TerminalReason::Stalemate);
+//! ```
+//!
+//! # Child key
+//!
+//! [`EffectContext::post_move_and_key`] returns the summary together with the
+//! child's Zobrist key from one derivation, so “summary + key + terminality”
+//! costs one analysis pass and one incremental key delta:
+//!
+//! ```
+//! use atomic_movegen::{Board, Move};
+//!
+//! let board = Board::new();
+//! let ctx = board.effect_context();
+//! let m = Move::from_uci("e2e4").unwrap();
+//!
+//! let (post, key) = ctx.post_move_and_key(&board, m).unwrap();
+//! assert_eq!(key, board.hash_after(m));
+//! assert_eq!(post.ep_square(), Some(atomic_movegen::Square::E3));
+//! assert_eq!(post.terminal(), None);
+//! ```
+//!
 //! # Effect
 //!
 //! [`EffectContext::effect`] is the full answer: the classification plus the
@@ -111,7 +151,9 @@
 //!
 
 use crate::attacks;
-use crate::board::{BlastCasualties, Board, StateInfo, is_attacked_by};
+use crate::board::{
+    BlastCasualties, Board, StateInfo, castling_squares, is_attacked_by, piece_key,
+};
 use crate::position::{self, PositionView};
 use crate::types::*;
 
@@ -444,8 +486,9 @@ impl EffectContext {
     /// The returned [`PostMove`] describes the position `board.do_move(m, ..)`
     /// would build: placement, removed pieces, side to move, en-passant target,
     /// castling rights and half-move clock. It carries no rules opinion — no
-    /// legality, no terminality, no material-draw shortcut; combine it with
-    /// [`child_outcome`](Self::child_outcome) when the verdict is wanted too.
+    /// legality, no terminality, no material-draw shortcut; ask the summary
+    /// itself with [`PostMove::terminal`], or ask for the key with
+    /// [`post_move_and_key`](Self::post_move_and_key).
     ///
     /// Returns `None` for malformed input only — a [`Move::NONE`], an empty
     /// origin square, or an origin that does not hold a piece of the side to
@@ -455,6 +498,39 @@ impl EffectContext {
     #[must_use]
     pub fn post_move(&self, board: &Board, m: Move) -> Option<PostMove> {
         self.analyze(board, m)
+    }
+
+    /// The child summary and the child's Zobrist key, from one derivation.
+    ///
+    /// The key is exactly [`Board::hash_after`] and exactly the
+    /// [`hash`](Board::hash) of a cloned board after `do_move(m)`: same key
+    /// table and same composition (`EnPassantMode::Always`), so the stability
+    /// contract on [`Board::hash`] and [`ZOBRIST_VERSION`](crate::ZOBRIST_VERSION)
+    /// apply unchanged. Combined with [`PostMove::terminal`] and
+    /// [`PostMove::rule50`], one derivation answers "summary + key +
+    /// terminality".
+    ///
+    /// Returns `None` for malformed input only ([`Move::NONE`], an empty origin
+    /// square, an origin without a piece of the side to move), like
+    /// [`post_move`](Self::post_move). Defined for illegal moves: the key is the
+    /// one a `do_move` child would carry.
+    ///
+    /// ```
+    /// use atomic_movegen::{Board, Move};
+    ///
+    /// let board = Board::from_fen("8/8/8/8/k2Pp2Q/8/8/3K4 b - d3 0 1").unwrap();
+    /// let ctx = board.effect_context();
+    /// let m = Move::from_uci("e4e3").unwrap();
+    ///
+    /// let (post, key) = ctx.post_move_and_key(&board, m).unwrap();
+    /// assert_eq!(key, board.hash_after(m));
+    /// assert_eq!(post.rule50(), 0);
+    /// assert_eq!(post.terminal(), None);
+    /// ```
+    #[must_use]
+    pub fn post_move_and_key(&self, board: &Board, m: Move) -> Option<(PostMove, u64)> {
+        let post = self.analyze(board, m)?;
+        Some((post, child_key(board, &self.view, &post, m)))
     }
 
     /// Fast legality query for the pseudo-legal move `m`.
@@ -522,7 +598,7 @@ impl EffectContext {
         if !self.is_legal_from(m, &child) {
             return AfterState::Illegal;
         }
-        match self.terminal_from(&child) {
+        match child.terminal() {
             Some(t) => AfterState::Terminal(t),
             None => AfterState::Undecided,
         }
@@ -549,23 +625,14 @@ impl EffectContext {
     /// Malformed input — a [`Move::NONE`] or an empty origin square — returns
     /// `None`.
     ///
-    /// The child's [`StateInfo`] is populated internally (checkers, pins,
-    /// commoner counts); no board is written and nothing is allocated.
+    /// This is `post_move(board, m).and_then(|post| post.terminal())`: the
+    /// child's commoner counts and attacker query are read from the placement
+    /// view, and the existence question — which needs the child's pins — is
+    /// only asked when the clock and the check test did not already decide. No
+    /// board is written and nothing is allocated.
     #[must_use]
     pub fn terminal_after(&self, board: &Board, m: Move) -> Option<Terminal> {
-        let child = self.analyze(board, m)?;
-        self.terminal_from(&child)
-    }
-
-    /// The terminal state of an already derived child.
-    ///
-    /// This is the single implementation behind
-    /// [`terminal_after`](Self::terminal_after) and
-    /// [`child_outcome`](Self::child_outcome), so the two cannot drift.
-    fn terminal_from(&self, child: &PostMove) -> Option<Terminal> {
-        let mut state = StateInfo::new();
-        child.view.populate_state(&mut state);
-        position::terminal_in_view(&child.view, &state, None)
+        self.analyze(board, m)?.terminal()
     }
 
     /// The literal [`Board::is_terminal`] mirror on the child position after
@@ -714,9 +781,10 @@ impl EffectContext {
 /// [`EffectContext::effect_and_post`]. It is a plain data value — the facts
 /// `board.do_move(m, ..)` would produce — and carries no rules verdict: no
 /// legality, no terminality, and no material or “insufficient material”
-/// shortcut. Those stay rules questions and are answered by
-/// [`EffectContext::child_outcome`], [`Board::terminal`] and the caller's own
-/// policy.
+/// shortcut. Those stay rules questions: terminality is asked *about* the
+/// summary with [`PostMove::terminal`], legality with
+/// [`EffectContext::is_legal`], and the caller's own policy
+/// (tablebase, schedule) is the caller's.
 ///
 /// Only an [`EffectContext`] builds one; a malformed move yields `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -810,6 +878,134 @@ impl PostMove {
     pub fn rule50(&self) -> u16 {
         self.view.rule50()
     }
+
+    /// The terminal state of this child, from the child's side to move.
+    ///
+    /// `None` when the child is not decided. Equal to
+    /// `{ let mut c = board.clone(); c.do_move(m, &mut st); c.terminal() }` for
+    /// the move that produced this summary, with the same precedence as
+    /// [`EffectContext::terminal_after`] (extinction → commoner-only material
+    /// draw → no legal moves → clock; mate outranks the clock).
+    ///
+    /// This is a rules verdict about the child, not a field of the summary: the
+    /// summary itself still carries no opinion. Nothing is written and nothing
+    /// is allocated: the two commoner counts and the attacker query come from
+    /// the placement view, and the existence question (asked only when the
+    /// precedence reaches it) reuses that same attacker query.
+    ///
+    /// # Legality is not involved
+    ///
+    /// The summary of a pseudo-legal move that explodes the mover's own
+    /// commoner describes the (unreachable) extinct child and is reported as
+    /// such, exactly like [`EffectContext::terminal_after`]. Use
+    /// [`EffectContext::child_outcome`] when *illegal* and *undecided* must be
+    /// distinguishable.
+    ///
+    /// ```
+    /// use atomic_movegen::{Board, Move, Outcome, TerminalReason};
+    ///
+    /// let board = Board::from_fen("8/8/8/8/8/8/8/3qK3 w - - 0 1").unwrap();
+    /// let ctx = board.effect_context();
+    /// // `e1d1` walks into the blast of the queen: the child is extinct, and the
+    /// // move is illegal — the summary still reports the child it would build.
+    /// let post = ctx.post_move(&board, Move::from_uci("e1d1").unwrap()).unwrap();
+    /// let terminal = post.terminal().expect("extinct child");
+    /// assert_eq!(terminal.outcome, Outcome::Loss);
+    /// assert_eq!(terminal.reason, TerminalReason::Extinction);
+    /// ```
+    #[must_use]
+    pub fn terminal(&self) -> Option<Terminal> {
+        crate::position::terminal_in_view_light(&self.view)
+    }
+}
+
+/// The Zobrist key of `post`, `board` being the parent position.
+///
+/// [`Board::hash`] is the XOR of the piece keys, the side key, the castling key
+/// of the current rights, and the en-passant file key. A move changes the piece
+/// on the origin, on the destination, and on every square its blast (or its
+/// en-passant victim) empties — nothing else — plus side, rights, and ep, so the
+/// child key is the parent key XOR those deltas:
+///
+/// - the side key: always flipped, so always XORed;
+/// - every square in `{from} ∪ casualties` (plus the rook's origin for
+///   castling): XOR out the parent's piece key ([`ZOBRIST`](crate::zobrist::ZOBRIST)
+///   index 0 is zero, so an empty square is a no-op);
+/// - every square the move fills — `{to}`, or the commoner's and rook's castling
+///   destinations — XOR in the child's piece key (empty at a ground-zero
+///   square, where the capturer dies);
+/// - the castling-rights key, when the rights changed;
+/// - the en-passant file key of the old target out and of the new target in
+///   (no target, no key: `Board::hash` only adds an ep key for a stored
+///   square, so `ZOBRIST.ep[8]` — which the generator fills but the hash never
+///   uses — must not be XORed).
+///
+/// Promotions need no special case: `from` loses the pawn and `to` gains
+/// `post.piece_on(to)`.
+///
+/// The *parent's* contents are read from the board (an array read), not from
+/// `parent.piece_on` (a scan over the per-type bitboards): the emptied-square
+/// lookup is on the hot path and the two are equal by construction — the
+/// context's view is a snapshot of this board.
+fn child_key(board: &Board, parent: &PositionView, post: &PostMove, m: Move) -> u64 {
+    let us = parent.side_to_move();
+    let from = m.from_sq();
+    let to = m.to_sq();
+
+    let mut h = board.hash() ^ crate::zobrist::ZOBRIST.side;
+
+    // Every square the move empties. `to` needs no separate mention for a
+    // capture: ground zero is part of the casualties. For a quiet move nothing
+    // sits on `to` (its key is the all-zero `NO_PIECE` key), and for castling
+    // `to` is the rook's origin square — the only non-capturing case where
+    // `to` holds a piece.
+    let castling = m.move_type() == MoveType::Castling;
+    if post.is_capture || castling {
+        let mut emptied = Bitboard::square_bb(from) | post.casualties().all();
+        if castling {
+            emptied = emptied | Bitboard::square_bb(to);
+        }
+        while !emptied.is_empty() {
+            let sq = emptied.pop_lsb();
+            h ^= piece_key(sq, board.piece_on(sq));
+        }
+    } else {
+        // The common case: a quiet move empties exactly its origin square.
+        h ^= piece_key(from, board.piece_on(from));
+    }
+
+    // The squares the move fills, and the piece it puts there: a castling move
+    // moves a commoner and a rook, a capture leaves ground zero empty (the
+    // capturer dies there), a promotion places the promoted piece, and any
+    // other move relocates the mover.
+    if castling {
+        let (_, kto, _, rto) = castling_squares(us, to > from);
+        h ^= piece_key(kto, make_piece(us, PieceType::Commoner));
+        h ^= piece_key(rto, make_piece(us, PieceType::Rook));
+    } else {
+        let placed = if post.is_capture {
+            NO_PIECE
+        } else if m.move_type() == MoveType::Promotion {
+            make_piece(us, m.promotion_type())
+        } else {
+            board.piece_on(from)
+        };
+        h ^= piece_key(to, placed);
+    }
+
+    let rights = parent.castling_rights();
+    if rights != post.castling_rights() {
+        h ^= crate::zobrist::ZOBRIST.castling[rights as usize];
+        h ^= crate::zobrist::ZOBRIST.castling[post.castling_rights() as usize];
+    }
+
+    let ep_key = |sq: Option<Square>| match sq {
+        Some(sq) => crate::zobrist::ZOBRIST.ep[file_of(sq) as usize],
+        None => 0,
+    };
+    h ^= ep_key(parent.ep_square()) ^ ep_key(post.ep_square());
+
+    h
 }
 
 #[cfg(test)]
@@ -1137,5 +1333,84 @@ mod tests {
         );
         assert_eq!(ctx.effect_and_post(&board, Move::NONE).1, None);
         assert_eq!(ctx.child_outcome(&board, Move::NONE), AfterState::Illegal);
+    }
+
+    #[test]
+    fn post_move_terminal_matches_terminal_after() {
+        for fen in CORPUS {
+            let board = Board::from_fen(fen).expect("corpus FEN must parse");
+            let mut state = StateInfo::new();
+            board.populate_state(&mut state);
+            let ctx = EffectContext::new(&board, &state);
+
+            let mut pseudo = MoveList::new();
+            generate_pseudo_legal(&board, &mut pseudo);
+            for &m in pseudo.as_slice() {
+                let post = ctx.post_move(&board, m).expect("pseudo-legal move");
+                let mut child = board.clone();
+                let mut child_state = StateInfo::new();
+                child.do_move(m, &mut child_state);
+
+                assert_eq!(post.terminal(), child.terminal(), "{fen} {m}");
+                assert_eq!(post.terminal(), ctx.terminal_after(&board, m), "{fen} {m}");
+                assert_eq!(
+                    ctx.terminal_after(&board, m),
+                    ctx.post_move(&board, m).and_then(|p| p.terminal()),
+                    "{fen} {m}"
+                );
+                assert_eq!(
+                    ctx.child_outcome(&board, m).terminal(),
+                    if ctx.is_legal(&board, m) {
+                        post.terminal()
+                    } else {
+                        None
+                    },
+                    "{fen} {m}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn child_key_matches_hash_after() {
+        for fen in CORPUS {
+            let board = Board::from_fen(fen).expect("corpus FEN must parse");
+            let mut state = StateInfo::new();
+            board.populate_state(&mut state);
+            let ctx = EffectContext::new(&board, &state);
+
+            let mut pseudo = MoveList::new();
+            generate_pseudo_legal(&board, &mut pseudo);
+            for &m in pseudo.as_slice() {
+                let (post, key) = ctx.post_move_and_key(&board, m).expect("pseudo-legal move");
+                let mut child = board.clone();
+                let mut child_state = StateInfo::new();
+                child.do_move(m, &mut child_state);
+
+                assert_eq!(key, board.hash_after(m), "{fen} {m}");
+                assert_eq!(key, child.hash(), "{fen} {m}");
+                assert_eq!(
+                    (key, post.rule50()),
+                    board.hash_and_rule50_after(m),
+                    "{fen} {m}"
+                );
+                assert_eq!(Some(post), ctx.post_move(&board, m), "{fen} {m}");
+            }
+        }
+    }
+
+    #[test]
+    fn post_move_and_key_rejects_malformed_moves() {
+        let board = Board::new();
+        let ctx = board.effect_context();
+        assert_eq!(ctx.post_move_and_key(&board, Move::NONE), None);
+        assert_eq!(
+            ctx.post_move_and_key(&board, Move::make_move(Square::E4, Square::E5)),
+            None
+        );
+        assert_eq!(
+            ctx.post_move_and_key(&board, Move::make_move(Square::A7, Square::A6)),
+            None
+        );
     }
 }

@@ -71,6 +71,12 @@ reference implementation.
   en-passant target, castling rights and half-move clock — with no board write
   and no rules verdict; `effect_and_post()` returns both values from one
   analysis pass
+- Terminal state on the summary, and the child key next to it:
+  `PostMove::terminal()` answers the child's `Terminal { outcome, reason }` for
+  an already derived summary (it is the implementation behind
+  `EffectContext::terminal_after()`, so the child is derived once), and
+  `EffectContext::post_move_and_key()` returns the summary together with the
+  child's Zobrist key — exactly `Board::hash_after()` — from one derivation
 - Classification without the legality ladder: `EffectContext::classification()`
   returns a `MoveClassification` (`MoveEffect` minus `is_legal`) for a move the
   caller already knows is legal, without re-running `is_attacked_by` for the
@@ -309,7 +315,7 @@ path when you need the *effects* (captures, casualties, checks, explosions,
 child terminality, child facts) — not as a faster `legal()`.
 
 `PostMove` carries the child facts without a rules opinion — no legality, no
-terminality, no material shortcut:
+material shortcut; its terminality is asked *about* the summary:
 
 ```rust
 use atomic_movegen::{Board, Color, Square};
@@ -324,6 +330,12 @@ assert_eq!(post.ep_square(), Some(Square::E3));
 assert_eq!(post.rule50(), 0);
 assert!(post.casualties().is_empty());
 assert_eq!(post.piece_on(Square::E4), atomic_movegen::make_piece(Color::White, atomic_movegen::PieceType::Pawn));
+assert_eq!(post.terminal(), None);
+
+// One derivation yields the summary, the child's key and its terminal state.
+let (post, key) = ctx.post_move_and_key(&board, m).unwrap();
+assert_eq!(key, board.hash_after(m));
+assert_eq!(post.terminal(), None);
 ```
 
 For SAN interchange and piece-set construction:

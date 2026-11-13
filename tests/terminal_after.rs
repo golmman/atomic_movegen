@@ -116,6 +116,14 @@ fn terminal_after_matches_cloned_child() {
                 board.fen()
             );
 
+            // The same answer on the already derived summary (MG19a).
+            assert_eq!(
+                ctx.post_move(board, m).and_then(|post| post.terminal()),
+                actual,
+                "{} {m}: PostMove::terminal",
+                board.fen()
+            );
+
             // `is_terminal_after` is the literal `is_terminal` mirror.
             assert_eq!(
                 ctx.is_terminal_after(board, m),

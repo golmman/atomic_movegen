@@ -35,9 +35,14 @@ fn crate_root_reexports_resolve() {
     let effect: MoveEffect = ctx.effect(&board, m);
     assert_eq!(classification, effect.classification());
 
-    // The child summary.
+    // The child summary, its terminal state, and the keyed variant.
     let post: Option<PostMove> = ctx.post_move(&board, m);
-    assert!(post.is_some());
+    let post = post.expect("pseudo-legal move");
+    let _: Option<Terminal> = post.terminal();
+    let keyed: Option<(PostMove, u64)> = ctx.post_move_and_key(&board, m);
+    let (keyed_post, key) = keyed.expect("pseudo-legal move");
+    assert_eq!(keyed_post, post);
+    assert_eq!(key, board.hash_after(m));
 
     // The conformance corpora.
     assert!(!CONFORMANCE_CASES.is_empty());

@@ -176,6 +176,24 @@ fn assert_content(board: &Board, m: Move, deep: bool) {
     let (effect, post_again) = ctx.effect_and_post(board, m);
     assert_eq!(effect, ctx.effect(board, m), "{m}: effect_and_post/effect");
     assert_eq!(post_again, Some(post), "{m}: effect_and_post/post_move");
+
+    // The summary answers for its own child's terminality (MG19a), and the
+    // keyed query (MG19b) returns the same summary with the child's key.
+    assert_eq!(
+        post.terminal(),
+        child_board.terminal(),
+        "{m}: PostMove::terminal"
+    );
+    let (post_keyed, key) = ctx
+        .post_move_and_key(board, m)
+        .expect("post_move_and_key on a pseudo-legal move");
+    assert_eq!(post_keyed, post, "{m}: post_move_and_key summary");
+    assert_eq!(key, child_board.hash(), "{m}: post_move_and_key key");
+    assert_eq!(
+        key,
+        board.hash_after(m),
+        "{m}: post_move_and_key vs hash_after"
+    );
 }
 
 /// The arm must match `Board::legal` and the cloned child's `terminal()`.

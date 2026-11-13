@@ -3156,7 +3156,7 @@ fn piece_key_raw(sq: Square, raw: u8) -> u64 {
 
 /// Same as [`piece_key_raw`] for a full [`Piece`].
 #[inline(always)]
-fn piece_key(sq: Square, piece: Piece) -> u64 {
+pub(crate) fn piece_key(sq: Square, piece: Piece) -> u64 {
     piece_key_raw(sq, piece.raw())
 }
 
