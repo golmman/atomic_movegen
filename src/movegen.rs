@@ -11,6 +11,9 @@ use std::ops::ControlFlow;
 /// result in self-explosion (destroying the commoner), castling through
 /// check, or leaving the commoner under attack. Use [`generate_legal`] for
 /// fully legal moves.
+///
+/// The output order is the generation-order contract documented on
+/// [`for_each_pseudo_legal`].
 pub fn generate_pseudo_legal(board: &Board, moves: &mut MoveList) {
     let _ = for_each_pseudo_legal::<core::convert::Infallible>(board, &mut |m| {
         moves.push(m);
@@ -28,8 +31,15 @@ pub fn generate_pseudo_legal(board: &Board, moves: &mut MoveList) {
 /// promotions, en passant, per pawn) → knights → bishops → rooks → queens →
 /// commoners → castling. `f` must not mutate the board.
 ///
-/// The order is a public compatibility contract; see the crate-level
-/// documentation and `tests/move_order_golden.rs`.
+/// # Generation-order contract
+///
+/// Generation order is a public compatibility contract: pawn moves per pawn in
+/// ascending origin-square order (single push, four promotions in
+/// [`PROMOTION_PIECES`] order, double push, captures in ascending destination
+/// order, en passant), then knights, bishops, rooks, queens, commoners, then
+/// castling (king side before queen side). [`generate_legal`] preserves the
+/// pseudo-legal order after filtering. The order may only change in a major
+/// release and is enforced by `tests/move_order_golden.rs`.
 pub fn for_each_pseudo_legal<B>(
     board: &Board,
     f: &mut impl FnMut(Move) -> ControlFlow<B>,
@@ -281,6 +291,9 @@ fn generate_castling<B>(
 /// self-explosions, en-passant blasts, and quiet commoner relocations are
 /// decided from node-constant bitboards, and only the remaining candidates
 /// reach [`Board::legal`].
+///
+/// The output preserves the pseudo-legal order; see the generation-order
+/// contract on [`for_each_pseudo_legal`].
 pub fn generate_legal(board: &Board, moves: &mut MoveList) {
     let mut state = StateInfo::new();
     board.populate_state(&mut state);
@@ -292,7 +305,8 @@ pub fn generate_legal(board: &Board, moves: &mut MoveList) {
 ///
 /// The caller is responsible for ensuring `state` is up to date (e.g. by calling
 /// [`Board::populate_state`]) before invoking this function. It does not call
-/// `populate_state` itself.
+/// `populate_state` itself. The output preserves the pseudo-legal order; see
+/// the generation-order contract on [`for_each_pseudo_legal`].
 pub fn generate_legal_with_state(board: &Board, state: &StateInfo, moves: &mut MoveList) {
     // The game is already over when either side has no commoner left
     // (extinction). Fairy-Stockfish's `generate<LEGAL>` returns no moves in

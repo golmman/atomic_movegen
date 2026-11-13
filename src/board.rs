@@ -1227,6 +1227,16 @@ impl Board {
     /// en-passant file, but not the half-move clock or fullmove counter. This
     /// is the [`EnPassantMode::Always`] policy, identical to
     /// [`hash_with(EnPassantMode::Always)`](Self::hash_with).
+    ///
+    /// # Key contract
+    ///
+    /// The key table and its XOR composition are compatible with
+    /// Fairy-Stockfish under [`EnPassantMode::Always`]. They are stable across
+    /// the 2.x line: any change to the table or to how pieces, side, castling,
+    /// or the ep file are combined is a major-version change and bumps
+    /// [`ZOBRIST_VERSION`](crate::ZOBRIST_VERSION). Persisted transposition
+    /// tables should store that version with their data and invalidate on a
+    /// mismatch.
     #[inline]
     #[must_use]
     pub fn hash(&self) -> u64 {
@@ -1241,6 +1251,11 @@ impl Board {
     /// differ only by a non-capturable ep target share a key. Evaluating the
     /// legal policy is more expensive because it validates the candidate
     /// captures; the default [`hash`](Self::hash) stays a field read.
+    ///
+    /// [`EnPassantMode::Legal`] is a canonicalization layered on the stable
+    /// base keys (it XORs the same ep-file key in and out); it is not a second
+    /// key table. See [`hash`](Self::hash) for the stability contract and
+    /// [`ZOBRIST_VERSION`](crate::ZOBRIST_VERSION).
     #[inline]
     #[must_use]
     pub fn hash_with(&self, mode: EnPassantMode) -> u64 {
@@ -1664,14 +1679,83 @@ impl Board {
 
     /// One precedence implementation shared by every `outcome*` query.
     fn outcome_impl(&self, state: &StateInfo, moves_exist: Option<bool>) -> Option<Outcome> {
+        self.terminal_impl(state, moves_exist).map(|t| t.outcome)
+    }
+
+    /// Return the WDL outcome and its reason, if the position is decided.
+    ///
+    /// Uses the same precedence as [`outcome`](Self::outcome):
+    ///
+    /// 1. side-to-move commoner extinct → `Loss`/`Extinction`;
+    /// 2. opponent commoner extinct → `Win`/`Extinction`;
+    /// 3. only the two commoners remain → `Draw`/`MaterialDraw`;
+    /// 4. no legal moves: attacked → `Loss`/`NoMovesInCheck`, safe →
+    ///    `Draw`/`Stalemate`;
+    /// 5. `rule50 >= 100` → `Draw`/`FiftyMoveRule`.
+    ///
+    /// Mate outranks the clock: the no-move branch is resolved before the
+    /// 50-move branch when the side to move is in check.
+    ///
+    /// This mirrors [`outcome`](Self::outcome), including the commoner-only
+    /// material draw, and is therefore **not** the same as
+    /// [`is_terminal`](Self::is_terminal): a K-vs-K position with
+    /// `rule50 < 100` returns `Some(Terminal { outcome: Draw, reason:
+    /// MaterialDraw })` while `is_terminal()` is `false`.
+    ///
+    /// This method populates one temporary [`StateInfo`] and uses the
+    /// existence query, but never builds a [`MoveList`].
+    #[must_use]
+    pub fn terminal(&self) -> Option<Terminal> {
+        let mut state = StateInfo::new();
+        self.populate_state(&mut state);
+        self.terminal_with_state(&state)
+    }
+
+    /// Same as [`terminal`](Self::terminal), reusing a populated [`StateInfo`].
+    ///
+    /// `state` must have been populated by
+    /// [`populate_state`](Self::populate_state) for this board. A stale
+    /// `StateInfo` can change extinction, check, and stalemate results.
+    #[must_use]
+    pub fn terminal_with_state(&self, state: &StateInfo) -> Option<Terminal> {
+        self.terminal_impl(state, None)
+    }
+
+    /// Hot-path form of [`terminal_with_state`](Self::terminal_with_state) when
+    /// the caller already knows whether a legal move exists.
+    ///
+    /// `moves_exist` must be the result of
+    /// [`has_legal_move_with_state(self, state)`](crate::movegen::has_legal_move_with_state).
+    /// It is authoritative: passing `false` for a non-terminal position reports
+    /// `NoMovesInCheck` or `Stalemate` according to [`StateInfo::checkers`],
+    /// even though no move generation was run. The value is not consulted when
+    /// extinction, the material shortcut, or the non-check 50-move branch
+    /// already decides the position.
+    #[must_use]
+    pub fn terminal_with(&self, state: &StateInfo, moves_exist: bool) -> Option<Terminal> {
+        self.terminal_impl(state, Some(moves_exist))
+    }
+
+    /// One precedence implementation shared by every `terminal*` query and,
+    /// through [`outcome_impl`](Self::outcome_impl), by every `outcome*` query.
+    fn terminal_impl(&self, state: &StateInfo, moves_exist: Option<bool>) -> Option<Terminal> {
         if state.commoners_count == 0 {
-            return Some(Outcome::Loss);
+            return Some(Terminal {
+                outcome: Outcome::Loss,
+                reason: TerminalReason::Extinction,
+            });
         }
         if state.them_commoners_count == 0 {
-            return Some(Outcome::Win);
+            return Some(Terminal {
+                outcome: Outcome::Win,
+                reason: TerminalReason::Extinction,
+            });
         }
         if self.is_material_draw() {
-            return Some(Outcome::Draw);
+            return Some(Terminal {
+                outcome: Outcome::Draw,
+                reason: TerminalReason::MaterialDraw,
+            });
         }
 
         // The clock is a draw without movegen when there is no check. When the
@@ -1679,7 +1763,10 @@ impl Board {
         // existence question first (Fairy-Stockfish's `!checkers() || legal`
         // guard).
         if self.rule50 >= 100 && state.checkers.is_empty() {
-            return Some(Outcome::Draw);
+            return Some(Terminal {
+                outcome: Outcome::Draw,
+                reason: TerminalReason::FiftyMoveRule,
+            });
         }
 
         let moves_exist =
@@ -1687,13 +1774,22 @@ impl Board {
 
         if !moves_exist {
             return Some(if state.checkers.is_empty() {
-                Outcome::Draw
+                Terminal {
+                    outcome: Outcome::Draw,
+                    reason: TerminalReason::Stalemate,
+                }
             } else {
-                Outcome::Loss
+                Terminal {
+                    outcome: Outcome::Loss,
+                    reason: TerminalReason::NoMovesInCheck,
+                }
             });
         }
         if self.rule50 >= 100 {
-            return Some(Outcome::Draw);
+            return Some(Terminal {
+                outcome: Outcome::Draw,
+                reason: TerminalReason::FiftyMoveRule,
+            });
         }
         None
     }
@@ -4405,6 +4501,92 @@ mod tests {
         }
     }
 
+    #[test]
+    fn terminal_reason_table() {
+        // One row per branch of the WDL precedence, including the two
+        // clock/mate interactions and the material shortcut that
+        // `is_terminal` deliberately excludes.
+        let cases: &[(&str, Outcome, TerminalReason, bool)] = &[
+            // Side to move extinct.
+            (
+                "4k3/8/8/8/8/8/8/8 w - - 0 1",
+                Outcome::Loss,
+                TerminalReason::Extinction,
+                true,
+            ),
+            // Opponent extinct.
+            (
+                "8/8/8/8/8/8/8/4K3 w - - 0 1",
+                Outcome::Win,
+                TerminalReason::Extinction,
+                true,
+            ),
+            // K vs K: WDL draw, but the game is not literally over.
+            (
+                "4k3/8/8/8/8/8/8/4K3 w - - 0 1",
+                Outcome::Draw,
+                TerminalReason::MaterialDraw,
+                false,
+            ),
+            // Checkmate.
+            (
+                "7K/8/8/8/8/8/1Q6/k7 b - - 0 1",
+                Outcome::Loss,
+                TerminalReason::NoMovesInCheck,
+                true,
+            ),
+            // Checkmate on the clock's last ply: mate outranks the clock.
+            (
+                "7K/8/8/8/8/8/1Q6/k7 b - - 100 1",
+                Outcome::Loss,
+                TerminalReason::NoMovesInCheck,
+                true,
+            ),
+            // Stalemate: no legal moves, commoner safe.
+            (
+                "7k/8/8/8/8/8/nn6/Kn6 w - - 0 1",
+                Outcome::Draw,
+                TerminalReason::Stalemate,
+                true,
+            ),
+            // Clock reached 100 with legal moves available.
+            (
+                "4k3/8/8/8/8/8/8/4K2R w - - 100 1",
+                Outcome::Draw,
+                TerminalReason::FiftyMoveRule,
+                true,
+            ),
+        ];
+
+        for &(fen, outcome, reason, terminal) in cases {
+            let board = Board::from_fen(fen).expect("terminal FEN must parse");
+            let expected = Terminal { outcome, reason };
+
+            assert_eq!(board.outcome(), Some(outcome), "outcome for {fen}");
+            assert_eq!(board.terminal(), Some(expected), "terminal for {fen}");
+            assert_eq!(
+                board.terminal().map(|t| t.outcome),
+                board.outcome(),
+                "terminal/outcome agreement for {fen}"
+            );
+            assert_eq!(board.is_terminal(), terminal, "is_terminal for {fen}");
+
+            let mut state = StateInfo::new();
+            board.populate_state(&mut state);
+            assert_eq!(
+                board.terminal_with_state(&state),
+                Some(expected),
+                "terminal_with_state for {fen}"
+            );
+            let moves_exist = crate::movegen::has_legal_move_with_state(&board, &state);
+            assert_eq!(
+                board.terminal_with(&state, moves_exist),
+                Some(expected),
+                "terminal_with for {fen}"
+            );
+        }
+    }
+
     fn assert_outcome_equivalence(board: &Board) {
         let mut state = StateInfo::new();
         board.populate_state(&mut state);
@@ -4422,6 +4604,28 @@ mod tests {
             expected,
             board.outcome_with(&state, moves_exist),
             "outcome_with mismatch at {}",
+            board.fen()
+        );
+
+        // The terminal API must agree with `outcome` on the WDL result and
+        // agree across its three forms.
+        let terminal = board.terminal();
+        assert_eq!(
+            terminal.map(|t| t.outcome),
+            expected,
+            "terminal outcome mismatch at {}",
+            board.fen()
+        );
+        assert_eq!(
+            terminal,
+            board.terminal_with_state(&state),
+            "terminal_with_state mismatch at {}",
+            board.fen()
+        );
+        assert_eq!(
+            terminal,
+            board.terminal_with(&state, moves_exist),
+            "terminal_with mismatch at {}",
             board.fen()
         );
     }
@@ -4862,6 +5066,83 @@ mod tests {
         board.do_move(m, &mut state);
         check_after_and_playout(board, rng, depth - 1, visited);
         board.undo_move(m, &state);
+    }
+
+    /// Hard-coded keys are the compatibility guard for persisted tables. Any
+    /// change to these values needs a major-version decision and a
+    /// `ZOBRIST_VERSION` bump.
+    #[test]
+    fn zobrist_golden_keys() {
+        let cases: &[(&str, u64, u64, u64)] = &[
+            (
+                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                0x5ab8_4d1c_fc77_f79e,
+                0x5ab8_4d1c_fc77_f79e,
+                0x5ab8_4d1c_fc77_f79e,
+            ),
+            (
+                "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2",
+                0x4c47_301a_ad9e_4ede,
+                0x4c47_301a_ad9e_4ede,
+                0x0196_5184_bb13_1d9a,
+            ),
+            (
+                "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+                0x6c55_68b9_2aee_6ad4,
+                0x6c55_68b9_2aee_6ad4,
+                0x6c55_68b9_2aee_6ad4,
+            ),
+            (
+                "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1",
+                0xebf4_6b70_88e7_25bf,
+                0xebf4_6b70_88e7_25bf,
+                0xebf4_6b70_88e7_25bf,
+            ),
+        ];
+
+        for &(fen, hash, always, legal) in cases {
+            let board = Board::from_fen(fen).expect("golden FEN must parse");
+            assert_eq!(board.hash(), hash, "hash for {fen}");
+            assert_eq!(
+                board.hash_with(EnPassantMode::Always),
+                always,
+                "hash_with(Always) for {fen}"
+            );
+            assert_eq!(
+                board.hash_with(EnPassantMode::Legal),
+                legal,
+                "hash_with(Legal) for {fen}"
+            );
+        }
+    }
+
+    #[test]
+    fn zobrist_version_is_stable() {
+        // Update only together with an announced key-schema change.
+        assert_eq!(crate::ZOBRIST_VERSION, 1);
+    }
+
+    #[test]
+    fn hash_ep_modes() {
+        // Same pieces, same side to move, castling-rights-free; only the ep
+        // target differs, and it is not capturable in either position.
+        let with_ep = Board::from_fen("4k3/8/8/3p4/8/8/8/4K3 w - d6 0 2").unwrap();
+        let without_ep = Board::from_fen("4k3/8/8/3p4/8/8/8/4K3 w - - 0 2").unwrap();
+
+        assert_eq!(
+            with_ep.hash_with(EnPassantMode::Legal),
+            without_ep.hash_with(EnPassantMode::Legal),
+            "Legal must canonicalize a non-capturable ep target away"
+        );
+        assert_ne!(
+            with_ep.hash(),
+            without_ep.hash(),
+            "Always keeps the stored ep target"
+        );
+        assert_ne!(
+            with_ep.hash_with(EnPassantMode::Always),
+            without_ep.hash_with(EnPassantMode::Always)
+        );
     }
 
     /// Dedicated check for the combined child-key accessor: over seeded random

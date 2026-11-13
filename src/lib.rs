@@ -95,6 +95,59 @@
 //! Positions that differ only by a non-capturable ep target then share a key
 //! and a FEN while the default `Always` behavior stays unchanged.
 //!
+//! The key table and its XOR composition are FSF-compatible under
+//! [`EnPassantMode::Always`] and stable across the 2.x line. Any change to the
+//! table or its composition is a major-version change and bumps
+//! [`ZOBRIST_VERSION`]. [`EnPassantMode::Legal`] is a canonicalization on top
+//! of the stable base keys, not a separate table. Persisted transposition
+//! tables should store [`ZOBRIST_VERSION`] with their data and invalidate on a
+//! mismatch.
+//!
+//! # Terminal reasons
+//!
+//! [`Board::outcome`] answers *whether* a position is decided; [`Board::terminal`]
+//! (and its `_with_state`/`_with` forms) also answers *why*, returning a
+//! [`Terminal`] with an [`Outcome`] and a [`TerminalReason`]. The reason mirrors
+//! `outcome`'s precedence, including the commoner-only material draw, so it is
+//! not the same as [`Board::is_terminal`].
+//!
+//! # Generation order contract
+//!
+//! Generation order is a public compatibility contract: pawn moves per pawn in
+//! ascending origin-square order (single push, four promotions in
+//! [`PROMOTION_PIECES`](types::PROMOTION_PIECES) order, double push, captures in ascending destination
+//! order, en passant), then knights, bishops, rooks, queens, commoners, then
+//! castling (king side before queen side). [`movegen::generate_legal`]
+//! preserves the pseudo-legal order after filtering. The order may only change
+//! in a major release and is enforced by `tests/move_order_golden.rs`.
+//!
+//! # Engineering contract
+//!
+//! - [`Board`], [`StateInfo`], [`MoveList`], [`Move`], [`EffectContext`],
+//!   [`Setup`], and the public enums are `Send + Sync`.
+//! - The move path does not allocate: [`movegen::generate_pseudo_legal`],
+//!   [`movegen::generate_legal`], [`movegen::generate_legal_with_state`],
+//!   [`movegen::has_legal_move`], [`movegen::has_legal_move_with_state`],
+//!   [`movegen::for_each_pseudo_legal`], [`movegen::for_each_legal`],
+//!   [`movegen::for_each_legal_with_state`], [`Board::legal`],
+//!   [`Board::is_legal`], [`Board::is_legal_with_state`],
+//!   [`Board::is_pseudo_legal`], [`Board::do_move`], [`Board::undo_move`],
+//!   [`Board::hash`], [`Board::hash_with`], [`Board::hash_after`],
+//!   [`Board::hash_after_with`], [`Board::hash_and_rule50_after`],
+//!   [`Board::rule50_after`], [`Board::outcome`], [`Board::outcome_with_state`],
+//!   [`Board::outcome_with`], [`Board::terminal`], [`Board::terminal_with_state`],
+//!   [`Board::terminal_with`], [`Board::is_terminal`],
+//!   [`Board::blast_casualties`], [`Board::attackers_to`],
+//!   [`Board::attackers_to_color`], and [`Move::write_uci`].
+//! - Allocations are allowed in interchange ([`Board::fen`], [`Move::to_uci`],
+//!   [`Board::san`], [`Setup`] construction) and in user-facing convenience
+//!   methods that return `String`.
+//! - `#[non_exhaustive]` enums may gain variants in a minor release; consumers
+//!   must use a wildcard arm. Removing or renaming a variant is a major
+//!   release.
+//! - The crate is zero-dependency and safe-Rust-by-default; the only opt-in
+//!   `unsafe` is the `unsafe-optimizations` magic-table lookup.
+//!
 //! # Feature flags
 //!
 //! - `unsafe-optimizations` (off by default): removes the bounds check from
@@ -132,8 +185,16 @@ pub use effects::{EffectContext, MoveEffect};
 pub use setup::{Setup, SetupError};
 pub use types::{
     Bitboard, CastlingSide, Color, EnPassantMode, Move, MoveList, NO_PIECE, Outcome, Piece,
-    PieceType, Square, make_piece,
+    PieceType, Square, Terminal, TerminalReason, make_piece,
 };
+
+/// Version of the Zobrist key schema.
+///
+/// This is `1` for the current FSF-compatible key table. It is incremented
+/// only when the table or its XOR composition changes; such a change is a
+/// major-version change. Persisted transposition tables should store this
+/// value with their data and invalidate on a mismatch.
+pub const ZOBRIST_VERSION: u32 = 1;
 
 /// Count the number of legal moves at each node to the given depth (perft).
 ///
@@ -160,4 +221,66 @@ pub fn perft(board: &mut board::Board, depth: u32) -> u64 {
         board.undo_move(m, &state);
     }
     total
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn send_sync_assertions() {
+        assert_send_sync::<Board>();
+        assert_send_sync::<StateInfo>();
+        assert_send_sync::<Move>();
+        assert_send_sync::<MoveList>();
+        assert_send_sync::<Bitboard>();
+        assert_send_sync::<Color>();
+        assert_send_sync::<Piece>();
+        assert_send_sync::<PieceType>();
+        assert_send_sync::<Outcome>();
+        assert_send_sync::<Terminal>();
+        assert_send_sync::<TerminalReason>();
+        assert_send_sync::<EffectContext>();
+        assert_send_sync::<Setup>();
+        assert_send_sync::<FenLoadError>();
+        assert_send_sync::<SetupError>();
+        assert_send_sync::<board::FenError>();
+        assert_send_sync::<board::ValidationErrors>();
+    }
+
+    #[test]
+    fn clone_roundtrip() {
+        const FENS: &[&str] = &[
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2",
+            "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1",
+            "4k3/8/8/8/8/8/8/4K2R w - - 100 1",
+        ];
+
+        for fen in FENS {
+            let board = Board::from_fen(fen).expect("fixture FEN must parse");
+            let clone = board.clone();
+
+            assert_eq!(clone.fen(), board.fen(), "fen for {fen}");
+            assert_eq!(clone.hash(), board.hash(), "hash for {fen}");
+            assert_eq!(
+                clone.hash_with(EnPassantMode::Legal),
+                board.hash_with(EnPassantMode::Legal),
+                "legal hash for {fen}"
+            );
+            assert_eq!(clone.side_to_move(), board.side_to_move(), "side for {fen}");
+            assert_eq!(clone.ep_square(), board.ep_square(), "ep for {fen}");
+            assert_eq!(clone.rule50(), board.rule50(), "rule50 for {fen}");
+            assert_eq!(clone.game_ply(), board.game_ply(), "game_ply for {fen}");
+            assert_eq!(
+                clone.castling_rights(),
+                board.castling_rights(),
+                "castling for {fen}"
+            );
+            assert_eq!(clone.outcome(), board.outcome(), "outcome for {fen}");
+        }
+    }
 }

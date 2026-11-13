@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Terminal reasons. `TerminalReason` (`Extinction`, `NoMovesInCheck`,
+  `Stalemate`, `MaterialDraw`, `FiftyMoveRule`) and `Terminal { outcome,
+  reason }` are re-exported at the crate root. `Board::terminal()`,
+  `terminal_with_state()`, and `terminal_with()` mirror `Board::outcome()`'s
+  precedence through one shared classifier, so a consumer can explain every
+  `Some(Outcome)`. The reason includes the commoner-only material draw and is
+  therefore not the same as `Board::is_terminal()`; this is documented.
+- `ZOBRIST_VERSION` (`1`): a public version for the stable, FSF-compatible
+  Zobrist key schema, for persisted transposition tables.
+- Published public contracts: generation order (pinned by
+  `tests/move_order_golden.rs`), Zobrist key stability and `EnPassantMode::Legal`
+  as a canonicalization, `Send + Sync` for the public types, an allocation-free
+  move path, and the `#[non_exhaustive]` semver policy. Documented on the crate,
+  `Board::hash`/`hash_with`, the generators, every non-exhaustive enum, and in
+  the README.
+- `Outcome` now also derives `Hash` (additive; no variant or precedence change).
 - SAN parsing and formatting. `Board::san()` (allocating) and
   `Board::write_san()` (allocation-free) format a **legal** move in standard
   algebraic notation: `O-O`/`O-O-O`, standard disambiguation by origin file,

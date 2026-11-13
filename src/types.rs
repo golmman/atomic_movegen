@@ -194,6 +194,11 @@ impl Square {
 }
 
 /// A file (column) on a chessboard.
+///
+/// # Semver
+///
+/// This enum is `#[non_exhaustive]`: a new variant is a minor release, so
+/// downstream `match` expressions must include a wildcard arm.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
@@ -215,6 +220,11 @@ impl File {
 }
 
 /// A rank (row) on a chessboard.
+///
+/// # Semver
+///
+/// This enum is `#[non_exhaustive]`: a new variant is a minor release, so
+/// downstream `match` expressions must include a wildcard arm.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
@@ -383,6 +393,12 @@ impl ops::Shr<usize> for Bitboard {
 }
 
 /// A side in a chess game.
+///
+/// # Semver
+///
+/// This enum is `#[non_exhaustive]`: a new variant is a minor release, so
+/// downstream `match` expressions must include a wildcard arm. Removing or
+/// renaming a variant is a major release.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -406,6 +422,12 @@ impl Color {
 }
 
 /// The two castling sides.
+///
+/// # Semver
+///
+/// This enum is `#[non_exhaustive]`: a new variant is a minor release, so
+/// downstream `match` expressions must include a wildcard arm. Removing or
+/// renaming a variant is a major release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum CastlingSide {
@@ -416,13 +438,62 @@ pub enum CastlingSide {
 }
 
 /// The result of a finished game, from the side-to-move perspective.
+///
+/// # Semver
+///
+/// This enum is `#[non_exhaustive]`: a new variant is a minor release, so
+/// downstream `match` expressions must include a wildcard arm. Removing or
+/// renaming a variant is a major release.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Outcome {
     Win,
     Loss,
     Draw,
+}
+
+/// Why a position is decided in the WDL view.
+///
+/// This mirrors [`Board::outcome`](crate::Board::outcome), including the
+/// commoner-only material draw. It is **not** the same as
+/// [`Board::is_terminal`](crate::Board::is_terminal), which excludes the
+/// material shortcut: a K-vs-K position with `rule50 < 100` has a
+/// [`TerminalReason::MaterialDraw`] outcome but is not literally over.
+///
+/// Reasons are side-agnostic; the accompanying [`Outcome`] carries the
+/// perspective. To learn which side is extinct, query
+/// [`Board::commoners`](crate::Board::commoners).
+///
+/// # Semver
+///
+/// This enum is `#[non_exhaustive]`: a new variant is a minor release, so
+/// downstream `match` expressions must include a wildcard arm. Removing or
+/// renaming a variant is a major release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum TerminalReason {
+    /// A commoner is extinct (the side to move or the opponent).
+    Extinction,
+    /// No legal moves while the commoner is attacked.
+    NoMovesInCheck,
+    /// No legal moves while the commoner is safe.
+    Stalemate,
+    /// Only the two commoners remain (WDL material draw).
+    MaterialDraw,
+    /// The half-move clock reached 100 and no higher-precedence rule applies.
+    FiftyMoveRule,
+}
+
+/// A decided position: the WDL result and the reason it is decided.
+///
+/// Returned by [`Board::terminal`](crate::Board::terminal) and its variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Terminal {
+    /// The WDL result from the side-to-move perspective.
+    pub outcome: Outcome,
+    /// The rule that decided the position.
+    pub reason: TerminalReason,
 }
 
 /// How an en-passant target participates in a position key or FEN.
@@ -432,6 +503,12 @@ pub enum Outcome {
 /// default [`Board::hash`](crate::Board::hash) and
 /// [`Board::fen`](crate::Board::fen) use [`Always`](Self::Always); the
 /// `_with` variants accept this mode explicitly.
+///
+/// # Semver
+///
+/// This enum is `#[non_exhaustive]`: a new variant is a minor release, so
+/// downstream `match` expressions must include a wildcard arm. Removing or
+/// renaming a variant is a major release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum EnPassantMode {
@@ -448,6 +525,12 @@ pub enum EnPassantMode {
 /// In atomic chess, a *commoner* moves like a king and is royal: losing it
 /// loses the game. Each side has at most one commoner, and pawns cannot
 /// promote to a commoner.
+///
+/// # Semver
+///
+/// This enum is `#[non_exhaustive]`: a new variant is a minor release, so
+/// downstream `match` expressions must include a wildcard arm. Removing or
+/// renaming a variant is a major release.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
@@ -607,6 +690,12 @@ pub const PROMOTION_PIECES: [PieceType; 4] = [
 ];
 
 /// The type of a chess move (normal, promotion, en-passant, castling).
+///
+/// # Semver
+///
+/// This enum is `#[non_exhaustive]`: a new variant is a minor release, so
+/// downstream `match` expressions must include a wildcard arm. Removing or
+/// renaming a variant is a major release.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]

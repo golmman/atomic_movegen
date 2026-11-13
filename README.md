@@ -62,6 +62,12 @@ reference implementation.
   Fairy-Stockfish `Always` policy, so existing keys and output are unchanged.
 - Game-over detection (`Board::outcome()`, state-aware `outcome_with_state()` /
   `outcome_with()`, and the strict `Board::is_terminal()`)
+- Terminal reasons: `Board::terminal()` (and `terminal_with_state()` /
+  `terminal_with()`) return a `Terminal { outcome, reason }` where
+  `TerminalReason` is `Extinction`, `NoMovesInCheck`, `Stalemate`,
+  `MaterialDraw`, or `FiftyMoveRule`. The reason mirrors `outcome()`'s
+  precedence, including the commoner-only material draw, so it is not the same
+  as `is_terminal()`.
 - Correct terminal precedence: mate outranks the 50-move clock, and only the
   two commoners remaining is a WDL draw. There is deliberately no
   insufficient-material table (K+B/K+N/K+R vs K can be an immediate win), and
@@ -69,6 +75,34 @@ reference implementation.
 - Pure safe Rust by default, zero dependencies. The opt-in
   `unsafe-optimizations` feature removes bounds checks from the magic
   bitboard lookup; see [Feature flags](#feature-flags).
+
+## Contracts
+
+- **Generation order** is a public compatibility contract: pawn moves per pawn
+  in ascending origin-square order (single push, four promotions in
+  `PROMOTION_PIECES` order, double push, captures in ascending destination
+  order, en passant), then knights, bishops, rooks, queens, commoners, then
+  castling (king side before queen side). `generate_legal` preserves the
+  pseudo-legal order after filtering. The order may only change in a major
+  release and is enforced by `tests/move_order_golden.rs`.
+- **Zobrist keys** are FSF-compatible under `EnPassantMode::Always` and stable
+  across the 2.x line. Any change to the key table or its XOR composition is a
+  major-version change and bumps `ZOBRIST_VERSION` (currently `1`).
+  `EnPassantMode::Legal` is a canonicalization on top of the stable base keys,
+  not a separate table. Persisted transposition tables should store
+  `ZOBRIST_VERSION` and invalidate on a mismatch.
+- **Engineering:** `Board`, `StateInfo`, `MoveList`, `Move`, `EffectContext`,
+  `Setup`, and the public enums are `Send + Sync`. The move path does not
+  allocate (`generate_*`, `has_legal_move*`, `for_each_*`, `Board::legal`,
+  `is_legal*`, `is_pseudo_legal`, `do_move`/`undo_move`, `hash*`,
+  `rule50_after`, `outcome*`, `terminal*`, `is_terminal`, `blast_casualties`,
+  `attackers_to*`, and `Move::write_uci`). Allocations are allowed in
+  interchange (`fen`, `to_uci`, `san`, `Setup` construction) and in
+  convenience methods that return `String`.
+- **Semver:** `#[non_exhaustive]` enums may gain variants in a minor release;
+  consumers must use a wildcard arm. Removing or renaming a variant is a major
+  release. The crate is zero-dependency and safe-Rust-by-default; the only
+  opt-in `unsafe` is the `unsafe-optimizations` magic-table lookup.
 
 ## Usage (library)
 
