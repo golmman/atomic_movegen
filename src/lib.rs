@@ -53,6 +53,15 @@
 //! [`Board::is_legal_with_state`]; [`Board::is_pseudo_legal`] mirrors the
 //! pseudo-legal generator. None of these builds a [`MoveList`].
 //!
+//! # Hot-path helpers
+//!
+//! [`StateInfo`] is re-exported at the crate root for callers that cache
+//! legality state. [`movegen::for_each_pseudo_legal`] walks the candidate
+//! stream without allocating and supports early exit, while
+//! [`Board::null_for`] builds a null-move position without a FEN round-trip.
+//! [`attacks::between`] and the `attacks::xray_*_attacks` helpers expose the
+//! geometry an engine needs for its own legality shortcuts.
+//!
 //! # Position keys and en passant
 //!
 //! [`Board::hash`] and [`Board::fen`] follow Fairy-Stockfish and include the
@@ -93,8 +102,10 @@ pub mod types;
 pub(crate) mod util;
 pub(crate) mod zobrist;
 
-pub use board::{BlastCasualties, Board, FenLoadError, FenPolicy, ValidationErrors};
-pub use types::{Bitboard, Color, EnPassantMode, Move, MoveList, Outcome, PieceType, Square};
+pub use board::{BlastCasualties, Board, FenLoadError, FenPolicy, StateInfo, ValidationErrors};
+pub use types::{
+    Bitboard, CastlingSide, Color, EnPassantMode, Move, MoveList, Outcome, PieceType, Square,
+};
 
 /// Count the number of legal moves at each node to the given depth (perft).
 ///

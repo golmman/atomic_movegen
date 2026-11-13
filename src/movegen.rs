@@ -26,8 +26,11 @@ pub fn generate_pseudo_legal(board: &Board, moves: &mut MoveList) {
 /// [`generate_pseudo_legal`], which is a thin wrapper collecting the whole
 /// stream into a [`MoveList`]: pawn moves (single/double pushes, captures,
 /// promotions, en passant, per pawn) → knights → bishops → rooks → queens →
-/// commoners → castling.
-pub(crate) fn for_each_pseudo_legal<B>(
+/// commoners → castling. `f` must not mutate the board.
+///
+/// The order is a public compatibility contract; see the crate-level
+/// documentation and `tests/move_order_golden.rs`.
+pub fn for_each_pseudo_legal<B>(
     board: &Board,
     f: &mut impl FnMut(Move) -> ControlFlow<B>,
 ) -> ControlFlow<B> {
@@ -647,5 +650,75 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    const STREAM_CORPUS: &[&str] = &[
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5Q2/PPPP1PPP/RNB1K1NR w KQkq - 4 4",
+        "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+        "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1",
+        "8/8/8/8/k2Pp2Q/8/8/3K4 b - d3 0 1",
+        "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+        "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3",
+        "3k4/8/8/8/8/8/8/3QK3 b - - 0 1",
+        "4k3/8/8/8/8/4r3/4N3/4K3 w - - 0 1",
+        "8/8/8/8/8/8/8/k7 w - - 0 1",
+        "k7/8/8/8/8/8/8/7K w - - 0 1",
+        "rnbqkbnr/ppp4p/4p1p1/3pNp2/7Q/4P3/PPPP1PPP/RNB1KB1R b KQkq - 1 5",
+        "r1b1Brk1/ppp5/6pp/3p4/5p2/P3PP2/1P4PP/R4RK1 b - - 1 15",
+    ];
+
+    #[test]
+    fn for_each_pseudo_legal_matches_list() {
+        for fen in STREAM_CORPUS {
+            let board = Board::from_fen(fen).expect("corpus FEN must parse");
+            let mut expected = MoveList::new();
+            generate_pseudo_legal(&board, &mut expected);
+
+            let mut streamed = Vec::new();
+            let flow = for_each_pseudo_legal::<()>(&board, &mut |m| {
+                streamed.push(m);
+                ControlFlow::Continue(())
+            });
+            assert!(flow.is_continue());
+            assert_eq!(streamed, expected.as_slice(), "{fen}");
+        }
+    }
+
+    #[test]
+    fn for_each_pseudo_legal_early_exit() {
+        let board = Board::new();
+        let mut count = 0usize;
+        let flow = for_each_pseudo_legal::<()>(&board, &mut |_| {
+            count += 1;
+            ControlFlow::Break(())
+        });
+        assert!(flow.is_break());
+        assert_eq!(count, 1);
+
+        let mut full = 0usize;
+        let flow = for_each_pseudo_legal::<()>(&board, &mut |_| {
+            full += 1;
+            ControlFlow::Continue(())
+        });
+        assert!(flow.is_continue());
+        assert_eq!(full, 20);
+    }
+
+    #[test]
+    fn for_each_pseudo_legal_order_matches_golden() {
+        let board = Board::new();
+        let mut uci = Vec::new();
+        let _ = for_each_pseudo_legal::<()>(&board, &mut |m| {
+            uci.push(m.to_uci());
+            ControlFlow::Continue(())
+        });
+        assert_eq!(
+            uci,
+            [
+                "a2a3", "a2a4", "b2b3", "b2b4", "c2c3", "c2c4", "d2d3", "d2d4", "e2e3", "e2e4",
+                "f2f3", "f2f4", "g2g3", "g2g4", "h2h3", "h2h4", "b1a3", "b1c3", "g1f3", "g1h3",
+            ]
+        );
     }
 }

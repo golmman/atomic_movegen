@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `Board::null_for(attacker)` returns the null counterpart of a position
+  without a FEN round-trip: same pieces and castling rights, `attacker` to
+  move, no en-passant target, preserved clocks, and a recomputed hash.
+- `movegen::for_each_pseudo_legal()` is now public. It walks the pseudo-legal
+  candidate stream in generation order and supports early exit via
+  `ControlFlow`; `generate_pseudo_legal()` remains the collecting wrapper.
+- `StateInfo` is re-exported at the crate root.
+- `CastlingSide` and `Board::has_castling_right(color, side)` provide a typed
+  castling-rights query. The raw `Board::castling_rights()` accessor is
+  unchanged.
+- `attacks::between()`, `attacks::xray_rook_attacks()`,
+  `attacks::xray_bishop_attacks()`, and `attacks::xray_queen_attacks()` expose
+  the between-squares and x-ray helpers needed for engine-side legality
+  shortcuts.
+
 ## [2.4.0] - 2026-11-02
 
 ### Fixed

@@ -334,6 +334,36 @@ pub fn attacks_from(pt: PieceType, color: Color, sq: Square, occupied: Bitboard)
     }
 }
 
+/// Return the squares strictly between `s1` and `s2`, or empty when the
+/// squares are not on the same rank, file, or diagonal.
+#[inline(always)]
+pub fn between(s1: Square, s2: Square) -> Bitboard {
+    crate::bitboard::between_bb(s1, s2)
+}
+
+/// Rook attacks from `sq` that are revealed when the pieces on `blockers`
+/// are removed from `occupied`.
+///
+/// Equals `rook_attacks(sq, occupied ^ blockers) & !rook_attacks(sq, occupied)`.
+/// `blockers` is expected to be a subset of `occupied`; the formula is still
+/// well-defined otherwise, but the “revealed” interpretation assumes it.
+#[inline(always)]
+pub fn xray_rook_attacks(sq: Square, occupied: Bitboard, blockers: Bitboard) -> Bitboard {
+    rook_attacks(sq, occupied ^ blockers) & !rook_attacks(sq, occupied)
+}
+
+/// Bishop counterpart of [`xray_rook_attacks`].
+#[inline(always)]
+pub fn xray_bishop_attacks(sq: Square, occupied: Bitboard, blockers: Bitboard) -> Bitboard {
+    bishop_attacks(sq, occupied ^ blockers) & !bishop_attacks(sq, occupied)
+}
+
+/// Queen counterpart of [`xray_rook_attacks`].
+#[inline(always)]
+pub fn xray_queen_attacks(sq: Square, occupied: Bitboard, blockers: Bitboard) -> Bitboard {
+    xray_rook_attacks(sq, occupied, blockers) | xray_bishop_attacks(sq, occupied, blockers)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -570,5 +600,57 @@ mod tests {
         let bishop = bishop_attacks(Square::D4, occ);
         let rook = rook_attacks(Square::D4, occ);
         assert_eq!(queen, bishop | rook);
+    }
+
+    #[test]
+    fn between_matches_bitboard_table() {
+        for s1 in 0..64u8 {
+            for s2 in 0..64u8 {
+                let a = Square::from_index(s1 as i8);
+                let b = Square::from_index(s2 as i8);
+                assert_eq!(
+                    between(a, b),
+                    BETWEEN_BB[s1 as usize][s2 as usize],
+                    "between({a:?}, {b:?})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn xray_helpers_match_definition() {
+        let sq = Square::D4;
+        let occupied = Bitboard::square_bb(Square::D5)
+            | Bitboard::square_bb(Square::F6)
+            | Bitboard::square_bb(Square::H4);
+        let blockers = Bitboard::square_bb(Square::D5) | Bitboard::square_bb(Square::F6);
+
+        assert_eq!(
+            xray_rook_attacks(sq, occupied, blockers),
+            rook_attacks(sq, occupied ^ blockers) & !rook_attacks(sq, occupied)
+        );
+        assert_eq!(
+            xray_bishop_attacks(sq, occupied, blockers),
+            bishop_attacks(sq, occupied ^ blockers) & !bishop_attacks(sq, occupied)
+        );
+        assert_eq!(
+            xray_queen_attacks(sq, occupied, blockers),
+            xray_rook_attacks(sq, occupied, blockers) | xray_bishop_attacks(sq, occupied, blockers)
+        );
+
+        // A blocker off the line reveals nothing.
+        let off_line = Bitboard::square_bb(Square::A1);
+        assert!(xray_rook_attacks(sq, occupied | off_line, off_line).is_empty());
+        assert!(xray_bishop_attacks(sq, occupied | off_line, off_line).is_empty());
+    }
+
+    #[test]
+    fn xray_empty_blockers_is_empty() {
+        let occupied = Bitboard::square_bb(Square::D5) | Bitboard::square_bb(Square::F6);
+        for sq in [Square::A1, Square::D4, Square::H8] {
+            assert!(xray_rook_attacks(sq, occupied, Bitboard::EMPTY).is_empty());
+            assert!(xray_bishop_attacks(sq, occupied, Bitboard::EMPTY).is_empty());
+            assert!(xray_queen_attacks(sq, occupied, Bitboard::EMPTY).is_empty());
+        }
     }
 }

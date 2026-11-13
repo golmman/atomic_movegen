@@ -28,6 +28,12 @@ reference implementation.
 - Rule conveniences: `attacks::attacks_from()`,
   `Board::attackers_to_color()`, board-aware `Board::is_zeroing()` /
   `Board::is_double_push()`, and order-preserving `MoveList::retain()`
+- Hot-path helpers: allocation-free `Board::null_for()` (the null counterpart
+  of a position without a FEN round-trip), the public early-exit
+  `movegen::for_each_pseudo_legal()` stream, typed
+  `Board::has_castling_right()` with `CastlingSide`, and
+  `attacks::between()` / `attacks::xray_*_attacks()` for engine-side legality
+  shortcuts
 - Incremental Zobrist hashing (`Board::hash()`) and FSF-compatible FEN output
 - Canonical en-passant keys and FEN output: `Board::legal_ep_square()` and
   `EnPassantMode::Legal` via `hash_with()`, `fen_with()`, and

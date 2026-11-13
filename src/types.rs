@@ -405,6 +405,16 @@ impl Color {
     }
 }
 
+/// The two castling sides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum CastlingSide {
+    /// The h-file side (`O-O`).
+    KingSide,
+    /// The a-file side (`O-O-O`).
+    QueenSide,
+}
+
 /// The result of a finished game, from the side-to-move perspective.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

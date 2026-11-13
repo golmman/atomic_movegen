@@ -869,6 +869,9 @@ impl Board {
     /// This matches Fairy-Stockfish and prints the stored en-passant target
     /// after every double push, even when no legal en-passant capture exists.
     /// Use [`fen_with`](Self::fen_with) for canonicalized output.
+    ///
+    /// For a null-move replay, [`null_for`](Self::null_for) is the
+    /// allocation-free equivalent of serializing and re-parsing this FEN.
     #[must_use]
     pub fn fen(&self) -> String {
         self.write_fen(self.ep_square)
@@ -1040,6 +1043,18 @@ impl Board {
         self.castling_rights
     }
 
+    /// Return `true` when `color` still has the castling right for `side`.
+    #[must_use]
+    pub fn has_castling_right(&self, color: Color, side: CastlingSide) -> bool {
+        let bit = match (color, side) {
+            (Color::White, CastlingSide::KingSide) => WK_CASTLE,
+            (Color::White, CastlingSide::QueenSide) => WQ_CASTLE,
+            (Color::Black, CastlingSide::KingSide) => BK_CASTLE,
+            (Color::Black, CastlingSide::QueenSide) => BQ_CASTLE,
+        };
+        self.castling_rights & bit != 0
+    }
+
     /// Return the stored en-passant target square, if any.
     ///
     /// This is the Fairy-Stockfish-style target recorded after every double
@@ -1108,6 +1123,34 @@ impl Board {
     #[must_use]
     pub fn fullmove_number(&self) -> u16 {
         1 + (self.game_ply.saturating_sub(1)) / 2
+    }
+
+    /// The null counterpart of this position: same pieces and castling rights,
+    /// `attacker` to move, no en-passant target.
+    ///
+    /// This is the cheap in-place equivalent of the FEN round-trip used by
+    /// null-move searches. The half-move clock and fullmove number are
+    /// preserved, so the derived game ply follows the new side exactly as the
+    /// FEN path does. The Zobrist hash is recomputed for the new side and
+    /// cleared ep target.
+    ///
+    /// The result is an ordinary [`Board`]. A caller that needs an ephemeral
+    /// null position must still keep it out of any keyed or stored state.
+    #[must_use]
+    pub fn null_for(&self, attacker: Color) -> Board {
+        let mut board = self.clone();
+        board.side_to_move = attacker;
+        board.ep_square = None;
+        // Match the FEN round-trip: the fullmove number is preserved and the
+        // game ply is derived from the new side to move. Saturating arithmetic
+        // keeps an extreme fullmove number from overflowing in debug builds.
+        let fullmove = self.fullmove_number();
+        board.game_ply = fullmove
+            .saturating_sub(1)
+            .saturating_mul(2)
+            .saturating_add(if attacker == Color::White { 1 } else { 2 });
+        board.recompute_hash();
+        board
     }
 
     /// Return the current Zobrist hash of the position.
@@ -4966,5 +5009,89 @@ mod tests {
             }
         }
         assert!(visited > 500, "only visited {visited} positions");
+    }
+
+    const NULL_FOR_FIXTURES: &[&str] = &[
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5Q2/PPPP1PPP/RNB1K1NR w KQkq - 4 4",
+        "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+        "4k3/8/8/2Pp4/8/8/8/4K3 w - d6 0 2",
+        "4k3/8/8/8/8/8/8/4K3 w - - 99 50",
+        "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+    ];
+
+    fn null_for_fen_roundtrip(board: &Board, attacker: Color) -> Board {
+        let mut fields: Vec<String> = board.fen().split_whitespace().map(str::to_owned).collect();
+        fields[1] = match attacker {
+            Color::White => "w".to_owned(),
+            Color::Black => "b".to_owned(),
+        };
+        fields[3] = "-".to_owned();
+        Board::from_fen(&fields.join(" ")).expect("round-trip FEN must parse")
+    }
+
+    #[test]
+    fn null_for_matches_fen_roundtrip() {
+        for fen in NULL_FOR_FIXTURES {
+            let board = Board::from_fen(fen).expect("fixture FEN must parse");
+            for attacker in [Color::White, Color::Black] {
+                let null = board.null_for(attacker);
+                let expected = null_for_fen_roundtrip(&board, attacker);
+                assert_eq!(null.fen(), expected.fen(), "{fen} / {attacker:?}");
+                assert_eq!(null.hash(), expected.hash(), "{fen} / {attacker:?}");
+                assert_eq!(
+                    null.hash_with(EnPassantMode::Legal),
+                    expected.hash_with(EnPassantMode::Legal),
+                    "{fen} / {attacker:?}"
+                );
+                assert_eq!(null.side_to_move(), attacker);
+                assert_eq!(null.ep_square(), None);
+                assert_eq!(null.rule50(), board.rule50());
+                assert_eq!(null.game_ply(), expected.game_ply());
+                assert_eq!(null.castling_rights(), board.castling_rights());
+                // The source board is untouched.
+                assert_eq!(board.fen(), *fen);
+            }
+        }
+    }
+
+    #[test]
+    fn null_for_preserves_fullmove_and_rule50() {
+        let board = Board::from_fen("4k3/8/8/8/8/8/8/4K3 w - - 99 50").unwrap();
+        let null = board.null_for(Color::Black);
+        assert_eq!(null.rule50(), 99);
+        assert_eq!(null.fullmove_number(), 50);
+        assert_eq!(null.game_ply(), 100);
+        assert_eq!(null.side_to_move(), Color::Black);
+    }
+
+    #[test]
+    fn null_for_clears_ep_and_recomputes_hash() {
+        let board = Board::from_fen("4k3/8/8/2Pp4/8/8/8/4K3 w - d6 0 2").unwrap();
+        assert!(board.ep_square().is_some());
+        let null = board.null_for(Color::Black);
+        assert_eq!(null.ep_square(), None);
+        assert_eq!(null.hash(), null.recomputed_hash());
+        assert_ne!(null.hash(), board.hash());
+    }
+
+    #[test]
+    fn has_castling_right_matches_raw_bits() {
+        for fen in NULL_FOR_FIXTURES {
+            let board = Board::from_fen(fen).expect("fixture FEN must parse");
+            let raw = board.castling_rights();
+            for (color, side, bit) in [
+                (Color::White, CastlingSide::KingSide, WK_CASTLE),
+                (Color::White, CastlingSide::QueenSide, WQ_CASTLE),
+                (Color::Black, CastlingSide::KingSide, BK_CASTLE),
+                (Color::Black, CastlingSide::QueenSide, BQ_CASTLE),
+            ] {
+                assert_eq!(
+                    board.has_castling_right(color, side),
+                    raw & bit != 0,
+                    "{fen} / {color:?} / {side:?}"
+                );
+            }
+        }
     }
 }
