@@ -256,6 +256,34 @@ Every command below was run in the workspace, in this order.
 (`AGENTS.md`): **commit, tag `v2.8.0` and `cargo publish` are the maintainer's
 steps.**
 
+### Pre-publish re-check (2.8.0, after commit `1c27349`)
+
+The gates were re-run on the committed tree immediately before handing the
+release to the maintainer; the tree is clean, so `--allow-dirty` is no longer
+needed.
+
+| Check | Result |
+| --- | --- |
+| `cargo fmt --check` | clean |
+| `cargo clippy --all-targets -- -D warnings`, both feature sets | clean |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` | no warnings |
+| `cargo test` / `cargo test --features unsafe-optimizations` | 13 blocks ok (lib 173, doctests 16) both |
+| `cargo run --release --example verify_perft 5` ×3 | 41/41 each; 2.176 / 2.181 / 2.166 s → median **2.181 s** (report median 2.170 s — no regression) |
+| `cargo package --list` | 45 files, no `docs/`, no `Fairy-Stockfish/`, no `perf.data*`, no tracked `Cargo.lock` in the repo |
+| `cargo test` **from the unpacked tarball** (`target/package/atomic-movegen-2.8.0`) | 13 blocks ok, same counts as the workspace run |
+| `cargo publish --dry-run` (no flags, clean tree) | packaged 45 files, 998.1 KiB / 227.4 KiB compressed, verified compile, "aborting upload due to dry run" |
+| crates.io sparse index | latest published version is **2.7.0**; `2.8.0` is free |
+| MSRV | **not re-verified**: only `rustc 1.99.1` is installed here (no 1.85 toolchain), so `rust-version = "1.85"` rests on the 2.7.0 check |
+
+Pending maintainer steps (writing git commands are out of scope for this agent):
+
+```sh
+# tree is clean at 1c27349, version 2.8.0
+cargo publish --dry-run     # already green
+git tag v2.8.0 && git push --tags
+cargo publish
+```
+
 ## What the downstream should re-run
 
 - Re-point at the **published** 2.8.0 (no path dependency).
