@@ -61,6 +61,16 @@ reference implementation.
   `Board::terminal()` would, with no clone and no `MoveList`. Companion
   queries: `is_terminal_after()` (the literal `is_terminal()` mirror) and
   `has_legal_move_after()`
+- Two-level child answer: `EffectContext::child_outcome` (and
+  `Board::child_outcome()`) return an `AfterState` — `Illegal` (the move is not
+  legal), `Undecided` (legal, the game continues), or `Terminal(t)` (legal, and
+  `t` is the child's `Terminal`) — so “the move is illegal” and “the child is
+  not decided” are no longer both a `None`
+- Child summary: `EffectContext::post_move()` returns a `PostMove` describing
+  the child `do_move` would build — placement, casualties, side to move,
+  en-passant target, castling rights and half-move clock — with no board write
+  and no rules verdict; `effect_and_post()` returns both values from one
+  analysis pass
 - Incremental Zobrist hashing (`Board::hash()`) and FSF-compatible FEN output
 - Canonical en-passant keys and FEN output: `Board::legal_ep_square()` and
   `EnPassantMode::Legal` via `hash_with()`, `fen_with()`, and
@@ -147,6 +157,12 @@ self-explosions, the largest observed legal move count, and the 14
 against the engine. Treat any difference not announced as a rules fix as a veto
 in a downstream differential.
 
+`atomic_movegen::conformance::CHILD_CASES` is the child-state counterpart: one
+row per `AfterState` branch and per `TerminalReason`, each recording the
+position, the candidate move, the expected `AfterState` (from the child's side
+to move), and the child's legal move count. A downstream can use it to veto a
+child-terminality disagreement without trusting this crate's implementation.
+
 ## Usage (library)
 
 Add `atomic-movegen` to your `Cargo.toml`:
@@ -223,8 +239,46 @@ assert_eq!(terminal.reason, TerminalReason::NoMovesInCheck);
 assert_eq!(ctx.terminal_after(&board, Move::from_uci("h1h2").unwrap()), None);
 ```
 
-`outcome_after` returns `None` for an illegal **or** an undecided child; use
-`is_legal` and `terminal_after` when the difference matters.
+`outcome_after` returns `None` for an illegal **or** an undecided child; the
+unambiguous query is `child_outcome`, which separates them:
+
+```rust
+use atomic_movegen::{AfterState, Board, Move};
+
+// A legal move whose child is not decided.
+let board = Board::new();
+let ctx = board.effect_context();
+let m = board.move_from_uci("e2e4").unwrap();
+assert_eq!(ctx.child_outcome(&board, m), AfterState::Undecided);
+
+// A pseudo-legal move that the atomic rules reject: capturing the enemy
+// commoner would also blast the mover's own commoner away.
+let board = Board::from_fen("8/8/8/8/8/8/8/3qK3 w - - 0 1").unwrap();
+let ctx = board.effect_context();
+let m = Move::from_uci("e1d1").unwrap();
+assert_eq!(ctx.child_outcome(&board, m), AfterState::Illegal);
+```
+
+`child_outcome` returns `AfterState::Terminal(t)` when the child is decided, with
+`t` exactly the `Terminal` a cloned child's `Board::terminal()` reports.
+
+`PostMove` carries the child facts without a rules opinion — no legality, no
+terminality, no material shortcut:
+
+```rust
+use atomic_movegen::{Board, Color, Square};
+
+let board = Board::new();
+let ctx = board.effect_context();
+let m = board.move_from_uci("e2e4").unwrap();
+let post = ctx.post_move(&board, m).unwrap();
+
+assert_eq!(post.side_to_move(), Color::Black);
+assert_eq!(post.ep_square(), Some(Square::E3));
+assert_eq!(post.rule50(), 0);
+assert!(post.casualties().is_empty());
+assert_eq!(post.piece_on(Square::E4), atomic_movegen::make_piece(Color::White, atomic_movegen::PieceType::Pawn));
+```
 
 For SAN interchange and piece-set construction:
 

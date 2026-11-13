@@ -1838,8 +1838,10 @@ impl Board {
     ///
     /// `None` is therefore ambiguous: it means *illegal* **or** *undecided*
     /// (the child is not decided, so the game continues). Use
+    /// [`child_outcome`](Self::child_outcome) for the two-level answer, or
     /// [`EffectContext::is_legal`](crate::effects::EffectContext::is_legal) and
-    /// [`terminal_after`](Self::terminal_after) to tell the two apart.
+    /// [`terminal_after`](Self::terminal_after) to ask the two questions
+    /// separately.
     ///
     /// `state` must be populated for this board. This is a convenience wrapper
     /// for [`EffectContext::outcome_after`](crate::effects::EffectContext::outcome_after)
@@ -1847,6 +1849,27 @@ impl Board {
     #[must_use]
     pub fn outcome_after(&self, m: Move, state: &StateInfo) -> Option<Outcome> {
         self.effect_context_with_state(state).outcome_after(self, m)
+    }
+
+    /// Return the two-level child answer after `m` **without building the
+    /// child**: [`AfterState::Illegal`](crate::effects::AfterState::Illegal),
+    /// [`AfterState::Undecided`](crate::effects::AfterState::Undecided), or
+    /// [`AfterState::Terminal`](crate::effects::AfterState::Terminal) with the
+    /// child's [`Terminal`].
+    ///
+    /// This is the unambiguous counterpart of
+    /// [`outcome_after`](Self::outcome_after), which returns `None` both for an
+    /// illegal move and for an undecided child. For every **pseudo-legal** `m`:
+    /// `Illegal` iff `!self.legal(m, state)`, and otherwise `Terminal(t)` iff
+    /// `{ let mut b = self.clone(); b.do_move(m, &mut st); b.terminal() }` is
+    /// `Some(t)`, `Undecided` iff it is `None`.
+    ///
+    /// `state` must be populated for this board. This is a convenience wrapper
+    /// for [`EffectContext::child_outcome`](crate::effects::EffectContext::child_outcome)
+    /// for callers that do not keep a context.
+    #[must_use]
+    pub fn child_outcome(&self, m: Move, state: &StateInfo) -> crate::effects::AfterState {
+        self.effect_context_with_state(state).child_outcome(self, m)
     }
 
     /// Return the terminal state of the child position after `m` **without

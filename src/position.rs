@@ -35,7 +35,7 @@ use crate::types::*;
 ///
 /// Occupancy is derived from the two color sets rather than cached, so a view
 /// can never disagree with its own placement.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PositionView {
     /// Per-color piece bitboards.
     pub(crate) by_color: [Bitboard; Color::NB],

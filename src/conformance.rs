@@ -11,6 +11,11 @@
 //! GPL-derived data is included. Treat any difference not announced as a rules
 //! fix as a veto in a downstream differential.
 //!
+//! [`CHILD_CASES`] is the child-state counterpart: a frozen table of
+//! (position, move, expected [`AfterState`], child legal move count) rows
+//! covering every branch of the two-level child answer, so a downstream can
+//! veto a child-terminality disagreement without trusting the implementation.
+//!
 //! ```
 //! use atomic_movegen::conformance::CASES;
 //!
@@ -20,10 +25,11 @@
 //! }
 //! ```
 
+use crate::effects::AfterState;
 use crate::types::{
     Outcome,
     Outcome::{Draw, Loss, Win},
-    TerminalReason,
+    Terminal, TerminalReason,
     TerminalReason::{Extinction, FiftyMoveRule, MaterialDraw, NoMovesInCheck, Stalemate},
 };
 
@@ -787,6 +793,153 @@ pub static CASES: &[ConformanceCase] = &[
     },
 ];
 
+/// One frozen child-state case: a position, one candidate move, and the
+/// two-level answer the engine gives for the child after that move.
+///
+/// The fields are public data. `after_state` is the child's state from the
+/// **child's** side to move, exactly as
+/// [`EffectContext::child_outcome`](crate::EffectContext::child_outcome)
+/// reports it: an extinction capture by the mover is therefore a
+/// `Terminal(Loss/Extinction)` here, because the child is lost for the side
+/// that has to move in it.
+#[derive(Debug, Clone, Copy)]
+pub struct ChildCase {
+    /// Short human-readable name, unique within [`CHILD_CASES`].
+    pub name: &'static str,
+    /// Position FEN, including clocks.
+    pub fen: &'static str,
+    /// The candidate move in UCI. It is pseudo-legal on `fen`; castling and
+    /// en-passant moves use the board-aware encoding.
+    pub uci: &'static str,
+    /// [`EffectContext::child_outcome`](crate::EffectContext::child_outcome)
+    /// for that move.
+    pub after_state: AfterState,
+    /// Number of legal moves in the child position the move produces (the
+    /// cloned `do_move` child), which is `0` for an unreachable or move-less
+    /// child.
+    pub child_legal_count: usize,
+}
+
+/// The frozen child-state corpus: one row per `AfterState` branch and per
+/// [`TerminalReason`].
+///
+/// The rows are inert data for a downstream that wants to veto a
+/// child-terminality disagreement without trusting this crate's
+/// implementation: each row names the position, the move, the expected
+/// two-level answer, and the child's legal move count. `tests/conformance.rs`
+/// verifies every field against the engine, so the table cannot drift
+/// silently.
+///
+/// The `Illegal` rows are pseudo-legal moves the rules reject (a self-explosion
+/// and a commoner move into an attacked square), and their
+/// `child_legal_count` still describes the (unreachable) child that `do_move`
+/// would build.
+pub static CHILD_CASES: &[ChildCase] = &[
+    ChildCase {
+        name: "stalemate-child",
+        fen: "7k/7p/pK5P/P7/8/8/2r5/8 b - - 24 55",
+        uci: "c2c7",
+        after_state: AfterState::Terminal(Terminal {
+            outcome: Draw,
+            reason: Stalemate,
+        }),
+        child_legal_count: 0,
+    },
+    ChildCase {
+        name: "extinction-child",
+        fen: "k1n5/8/1K6/8/8/8/8/8 b - - 0 1",
+        uci: "c8b6",
+        after_state: AfterState::Terminal(Terminal {
+            outcome: Loss,
+            reason: Extinction,
+        }),
+        child_legal_count: 0,
+    },
+    // The mover captures the enemy commoner: the child is extinct for the
+    // side that has to move there, so the mover wins.
+    ChildCase {
+        name: "extinction-capture-child",
+        fen: "4R1k1/8/8/8/8/8/8/4K3 w - - 0 1",
+        uci: "e8g8",
+        after_state: AfterState::Terminal(Terminal {
+            outcome: Loss,
+            reason: Extinction,
+        }),
+        child_legal_count: 0,
+    },
+    // The material shortcut decides the child although moves remain.
+    ChildCase {
+        name: "material-draw-child",
+        fen: "8/8/8/2R5/4n3/8/7K/5k2 b - - 13 69",
+        uci: "e4c5",
+        after_state: AfterState::Terminal(Terminal {
+            outcome: Draw,
+            reason: MaterialDraw,
+        }),
+        child_legal_count: 5,
+    },
+    // Mate outranks the clock: the child's clock reads 100.
+    ChildCase {
+        name: "checkmate-child",
+        fen: "7k/8/8/5N2/3K4/8/8/R6R w - - 99 60",
+        uci: "a1g1",
+        after_state: AfterState::Terminal(Terminal {
+            outcome: Loss,
+            reason: NoMovesInCheck,
+        }),
+        child_legal_count: 0,
+    },
+    ChildCase {
+        name: "fifty-move-child",
+        fen: "4k3/8/8/8/8/8/8/R3K3 w - - 99 60",
+        uci: "a1a8",
+        after_state: AfterState::Terminal(Terminal {
+            outcome: Draw,
+            reason: FiftyMoveRule,
+        }),
+        child_legal_count: 3,
+    },
+    // Undecided children with a non-trivial answer: the en-passant child is in
+    // check with exactly one escape, the castling child kept black's rights.
+    ChildCase {
+        name: "undecided-en-passant-child",
+        fen: "8/5kp1/1p5p/p1p4P/PP2RPPK/6r1/8/7n b - - 17 41",
+        uci: "g7g5",
+        after_state: AfterState::Undecided,
+        child_legal_count: 1,
+    },
+    ChildCase {
+        name: "undecided-castling-rights-child",
+        fen: "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+        uci: "a1a2",
+        after_state: AfterState::Undecided,
+        child_legal_count: 25,
+    },
+    ChildCase {
+        name: "undecided-promotion-child",
+        fen: "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1",
+        uci: "b7b8q",
+        after_state: AfterState::Undecided,
+        child_legal_count: 22,
+    },
+    // Illegal pseudo-legal moves: a self-explosion, and a commoner move into
+    // an attacked square.
+    ChildCase {
+        name: "illegal-self-explosion",
+        fen: "8/8/8/8/8/8/8/3qK3 w - - 0 1",
+        uci: "e1d1",
+        after_state: AfterState::Illegal,
+        child_legal_count: 0,
+    },
+    ChildCase {
+        name: "illegal-move-into-check",
+        fen: "k3qr2/8/8/7q/1bb1R3/8/8/4K3 w - - 0 1",
+        uci: "e1d1",
+        after_state: AfterState::Illegal,
+        child_legal_count: 64,
+    },
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -799,6 +952,43 @@ mod tests {
             for other in &CASES[i + 1..] {
                 assert_ne!(case.name, other.name, "duplicate conformance name");
             }
+        }
+    }
+
+    #[test]
+    fn child_corpus_names_are_unique_and_cover_every_branch() {
+        assert!(!CHILD_CASES.is_empty());
+        for (i, case) in CHILD_CASES.iter().enumerate() {
+            assert!(!case.name.is_empty());
+            assert!(!case.fen.is_empty());
+            assert!(!case.uci.is_empty());
+            for other in &CHILD_CASES[i + 1..] {
+                assert_ne!(case.name, other.name, "duplicate child case name");
+            }
+        }
+        assert!(
+            CHILD_CASES.iter().any(|case| case.after_state.is_illegal()),
+            "child corpus lost its Illegal branch"
+        );
+        assert!(
+            CHILD_CASES
+                .iter()
+                .any(|case| case.after_state.is_undecided()),
+            "child corpus lost its Undecided branch"
+        );
+        for reason in [
+            Extinction,
+            NoMovesInCheck,
+            Stalemate,
+            MaterialDraw,
+            FiftyMoveRule,
+        ] {
+            assert!(
+                CHILD_CASES
+                    .iter()
+                    .any(|case| case.after_state.terminal().map(|t| t.reason) == Some(reason)),
+                "child corpus lost the {reason:?} reason"
+            );
         }
     }
 }

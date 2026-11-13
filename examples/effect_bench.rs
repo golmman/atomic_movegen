@@ -3,11 +3,14 @@
 //!
 //! Three groups are reported per bench position:
 //!
-//! 1. per pseudo-legal move: `effect`/`is_legal` against `Board::legal`;
+//! 1. per pseudo-legal move: `effect`/`is_legal` against `Board::legal`, and
+//!    `child_outcome` (the two-level answer) against the split
+//!    `is_legal` + `terminal_after` pair it replaces;
 //! 2. per child: `terminal_after` (and `outcome_after`) against cloning the
 //!    board and playing the move — both against `terminal()` and against
 //!    `generate_legal_with_state`, the two shapes a downstream
-//!    "is this child over?" question takes;
+//!    "is this child over?" question takes, plus the `PostMove` summary against
+//!    cloning and reading the same facts off the child board;
 //! 3. the **decided share**: the fraction of children answered `Some` over a
 //!    seeded play-out walk. This is this crate's own tree, not a downstream
 //!    search tree; it exists so the crate publishes what `terminal_after`
@@ -276,6 +279,65 @@ fn main() {
             repeats,
             iterations,
         );
+        let mut i = 0usize;
+        let child_outcome_ns = bench(
+            || {
+                let m = pseudo[i % pseudo.len()];
+                i += 1;
+                black_box(ctx.child_outcome(&board, m));
+            },
+            repeats,
+            iterations,
+        );
+        let mut i = 0usize;
+        let split_answer_ns = bench(
+            || {
+                let m = pseudo[i % pseudo.len()];
+                i += 1;
+                if ctx.is_legal(&board, m) {
+                    black_box(ctx.terminal_after(&board, m));
+                }
+            },
+            repeats,
+            iterations,
+        );
+        let mut i = 0usize;
+        let post_move_ns = bench(
+            || {
+                let m = pseudo[i % pseudo.len()];
+                i += 1;
+                if let Some(post) = ctx.post_move(&board, m) {
+                    black_box((
+                        post.occupied(),
+                        post.rule50(),
+                        post.ep_square(),
+                        post.castling_rights(),
+                        post.casualties(),
+                    ));
+                }
+            },
+            repeats,
+            iterations,
+        );
+        let mut i = 0usize;
+        let post_clone_ns = bench(
+            || {
+                let m = pseudo[i % pseudo.len()];
+                i += 1;
+                let mut child = board.clone();
+                let mut st = StateInfo::new();
+                child.do_move(m, &mut st);
+                black_box((
+                    child.occupied(),
+                    child.rule50(),
+                    child.ep_square(),
+                    child.castling_rights(),
+                    child.blast_casualties(m),
+                ));
+            },
+            repeats,
+            iterations,
+        );
         let generate_legal_ns = bench(
             || {
                 let mut list = MoveList::new();
@@ -331,6 +393,14 @@ fn main() {
         println!(
             "  has legal move after:  {has_move_after_ns:>9.1}  \
              clone+do_move+has {has_move_clone_ns:>9.1}"
+        );
+        println!(
+            "  two-level child:       child_outcome {child_outcome_ns:>9.1}  \
+             is_legal+terminal_after {split_answer_ns:>9.1}"
+        );
+        println!(
+            "  child summary:         post_move {post_move_ns:>9.1}  \
+             clone+do_move+facts {post_clone_ns:>9.1}"
         );
         println!(
             "  per node:              generate_legal {generate_legal_ns:>9.1}  \

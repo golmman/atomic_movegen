@@ -22,12 +22,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `EffectContext::is_terminal_after()` (the literal `Board::is_terminal()`
   mirror on the child, i.e. without the commoner-only material shortcut) and
   `EffectContext::has_legal_move_after()`.
+- Two-level child answer. `AfterState` (`Illegal`, `Undecided`,
+  `Terminal(Terminal)`, with `is_illegal`/`is_undecided`/`is_terminal`/
+  `terminal`/`outcome` helpers) is returned by
+  `EffectContext::child_outcome()` and the `Board::child_outcome()` wrapper, so
+  “the move is illegal” and “the child is not decided” are separable without a
+  second query. It is exact for pseudo-legal input: `Illegal` iff
+  `Board::legal()` is `false`, `Terminal(t)` iff the cloned child's
+  `terminal()` is `Some(t)`.
+- Child summary. `PostMove` (placement, casualties, side to move, en-passant
+  target, castling rights, half-move clock — facts only, no rules verdict) is
+  returned by `EffectContext::post_move()`, and
+  `EffectContext::effect_and_post()` returns `(MoveEffect, Option<PostMove>)`
+  from one analysis pass. Both are derived without a board write; only an
+  `EffectContext` can build a `PostMove`.
+- `conformance::CHILD_CASES`: a frozen child-state corpus with one row per
+  `AfterState` branch and per `TerminalReason` (position, move, expected
+  `AfterState` from the child's side to move, child legal move count), verified
+  field by field in `tests/conformance.rs`.
 
 ### Changed
 
 - `EffectContext::outcome_after()` lost its clone fallback: it is now
-  `is_legal(..)` followed by `terminal_after(..)`, so no board is written or
-  cloned for any child.
+  `child_outcome(..).outcome()` — one analysis pass, with no board written,
+  cloned or moved for any child. Signature and behaviour are unchanged
+  (`None` = illegal **or** undecided).
 - The rules live on one crate-private `PositionView`. `Board` stores that view
   as its placement, and `Board::legal`, `populate_state`, `compute_checkers`,
   `compute_pinned`, `is_material_draw`, `blast_casualties`, `is_capture`, the

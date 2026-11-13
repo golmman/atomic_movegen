@@ -4,9 +4,11 @@
 //! corpus after a rules, key, or generation-order change is a deliberate act:
 //! the data and `ZOBRIST_VERSION` must be updated together.
 
-use atomic_movegen::conformance::{CASES, ConformanceCase};
-use atomic_movegen::movegen::{generate_legal, generate_pseudo_legal};
-use atomic_movegen::{Board, CONFORMANCE_CASES, EnPassantMode, MoveList, ZOBRIST_VERSION};
+use atomic_movegen::conformance::{CASES, CHILD_CASES, ConformanceCase};
+use atomic_movegen::movegen::{generate_legal, generate_legal_with_state, generate_pseudo_legal};
+use atomic_movegen::{
+    Board, CONFORMANCE_CASES, EnPassantMode, Move, MoveList, StateInfo, ZOBRIST_VERSION,
+};
 
 fn uci_list(case: &ConformanceCase, legal: bool) -> Vec<String> {
     let board = Board::from_fen(case.fen).expect("conformance FEN must parse");
@@ -170,5 +172,88 @@ fn conformance_root_reexport_matches_module() {
     for (a, b) in CONFORMANCE_CASES.iter().zip(CASES) {
         assert_eq!(a.name, b.name);
         assert_eq!(a.hash_always, b.hash_always);
+    }
+}
+
+/// Resolve the board-aware encoding of a child case's UCI move.
+fn child_case_move(board: &Board, uci: &str) -> Move {
+    if let Some(m) = board.move_from_uci(uci) {
+        return m;
+    }
+    let parsed = Move::from_uci(uci).expect("case UCI must parse");
+    let mut pseudo = MoveList::new();
+    generate_pseudo_legal(board, &mut pseudo);
+    pseudo
+        .as_slice()
+        .iter()
+        .copied()
+        .find(|m| m.from_sq() == parsed.from_sq() && m.to_sq() == parsed.to_sq())
+        .unwrap_or_else(|| panic!("{uci} is not pseudo-legal in {}", board.fen()))
+}
+
+#[test]
+fn child_conformance_corpus_verifies() {
+    for case in CHILD_CASES {
+        let board = Board::from_fen(case.fen)
+            .unwrap_or_else(|e| panic!("child case {:?}: FEN does not parse: {e}", case.name));
+        let mut state = StateInfo::new();
+        board.populate_state(&mut state);
+        let m = child_case_move(&board, case.uci);
+        let ctx = board.effect_context_with_state(&state);
+
+        // The move is pseudo-legal by contract.
+        let mut pseudo = MoveList::new();
+        generate_pseudo_legal(&board, &mut pseudo);
+        assert!(
+            pseudo.as_slice().contains(&m),
+            "child case {:?}: {} is not pseudo-legal",
+            case.name,
+            case.uci
+        );
+
+        assert_eq!(
+            ctx.child_outcome(&board, m),
+            case.after_state,
+            "child case {:?}: child_outcome drift",
+            case.name
+        );
+        assert_eq!(
+            board.child_outcome(m, &state),
+            case.after_state,
+            "child case {:?}: Board::child_outcome drift",
+            case.name
+        );
+        assert_eq!(
+            ctx.outcome_after(&board, m),
+            case.after_state.outcome(),
+            "child case {:?}: outcome_after drift",
+            case.name
+        );
+        assert_eq!(
+            ctx.is_legal(&board, m),
+            !case.after_state.is_illegal(),
+            "child case {:?}: illegality drift",
+            case.name
+        );
+
+        // The child legal-move count is what a cloned child generates.
+        let mut child = board.clone();
+        let mut child_state = StateInfo::new();
+        child.do_move(m, &mut child_state);
+        child.populate_state(&mut child_state);
+        let mut legal = MoveList::new();
+        generate_legal_with_state(&child, &child_state, &mut legal);
+        assert_eq!(
+            legal.len(),
+            case.child_legal_count,
+            "child case {:?}: child legal move count drift",
+            case.name
+        );
+        assert_eq!(
+            ctx.has_legal_move_after(&board, m),
+            Some(case.child_legal_count > 0),
+            "child case {:?}: has_legal_move_after drift",
+            case.name
+        );
     }
 }

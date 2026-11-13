@@ -81,9 +81,22 @@
 //! read, so “does the child have a legal move?” needs no board write.
 //! [`EffectContext::is_terminal_after`] mirrors [`Board::is_terminal`] on the
 //! child and [`EffectContext::has_legal_move_after`] answers the existence
-//! query alone. Note that [`EffectContext::outcome_after`] returns `None` both
-//! for an illegal move and for an undecided child; the two are distinguished by
-//! [`EffectContext::is_legal`] and [`EffectContext::terminal_after`].
+//! query alone.
+//!
+//! [`EffectContext::child_outcome`] (also reachable as
+//! [`Board::child_outcome`]) is the unambiguous two-level answer over the same
+//! child: an [`AfterState`] of `Illegal` (the move is not legal), `Undecided`
+//! (legal, the game continues) or `Terminal(t)` (legal, and `t` is the child's
+//! [`Terminal`]). [`EffectContext::outcome_after`] is `child_outcome(..)`
+//! reduced to the WDL result, so its `None` means *illegal* **or**
+//! *undecided* — exactly as documented.
+//!
+//! [`PostMove`] is the child summary the effect path already derives:
+//! [`EffectContext::post_move`] returns the child's placement, its removed
+//! pieces, its side to move, en-passant target, castling rights and half-move
+//! clock without a board write and without a rules verdict.
+//! [`EffectContext::effect_and_post`] returns both values from one analysis
+//! pass.
 //!
 //! # Interchange: SAN and piece sets
 //!
@@ -129,7 +142,10 @@
 //! terminal flag, both en-passant key modes, and clocks. It is inert data for
 //! downstream differential testing; `tests/conformance.rs` verifies every case
 //! against the engine. [`CONFORMANCE_CASES`] is the same slice re-exported at
-//! the crate root.
+//! the crate root. [`conformance::CHILD_CASES`] is the child-state counterpart:
+//! (position, move, expected [`AfterState`], child legal move count) rows that a
+//! downstream can use to veto a child-terminality disagreement without trusting
+//! the implementation.
 //!
 //! # Generation order contract
 //!
@@ -158,8 +174,11 @@
 //!   [`Board::outcome_with`], [`Board::terminal`], [`Board::terminal_with_state`],
 //!   [`Board::terminal_with`], [`Board::is_terminal`],
 //!   [`Board::outcome_after`], [`Board::terminal_after`],
-//!   [`EffectContext::effect`], [`EffectContext::is_legal`],
-//!   [`EffectContext::terminal_after`], [`EffectContext::outcome_after`],
+//!   [`Board::child_outcome`],
+//!   [`EffectContext::effect`], [`EffectContext::effect_and_post`],
+//!   [`EffectContext::post_move`], [`EffectContext::is_legal`],
+//!   [`EffectContext::terminal_after`], [`EffectContext::child_outcome`],
+//!   [`EffectContext::outcome_after`],
 //!   [`Board::blast_casualties`], [`Board::attackers_to`],
 //!   [`Board::attackers_to_color`], and [`Move::write_uci`].
 //! - Allocations are allowed in interchange ([`Board::fen`], [`Move::to_uci`],
@@ -207,7 +226,7 @@ pub(crate) mod zobrist;
 
 pub use board::{BlastCasualties, Board, FenLoadError, FenPolicy, StateInfo, ValidationErrors};
 pub use conformance::{CASES as CONFORMANCE_CASES, ConformanceCase};
-pub use effects::{EffectContext, MoveEffect};
+pub use effects::{AfterState, EffectContext, MoveEffect, PostMove};
 pub use setup::{Setup, SetupError};
 pub use types::{
     Bitboard, CastlingSide, Color, EnPassantMode, Move, MoveList, NO_PIECE, Outcome, Piece,
@@ -269,6 +288,9 @@ mod tests {
         assert_send_sync::<Terminal>();
         assert_send_sync::<TerminalReason>();
         assert_send_sync::<EffectContext>();
+        assert_send_sync::<AfterState>();
+        assert_send_sync::<MoveEffect>();
+        assert_send_sync::<PostMove>();
         assert_send_sync::<Setup>();
         assert_send_sync::<FenLoadError>();
         assert_send_sync::<SetupError>();
