@@ -30,10 +30,17 @@ reference implementation.
   `Board::is_double_push()`, and order-preserving `MoveList::retain()`
 - Hot-path helpers: allocation-free `Board::null_for()` (the null counterpart
   of a position without a FEN round-trip), the public early-exit
-  `movegen::for_each_pseudo_legal()` stream, typed
-  `Board::has_castling_right()` with `CastlingSide`, and
+  `movegen::for_each_pseudo_legal()` and `movegen::for_each_legal()` streams,
+  typed `Board::has_castling_right()` with `CastlingSide`, and
   `attacks::between()` / `attacks::xray_*_attacks()` for engine-side legality
   shortcuts
+- Move effects without a board write: `EffectContext` (built once per position
+  with `Board::effect_context()`) classifies every pseudo-legal candidate into a
+  `MoveEffect` — capture, blast casualties, checks or explodes the enemy
+  commoner, keeps the mover's commoner, and legality. `EffectContext::is_legal`
+  agrees with `Board::legal` for pseudo-legal input, and
+  `EffectContext::outcome_after` / `Board::outcome_after()` agree with the
+  child's `Board::outcome()` for legal input
 - Incremental Zobrist hashing (`Board::hash()`) and FSF-compatible FEN output
 - Canonical en-passant keys and FEN output: `Board::legal_ep_square()` and
   `EnPassantMode::Legal` via `hash_with()`, `fen_with()`, and
@@ -82,6 +89,31 @@ let bad = Board::from_fen_with("8/8/8/8/8/8/8/8 w - - 0 1", FenPolicy::Strict);
 assert!(matches!(bad, Err(FenLoadError::InvalidPosition(_))));
 ```
 
+For move-effect classification without a child board:
+
+```rust
+use atomic_movegen::{Board, Outcome, StateInfo};
+
+let board = Board::from_fen("4R1k1/8/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+let ctx = board.effect_context();
+
+let m = board.move_from_uci("e8g8").unwrap(); // Rook takes the enemy commoner
+let effect = ctx.effect(&board, m);
+assert!(effect.is_capture);
+assert!(effect.explodes_enemy_commoner);
+assert!(effect.leaves_own_commoner);
+assert!(effect.is_legal);
+assert_eq!(ctx.outcome_after(&board, m), Some(Outcome::Loss));
+```
+
+`MoveEffect` never calls `do_move`; castling is the only case that delegates to
+`Board::legal` (its pass-through-square rule is a separate rule surface), and
+`outcome_after` falls back to a cloned board only where the child's
+“has a legal move?” answer decides checkmate or stalemate. The effect path is
+validated against `Board::legal` and against a cloned `do_move` child for every
+pseudo-legal move of the 41-position perft corpus and of seeded random
+play-outs (`tests/effects.rs`).
+
 ## Usage (CLI perft)
 
 ```sh
@@ -119,6 +151,7 @@ cargo run --example fen_after "FEN" MOVE      # FEN + moves after playing MOVE (
 cargo run --example debug_moves "FEN"         # pseudo-legal vs. legal counts, duplicates
 cargo run --example pawn_debug "FEN"          # pawn inspections and manual move checks
 cargo run --example test_d5g8                 # attack-table sanity check (hardcoded position)
+cargo run --release --example effect_bench    # effect-path vs board-write microbenchmark
 ```
 
 ## Feature flags

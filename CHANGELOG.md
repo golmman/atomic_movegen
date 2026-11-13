@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `EffectContext` and `MoveEffect` (`atomic_movegen::effects`): a
+  position-constant context plus a read-only per-move classification — capture,
+  blast casualties, checks the enemy commoner, explodes the enemy commoner,
+  keeps the mover's commoner, and legality. Build it with
+  `Board::effect_context()` / `Board::effect_context_with_state()`.
+  `EffectContext::is_legal` equals `Board::legal` for pseudo-legal input and
+  `EffectContext::outcome_after` (also `Board::outcome_after()`) equals the
+  child's `Board::outcome()` for legal input; both are differentially tested
+  against the board-writing path.
+- `movegen::for_each_legal()` and `movegen::for_each_legal_with_state()`: an
+  allocation-free, early-exit stream over the legal moves in generation order,
+  the legal sibling of `for_each_pseudo_legal()`.
+- `examples/effect_bench.rs`: a dependency-free microbenchmark comparing the
+  effect path with `Board::legal`, `do_move` + `outcome`, and `for_each_legal`
+  with `generate_legal_with_state`.
 - `Board::null_for(attacker)` returns the null counterpart of a position
   without a FEN round-trip: same pieces and castling rights, `attacker` to
   move, no en-passant target, preserved clocks, and a recomputed hash.
@@ -23,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `attacks::xray_bishop_attacks()`, and `attacks::xray_queen_attacks()` expose
   the between-squares and x-ray helpers needed for engine-side legality
   shortcuts.
+
+### Changed
+
+- The “is this square attacked?” rule is now one shared helper
+  (`board::is_attacked_by`) used by `Board::legal` and the effect path. No
+  move-generation, perft, hash, FEN, or `Outcome` behaviour changed.
 
 ## [2.4.0] - 2026-11-02
 

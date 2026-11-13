@@ -1671,6 +1671,56 @@ impl Board {
             || !crate::movegen::has_legal_move_with_state(self, &state)
     }
 
+    /// Build an [`EffectContext`](crate::effects::EffectContext) for this
+    /// position, populating one temporary [`StateInfo`].
+    ///
+    /// The context snapshots the node-constant data the effect queries need, so
+    /// it is built once per position and then reused for every pseudo-legal
+    /// candidate, exactly like [`populate_state`](Self::populate_state) for
+    /// [`legal`](Self::legal). It does not own the board.
+    #[must_use]
+    pub fn effect_context(&self) -> crate::effects::EffectContext {
+        let mut state = StateInfo::new();
+        self.populate_state(&mut state);
+        crate::effects::EffectContext::new(self, &state)
+    }
+
+    /// Build an [`EffectContext`](crate::effects::EffectContext) from a
+    /// caller-populated [`StateInfo`].
+    ///
+    /// `state` must have been populated by
+    /// [`populate_state`](Self::populate_state) for this board; a stale state
+    /// changes which positions are reported as already over.
+    #[must_use]
+    pub fn effect_context_with_state(&self, state: &StateInfo) -> crate::effects::EffectContext {
+        crate::effects::EffectContext::new(self, state)
+    }
+
+    /// Return the outcome of the child position after `m` **without building
+    /// the child**, from the child side-to-move perspective.
+    ///
+    /// # Contract
+    ///
+    /// For every legal `m` this returns exactly
+    /// `{ let mut b = self.clone(); b.do_move(m, &mut st); b.outcome() }`, and
+    /// for every illegal `m` it returns `None`.
+    ///
+    /// Immediate extinction (the move's blast removes the enemy commoner) and
+    /// the decisions that need no move generation are answered from the move's
+    /// effect. A position where the child could still be decided by the
+    /// absence of a legal move (checkmate or stalemate) falls back to a cloned
+    /// board and [`outcome`](Self::outcome); the fallback is an implementation
+    /// detail and may disappear once a child-view generator can prove
+    /// “no legal move” without a board write.
+    ///
+    /// `state` must be populated for this board. This is a convenience wrapper
+    /// for [`EffectContext::outcome_after`](crate::effects::EffectContext::outcome_after)
+    /// for callers that do not keep a context.
+    #[must_use]
+    pub fn outcome_after(&self, m: Move, state: &StateInfo) -> Option<Outcome> {
+        self.effect_context_with_state(state).outcome_after(self, m)
+    }
+
     /// Return `true` if `m` is a capture on this board.
     #[inline]
     #[must_use]
@@ -2652,27 +2702,47 @@ impl Board {
 /// intentionally excluded; callers handle adjacent enemy commoners separately.
 #[inline(always)]
 fn square_attacked_by(board: &Board, sq: Square, occupied: Bitboard, enemy_bb: Bitboard) -> bool {
-    // Pawns. `board.side_to_move` is the side whose commoner is being tested,
-    // matching the previous helper's pawn direction.
-    if !(attacks::pawn_attacks(board.side_to_move, sq)
-        & board.by_type[PieceType::Pawn as usize]
-        & enemy_bb)
+    // `board.side_to_move` is the side whose commoner is being tested, which
+    // is the pawn direction the attack table needs.
+    is_attacked_by(sq, occupied, &board.by_type, enemy_bb, board.side_to_move)
+}
+
+/// Return `true` when the piece standing on `sq` is attacked by one of
+/// `attackers`.
+///
+/// `sq_color` is the color of the piece on `sq`, so the pawn term looks for
+/// opposing pawns; `attackers` is the set of opposing pieces on `occupied` and
+/// `by_type` describes the opposing piece placement on `occupied`. Commoner
+/// attacks are intentionally excluded: an adjacent commoner grants immunity
+/// instead of a check, so callers handle that case separately.
+///
+/// This is the single implementation of the “is this square attacked” rule
+/// shared by [`Board::legal`], [`is_attacked_by`]-based effect queries, and
+/// [`Board::attackers_to`]'s per-color companion.
+#[inline(always)]
+pub(crate) fn is_attacked_by(
+    sq: Square,
+    occupied: Bitboard,
+    by_type: &[Bitboard; PieceType::NB],
+    attackers: Bitboard,
+    sq_color: Color,
+) -> bool {
+    // Pawns.
+    if !(attacks::pawn_attacks(sq_color, sq) & by_type[PieceType::Pawn as usize] & attackers)
         .is_empty()
     {
         return true;
     }
 
     // Knights.
-    if !(attacks::knight_attacks(sq) & board.by_type[PieceType::Knight as usize] & enemy_bb)
-        .is_empty()
-    {
+    if !(attacks::knight_attacks(sq) & by_type[PieceType::Knight as usize] & attackers).is_empty() {
         return true;
     }
 
     // Bishop/queen sliders.
     if !(attacks::bishop_attacks(sq, occupied)
-        & (board.by_type[PieceType::Bishop as usize] | board.by_type[PieceType::Queen as usize])
-        & enemy_bb)
+        & (by_type[PieceType::Bishop as usize] | by_type[PieceType::Queen as usize])
+        & attackers)
         .is_empty()
     {
         return true;
@@ -2680,15 +2750,10 @@ fn square_attacked_by(board: &Board, sq: Square, occupied: Bitboard, enemy_bb: B
 
     // Rook/queen sliders. This is skipped when a pawn, knight, bishop, or
     // queen already hit.
-    if !(attacks::rook_attacks(sq, occupied)
-        & (board.by_type[PieceType::Rook as usize] | board.by_type[PieceType::Queen as usize])
-        & enemy_bb)
+    !(attacks::rook_attacks(sq, occupied)
+        & (by_type[PieceType::Rook as usize] | by_type[PieceType::Queen as usize])
+        & attackers)
         .is_empty()
-    {
-        return true;
-    }
-
-    false
 }
 
 /// One-shot classification of a non-castling move for the child-key helpers
@@ -2816,7 +2881,11 @@ fn castling_rights_after(
 }
 
 /// Return the castling square data for a given color and side.
-fn castling_squares(us: Color, kingside: bool) -> (Square, Square, Square, Square) {
+///
+/// The tuple is `(commoner origin, commoner destination, rook origin, rook
+/// destination)`. Shared with [`crate::effects`], which mirrors the castling
+/// relocation on bitboards without a board write.
+pub(crate) fn castling_squares(us: Color, kingside: bool) -> (Square, Square, Square, Square) {
     match (us, kingside) {
         (Color::White, true) => (Square::E1, Square::G1, Square::H1, Square::F1),
         (Color::White, false) => (Square::E1, Square::C1, Square::A1, Square::D1),

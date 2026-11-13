@@ -56,11 +56,23 @@
 //! # Hot-path helpers
 //!
 //! [`StateInfo`] is re-exported at the crate root for callers that cache
-//! legality state. [`movegen::for_each_pseudo_legal`] walks the candidate
-//! stream without allocating and supports early exit, while
-//! [`Board::null_for`] builds a null-move position without a FEN round-trip.
-//! [`attacks::between`] and the `attacks::xray_*_attacks` helpers expose the
-//! geometry an engine needs for its own legality shortcuts.
+//! legality state. [`movegen::for_each_pseudo_legal`] and
+//! [`movegen::for_each_legal`] walk the candidate and legal streams without
+//! allocating and support early exit, while [`Board::null_for`] builds a
+//! null-move position without a FEN round-trip. [`attacks::between`] and the
+//! `attacks::xray_*_attacks` helpers expose the geometry an engine needs for
+//! its own legality shortcuts.
+//!
+//! # Move effects
+//!
+//! [`EffectContext`] snapshots the node-constant data of a position once, so
+//! [`EffectContext::effect`] can classify every pseudo-legal candidate as a
+//! [`MoveEffect`] — capture, blast casualties, checks or explodes the enemy
+//! commoner, keeps the mover's commoner, and legality — without writing a
+//! board. [`EffectContext::is_legal`] is exactly [`Board::legal`] for
+//! pseudo-legal input, and [`EffectContext::outcome_after`] (also reachable as
+//! [`Board::outcome_after`]) is exactly the child's [`Board::outcome`] for
+//! legal input.
 //!
 //! # Position keys and en passant
 //!
@@ -96,6 +108,7 @@
 pub mod attacks;
 pub(crate) mod bitboard;
 pub mod board;
+pub mod effects;
 pub(crate) mod magic;
 pub mod movegen;
 pub mod types;
@@ -103,6 +116,7 @@ pub(crate) mod util;
 pub(crate) mod zobrist;
 
 pub use board::{BlastCasualties, Board, FenLoadError, FenPolicy, StateInfo, ValidationErrors};
+pub use effects::{EffectContext, MoveEffect};
 pub use types::{
     Bitboard, CastlingSide, Color, EnPassantMode, Move, MoveList, Outcome, PieceType, Square,
 };

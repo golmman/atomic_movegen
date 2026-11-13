@@ -311,6 +311,65 @@ pub fn generate_legal_with_state(board: &Board, state: &StateInfo, moves: &mut M
     moves.set_len(new_len);
 }
 
+/// Walk the legal move stream for the side to move, invoking `f` on each
+/// legal move in generation order and stopping early if `f` returns
+/// [`ControlFlow::Break`].
+///
+/// The stream visits exactly the moves that [`generate_legal`] collects, in the
+/// same order: it walks [`for_each_pseudo_legal`] and keeps the candidates that
+/// are trivially legal (the quiet fast path) or legal under
+/// [`EffectContext::is_legal`](crate::effects::EffectContext::is_legal). No
+/// [`MoveList`] is built and nothing is allocated. `f` must not mutate the
+/// board.
+///
+/// Positions where the game is already over (either side has no commoner) emit
+/// nothing, matching [`generate_legal`]. This populates one temporary
+/// [`StateInfo`] internally; use [`for_each_legal_with_state`] to reuse a
+/// caller-populated one.
+pub fn for_each_legal<B>(
+    board: &Board,
+    f: &mut impl FnMut(Move) -> ControlFlow<B>,
+) -> ControlFlow<B> {
+    let mut state = StateInfo::new();
+    board.populate_state(&mut state);
+    for_each_legal_with_state(board, &state, f)
+}
+
+/// Same as [`for_each_legal`], using a caller-populated [`StateInfo`].
+///
+/// The caller is responsible for ensuring `state` is up to date (e.g. by
+/// calling [`Board::populate_state`]) before invoking this function. It does
+/// not call `populate_state` itself.
+///
+/// # Equivalence contract
+///
+/// The visited sequence is exactly `generate_legal_with_state(board, state,
+/// ..)`, element for element and in order.
+pub fn for_each_legal_with_state<B>(
+    board: &Board,
+    state: &StateInfo,
+    f: &mut impl FnMut(Move) -> ControlFlow<B>,
+) -> ControlFlow<B> {
+    // The game is already over when either side has no commoner left
+    // (extinction), matching `generate_legal_with_state`.
+    if state.commoners_count == 0 || state.them_commoners_count == 0 {
+        return ControlFlow::Continue(());
+    }
+
+    // Node-constant data, built once per node. The trivial quiet fast path is
+    // checked first so quiet moves do not pay for the effect computation.
+    let trivial = TrivialLegality::new(board, state);
+    let effects = crate::effects::EffectContext::new(board, state);
+
+    for_each_pseudo_legal(board, &mut |m| {
+        if trivial.is_trivially_legal(board, m) || effects.is_legal(board, m) {
+            f(m)
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+}
+
 /// Returns `true` if the side to move has at least one legal move.
 ///
 /// Early-exits at the first legal move; substantially cheaper than
