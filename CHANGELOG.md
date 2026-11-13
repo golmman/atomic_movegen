@@ -5,6 +5,150 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] - 2026-11-02
+
+### Fixed
+
+- `Board::checkers` no longer reports a check when the two commoners touch.
+  Each side has only one commoner, so a capture of either would blast the
+  capturer's own commoner away. Touching therefore makes the commoner immune
+  to every attack. Previously the legal-move generator already applied this
+  immunity, but `checkers()` disagreed with it.
+- `Board::legal` rejects every move that destroys one of the mover's
+  commoners, not just moves that leave the mover with none. In legal atomic
+  positions there is only one, so this is the same self-explosion rule; it also
+  removes the artificial “spare commoner” exception.
+- `generate_legal` and `has_legal_move` return no moves when the game is already
+  over because either side has no commoner left. A board with only one commoner
+  is terminal, matching Fairy-Stockfish's `generate<LEGAL>`.
+- `Board::outcome` now reports a loss (instead of a draw) when the side to move
+  has no legal moves *and* its commoner is attacked. Atomic chess has no
+  checkmate in the usual sense, but an attacked commoner with no escape is lost
+  (Fairy-Stockfish's `stalemate_value` for `extinctionPseudoRoyal`). True
+  stalemates (no legal moves, commoner not attacked) remain draws.
+- Mate now outranks the 50-move clock in `Board::outcome`: a checkmate on the
+  100th half-move is a loss, not a draw (Fairy-Stockfish's
+  `rule50 > 99 && (!checkers() || MoveList<LEGAL>(pos).size())` ordering).
+- `Board::outcome` now reports the commoner-only K-vs-K position as a WDL draw,
+  even before the 50-move rule expires. Such a board with a fresh clock is
+  still not literal game over (`is_terminal() == false`).
+
+### Changed
+
+- `Board::is_terminal` is now the strict, literal game-over predicate:
+  extinction, no legal moves, or `rule50 >= 100`. It deliberately excludes the
+  commoner-only WDL shortcut used by `outcome()`.
+
+- Documented the atomic invariant that each side has at most one commoner:
+  there is no promotion to commoner, a board has one or two commoners, and a
+  board with only one commoner is terminal. Removed regression tests that used
+  impossible multi-commoner FENs.
+
+### Added
+
+- Combined child-key accessor `Board::hash_and_rule50_after(m)`: returns
+  `(hash_after(m), rule50_after(m))` from a single move classification. It is
+  a consumer convenience for child-key prefetch and does not replace either
+  separate function; `hash_after` and `rule50_after` are unchanged.
+- Opt-in `unsafe-optimizations` cargo feature (off by default) that removes the
+  bounds check from the magic-bitboard table lookup. Indices remain provably
+  in bounds by the magic-table construction invariants; the feature changes no
+  public API and no move-generation semantics.
+- Canonical atomic blast API: `Board::blast_zone(sq)` returns the full 3×3
+  blast geometry (including the center and pawn squares), and
+  `Board::blast_casualties(m)` returns a `BlastCasualties` value with the
+  removed white and black pieces plus the en-passant victim square. The helper
+  mirrors `do_move` without mutation and is covered by a random-playout
+  equivalence test.
+- Convenience helpers for consumers that previously re-derived rules:
+  `attacks::attacks_from(pt, color, sq, occupied)`,
+  `Board::attackers_to_color(sq, color, occupied)`, board-aware
+  `Board::is_zeroing(m)` and `Board::is_double_push(m)`, and
+  `MoveList::retain(f)` with order preservation.
+- Corrected the `MAX_MOVES` and `MoveList::push` documentation: the largest
+  observed count is 68 legal moves (all 41 perft positions through depth 4),
+  256 is a conservative safety margin rather than a proven tight bound, and a
+  release-mode push at capacity is ignored (not an overwrite).
+- Opt-in semantic FEN validation: `Board::validate()` and
+  `Board::from_fen_with(fen, policy)` with `FenPolicy::{Strict, AllowTerminal,
+  AllowImpossibleCheck, Permissive}` and a `ValidationErrors` bitflags type.
+  `FenLoadError` keeps syntax failures (`FenError`) separate from
+  `InvalidPosition` failures. The permissive `Board::from_fen()` is unchanged;
+  strict validation checks commoner counts, back-rank pawns, castling and
+  en-passant geometry, a conservative material bound, and opposite check. It
+  deliberately does not reject FSF-style ep targets that have no legal ep
+  capture, and it is not a reachability proof.
+- Canonical en-passant handling for position keys and FEN output.
+  `Board::legal_ep_square()` returns the stored target only when at least one
+  fully legal en-passant capture exists (pins, self-explosion, and commoner
+  attacks are respected). The new `EnPassantMode` enum selects between
+  `Always` (the FSF-compatible default) and `Legal` in `Board::hash_with()`,
+  `Board::fen_with()`, and `Board::hash_after_with()`. `hash()`, `fen()`, and
+  `hash_after()` are unchanged and remain `Always`, so existing stored keys
+  and FEN output keep their current values. With `Legal`, positions that
+  differ only by a non-capturable ep target share a key and a FEN.
+- Stable `Move` wire encoding: `Move::to_bits()` and `Move::from_bits()`. The
+  packing (`to:6 | from:6 | type:2 | promotion_type:2`), `Move::NONE == 0`,
+  and the `PROMOTION_PIECES` order (queen, rook, bishop, knight) are now
+  semver-stable and can only change in a major release. `from_bits` validates
+  structure only: `0` is `Move::NONE`, equal origin/destination is rejected,
+  and all other 16-bit patterns decode. `Move` now also derives `Hash`,
+  `PartialOrd`, and `Ord`; ordering follows the wire encoding.
+- UCI move helpers: syntax-only `Move::from_uci()` (no board needed, `0000` is
+  `Move::NONE`, castling text decodes as a normal two-square move),
+  allocation-free `Move::write_uci()`, and `Display` for `Move`.
+  `to_uci()` now allocates once and delegates to `write_uci`.
+- `Board::move_from_uci()`: board-aware UCI lookup that resolves the four
+  castling destinations and en-passant targets to the internal encodings and
+  returns the move only if it is fully legal. If no special encoding is legal,
+  the ordinary parsed move is checked last, so a rook move such as `e8g8`
+  still resolves when castling is unavailable.
+- Single-move legality queries without building or cloning a `MoveList`:
+  `Board::is_pseudo_legal()` (equivalent to membership in
+  `generate_pseudo_legal`), `Board::is_legal()`, and
+  `Board::is_legal_with_state()` (equivalent to membership in
+  `generate_legal_with_state`).
+- `Board::outcome_with_state(&StateInfo)` and
+  `Board::outcome_with(&StateInfo, moves_exist: bool)`: the same precedence as
+  `outcome()`, reusing a populated state and optionally a caller-known
+  legal-move-existence answer. `outcome()` now uses this path and no longer
+  builds a `MoveList`.
+- `Board::is_material_draw()`: true only when both colors have exactly one
+  commoner and nothing else. This is intentionally the only material draw;
+  there is no insufficient-material table. K+B/K+N/K+R vs K counterexamples
+  pin that a lone piece can win immediately by capturing the enemy commoner.
+- A single `terminal_precedence_table` regression test covering touching
+  commoners, checkmate, mate on the 50-move clock, extinction, K vs K (fresh
+  and expired clock), and the artificial empty board; plus state-aware outcome
+  equivalence tests over fixtures and seeded random playouts.
+- Regression tests for touching-commoner immunity (including castling through
+  an adjacent enemy commoner), terminal positions, and the absence of
+  commoner promotion.
+- Two atomic perft positions from shakmaty's `tests/atomic.perft` suite
+  ("programfox"), verified against Fairy-Stockfish to depth 6.
+
+## [2.3.1] - 2026-10-27
+
+### Changed
+
+- Internal, behavior-preserving performance work; the public API is unchanged.
+- Pawn generation is now table-driven and order-preserving: push, double-push,
+  capture, and en-passant targets come from precomputed attack/push tables,
+  removing per-target square arithmetic, file/wrap guards, and repeated board
+  lookups. Measured about 6.9% faster on both fixed depth-6 perft positions.
+- Attack detection for commoner safety and castling now uses a boolean
+  early-exit probe instead of building an attacker bitboard. Measured about
+  1.3-1.6% faster on the fixed depth-6 positions.
+- The trivial-legality predicate is hoisted per node and classifies candidates
+  from precomputed state, avoiding repeated piece lookups and work that is
+  unnecessary for quiet moves. Measured about 2.2-2.3% faster on the fixed
+  depth-6 positions.
+
+### Added
+
+- Additional move-order golden positions covering pawn-rich and promotion
+  cases, plus unit tests for the new pawn push/double-push tables.
+
 ## [2.3.0] - 2026-09-10
 
 ### Added

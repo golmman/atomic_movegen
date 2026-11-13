@@ -5,6 +5,23 @@
 //!
 //! Tables are precomputed as compile-time `static` arrays; masks,
 //! magic numbers, and index bits are `const` arrays (zero indirection).
+//!
+//! # Safety invariants of the magic index
+//!
+//! The flat table index is `entry.offset + (((occupied & entry.mask) * magic)
+//! >> shift)`.
+//!
+//! - `shift == 64 - index_bits`, so the shifted product is `< 1 <<
+//!   index_bits`.
+//! - The table builders ([`build_rook_table`], [`build_bishop_table`])
+//!   allocate exactly `1 << index_bits` entries per square at `offset`,
+//!   using the same index formula, and the exhaustive magic tests in this
+//!   module compare every lookup against the ray-casting reference.
+//! - `sq` is a [`Square`] and therefore `< 64`.
+//!
+//! With the `unsafe-optimizations` feature the entry load drops its bounds
+//! check on the strength of these invariants; without it the lookup is an
+//! ordinary bounds-checked index.
 
 #![allow(long_running_const_eval)]
 
@@ -467,7 +484,18 @@ static BISHOP_TABLE: [Bitboard; BISHOP_TABLE_SIZE] = build_bishop_table();
 pub fn bishop_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
     let e = &BISHOP_ENTRIES[sq as usize];
     let idx = ((occupied & e.mask).0.wrapping_mul(e.magic)) >> e.shift;
-    BISHOP_TABLE[e.offset as usize + idx as usize]
+    let table_idx = e.offset as usize + idx as usize;
+    #[cfg(feature = "unsafe-optimizations")]
+    {
+        // SAFETY: `idx < 1 << (64 - e.shift)` by the shift and the table
+        // builder allocates exactly that many entries at `e.offset`.
+        // `sq < 64` is a `Square` invariant. See the module safety note.
+        unsafe { *BISHOP_TABLE.get_unchecked(table_idx) }
+    }
+    #[cfg(not(feature = "unsafe-optimizations"))]
+    {
+        BISHOP_TABLE[table_idx]
+    }
 }
 
 /// Return the attack set for a rook on `sq` given the `occupied` board.
@@ -475,7 +503,16 @@ pub fn bishop_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
 pub fn rook_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
     let e = &ROOK_ENTRIES[sq as usize];
     let idx = ((occupied & e.mask).0.wrapping_mul(e.magic)) >> e.shift;
-    ROOK_TABLE[e.offset as usize + idx as usize]
+    let table_idx = e.offset as usize + idx as usize;
+    #[cfg(feature = "unsafe-optimizations")]
+    {
+        // SAFETY: same argument as in [`bishop_attacks`].
+        unsafe { *ROOK_TABLE.get_unchecked(table_idx) }
+    }
+    #[cfg(not(feature = "unsafe-optimizations"))]
+    {
+        ROOK_TABLE[table_idx]
+    }
 }
 
 /// Return the attack set for a queen (bishop + rook).

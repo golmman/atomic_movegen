@@ -3,5 +3,44 @@ Write your findings to `docs/plans/perf_analysis7/analysis.md`.
 
 ---
 
+shakmaty is apparently less efficient than this project (`docs/shakmaty_comparison.md`).
+Can we still learn something from its implementation?
+
+Store your findings in `docs/plans/shakmaty/analysis.md'.
+
+---
+
+Last session we compiled this analysis: `docs/plans/shakmaty/analysis.md`.
+
+I did not git commit yet since i see a major misconception:
+There are NO mechanism to get extra commoners (kings) in atomic chess. Each side has at maximum 1 commoner. Promotions to commoners are not allowed.
+Multi-commoner self-destruction is also not allowed.
+
+Simple rule of thumb: Atomic chess boards have always 1 or more kings/commones but never more than 2. If a board has only 1 commoner it is a terminal position.
+
+Please address this.
+
+---
+
+Last session we finished with `docs/plans/shakmaty/report1.md`
+Please verify: perft-numbers did not change and performance did not regress.
+
+---
+
+`docs/plans/shakmaty/analysis.md`
+
+---
+
+New feedback from library consumers was added: `docs/plans/feedback/feedback2.md`.
+Draft implementation plans in `docs/plans/feedback/` named `f2_planN.md` which adress the feedback.
+
+---
+
+Last sessions we implemented `docs/plans/feedback/f2_planN.md`.
+Please see the accompanying reports, perform a final check and prepare a cargo publish.
+
+---
+
 A downstream user of the library provided a wishlist for changes: `docs/plans/feedback/handoff1.md`.
 Please draft one or multiple implementation plans to address the feedback.
+

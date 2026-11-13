@@ -6,6 +6,7 @@ use crate::bitboard::*;
 use crate::types::*;
 use std::error::Error;
 use std::fmt;
+use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
 
 /// Errors that can occur when parsing a FEN string.
 #[derive(Debug)]
@@ -62,6 +63,211 @@ impl fmt::Display for FenError {
 
 impl Error for FenError {}
 
+/// Semantic validation failures for a position.
+///
+/// This is a small, dependency-free bitflags type. Multiple problems can be
+/// reported at once; use [`contains`](Self::contains) to test for a specific
+/// flag. The flags describe structural problems, not whether a position is
+/// reachable from the starting position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ValidationErrors(u32);
+
+impl ValidationErrors {
+    /// The board has no pieces at all.
+    pub const EMPTY_BOARD: Self = Self(1 << 0);
+    /// White has no commoner.
+    pub const MISSING_COMMONER_WHITE: Self = Self(1 << 1);
+    /// Black has no commoner.
+    pub const MISSING_COMMONER_BLACK: Self = Self(1 << 2);
+    /// White has more than one commoner.
+    pub const TOO_MANY_COMMONERS_WHITE: Self = Self(1 << 3);
+    /// Black has more than one commoner.
+    pub const TOO_MANY_COMMONERS_BLACK: Self = Self(1 << 4);
+    /// A pawn is on rank 1 or rank 8.
+    pub const PAWNS_ON_BACKRANK: Self = Self(1 << 5);
+    /// The side that just moved is in check.
+    pub const OPPOSITE_CHECK: Self = Self(1 << 6);
+    /// The stored en-passant target is not consistent with a double push.
+    pub const INVALID_EP_SQUARE: Self = Self(1 << 7);
+    /// A castling right is set without the required commoner and rook.
+    pub const INVALID_CASTLING_RIGHTS: Self = Self(1 << 8);
+    /// The material exceeds the conservative legal-start-plus-promotions bound.
+    pub const TOO_MUCH_MATERIAL: Self = Self(1 << 9);
+
+    /// Return an empty error set.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// Return the raw bitmask.
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// Return `true` when no flags are set.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Return `true` when every flag in `other` is set in `self`.
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+
+    /// Return the union of two error sets.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Return the intersection of two error sets.
+    #[must_use]
+    pub const fn intersection(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+
+impl BitOr for ValidationErrors {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        self.union(rhs)
+    }
+}
+
+impl BitAnd for ValidationErrors {
+    type Output = Self;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        self.intersection(rhs)
+    }
+}
+
+impl BitOrAssign for ValidationErrors {
+    fn bitor_assign(&mut self, rhs: Self) {
+        *self = self.union(rhs);
+    }
+}
+
+impl BitAndAssign for ValidationErrors {
+    fn bitand_assign(&mut self, rhs: Self) {
+        *self = self.intersection(rhs);
+    }
+}
+
+impl fmt::Display for ValidationErrors {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const NAMES: [(ValidationErrors, &str); 10] = [
+            (ValidationErrors::EMPTY_BOARD, "EMPTY_BOARD"),
+            (
+                ValidationErrors::MISSING_COMMONER_WHITE,
+                "MISSING_COMMONER_WHITE",
+            ),
+            (
+                ValidationErrors::MISSING_COMMONER_BLACK,
+                "MISSING_COMMONER_BLACK",
+            ),
+            (
+                ValidationErrors::TOO_MANY_COMMONERS_WHITE,
+                "TOO_MANY_COMMONERS_WHITE",
+            ),
+            (
+                ValidationErrors::TOO_MANY_COMMONERS_BLACK,
+                "TOO_MANY_COMMONERS_BLACK",
+            ),
+            (ValidationErrors::PAWNS_ON_BACKRANK, "PAWNS_ON_BACKRANK"),
+            (ValidationErrors::OPPOSITE_CHECK, "OPPOSITE_CHECK"),
+            (ValidationErrors::INVALID_EP_SQUARE, "INVALID_EP_SQUARE"),
+            (
+                ValidationErrors::INVALID_CASTLING_RIGHTS,
+                "INVALID_CASTLING_RIGHTS",
+            ),
+            (ValidationErrors::TOO_MUCH_MATERIAL, "TOO_MUCH_MATERIAL"),
+        ];
+
+        if self.is_empty() {
+            return f.write_str("no validation errors");
+        }
+        let mut first = true;
+        for (flag, name) in NAMES {
+            if self.contains(flag) {
+                if !first {
+                    f.write_str(", ")?;
+                }
+                f.write_str(name)?;
+                first = false;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Error for ValidationErrors {}
+
+/// Policy for semantic validation when loading a FEN with
+/// [`Board::from_fen_with`].
+///
+/// The default [`Board::from_fen`] parser is syntax-only and remains
+/// permissive. These policies add opt-in semantic checks for untrusted input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum FenPolicy {
+    /// All semantic checks; exactly one commoner per side.
+    Strict,
+    /// Permit zero or one commoner per side for artificial terminal fixtures.
+    ///
+    /// Multiple commoners are still rejected, and all other checks still run.
+    AllowTerminal,
+    /// Strict except for the side-not-to-move check.
+    ///
+    /// This permits positions where the side that just moved is in check, which
+    /// can be useful for puzzle or analysis fixtures.
+    AllowImpossibleCheck,
+    /// Syntax only, exactly like [`Board::from_fen`].
+    Permissive,
+}
+
+/// Error returned by [`Board::from_fen_with`].
+///
+/// Syntax errors keep the existing [`FenError`] type; semantic failures are
+/// reported separately so downstream code can distinguish malformed FEN text
+/// from a well-formed but invalid position.
+#[derive(Debug)]
+pub enum FenLoadError {
+    /// The FEN text is malformed.
+    Syntax(FenError),
+    /// The FEN text is well formed, but the position failed validation.
+    InvalidPosition(ValidationErrors),
+}
+
+impl fmt::Display for FenLoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FenLoadError::Syntax(e) => write!(f, "invalid FEN syntax: {e}"),
+            FenLoadError::InvalidPosition(e) => write!(f, "invalid position: {e}"),
+        }
+    }
+}
+
+impl Error for FenLoadError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            FenLoadError::Syntax(e) => Some(e),
+            FenLoadError::InvalidPosition(_) => None,
+        }
+    }
+}
+
+impl From<FenError> for FenLoadError {
+    fn from(value: FenError) -> Self {
+        FenLoadError::Syntax(value)
+    }
+}
+
 fn char_to_piece(c: char) -> Option<Piece> {
     match c {
         'P' => Some(W_PAWN),
@@ -86,13 +292,15 @@ fn char_to_piece(c: char) -> Option<Piece> {
 /// [`Board::legal`] and [`generate_legal`](crate::movegen::generate_legal).
 #[derive(Debug, Clone, Copy)]
 pub struct StateInfo {
-    /// Enemy pieces attacking the side to move's commoners (hot).
+    /// Enemy pieces attacking the side to move's commoner (hot).
     pub checkers: Bitboard,
     /// Pieces of the side to move that are pinned to a commoner (hot).
     pub pinned: Bitboard,
-    /// Number of commoners the side to move has on the board (hot).
+    /// Number of commoners the side to move has on the board (hot). In a legal
+    /// atomic position this is 0 (game over) or 1.
     pub commoners_count: u32,
-    /// Number of commoners the opponent has on the board (hot).
+    /// Number of commoners the opponent has on the board (hot). In a legal
+    /// atomic position this is 0 (game over) or 1.
     pub them_commoners_count: u32,
 
     /// Castling rights before the move (undo data).
@@ -183,6 +391,47 @@ const BB_CASTLE_SQUARES: Bitboard = Bitboard(
         | (1u64 << Square::H8 as u64),
 );
 
+/// Pieces removed by an atomic capture move.
+///
+/// Returned by [`Board::blast_casualties`]. Unlike the raw 3×3 geometry from
+/// [`Board::blast_zone`], this value already applies the atomic removal rules:
+/// pawns in the ring are immune, while the capturer at ground zero is always
+/// destroyed. The normal capture victim or en-passant victim is included as
+/// well, split by victim color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlastCasualties {
+    /// Squares whose white pieces are removed by the move.
+    pub white: Bitboard,
+    /// Squares whose black pieces are removed by the move.
+    pub black: Bitboard,
+    /// The en-passant victim's square, or `None` for a normal capture.
+    pub en_passant_victim: Option<Square>,
+}
+
+impl Default for BlastCasualties {
+    fn default() -> Self {
+        Self {
+            white: Bitboard::EMPTY,
+            black: Bitboard::EMPTY,
+            en_passant_victim: None,
+        }
+    }
+}
+
+impl BlastCasualties {
+    /// Return `true` when the move removes no pieces.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.white.is_empty() && self.black.is_empty()
+    }
+
+    /// Return all removed squares, regardless of victim color.
+    #[must_use]
+    pub fn all(self) -> Bitboard {
+        self.white | self.black
+    }
+}
+
 impl Default for Board {
     fn default() -> Self {
         Self::new()
@@ -200,9 +449,19 @@ impl Board {
     ///
     /// Accepts standard FEN with 4 or 6 space-separated fields. The piece
     /// character set is the standard chess set (`P`, `N`, `B`, `R`, `Q`, `K`
-    /// and their lower-case forms). The commoner — the king-like pseudo-royal
-    /// piece of atomic chess — uses the standard FEN letter `K`/`k`; the
-    /// non-standard `C`/`c` labels are rejected.
+    /// and their lower-case forms). The commoner — the king-like piece of
+    /// atomic chess — uses the standard FEN letter `K`/`k`; the non-standard
+    /// `C`/`c` labels are rejected.
+    ///
+    /// Parsing is permissive about game-state constraints: it does not reject
+    /// missing commoners, pawns on the back rank, or invalid en-passant
+    /// positions. In particular, atomic chess has at most one commoner per
+    /// side, so FENs with more than one `K` or more than one `k` are not legal
+    /// atomic positions even though this parser accepts them.
+    ///
+    /// For untrusted input, use [`Board::from_fen_with`] with
+    /// [`FenPolicy::Strict`], or call [`Board::validate`] after parsing. This
+    /// method's behavior is unchanged and remains permissive.
     ///
     /// # Errors
     ///
@@ -416,9 +675,221 @@ impl Board {
         Ok(board)
     }
 
-    /// Serialize the board to a FEN string.
+    /// Parse a FEN string and apply the given semantic validation policy.
+    ///
+    /// This is the opt-in strict counterpart to [`Board::from_fen`]. The
+    /// permissive parser is still used for syntax; after parsing, the position
+    /// is checked according to `policy`. Use [`FenPolicy::Strict`] for
+    /// untrusted input, [`FenPolicy::AllowTerminal`] for artificial terminal
+    /// fixtures, [`FenPolicy::AllowImpossibleCheck`] to skip only the
+    /// side-not-to-move check, or [`FenPolicy::Permissive`] for behavior
+    /// identical to [`Board::from_fen`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FenLoadError::Syntax`] for malformed FEN text and
+    /// [`FenLoadError::InvalidPosition`] when the parsed position fails the
+    /// selected policy.
+    pub fn from_fen_with(fen: &str, policy: FenPolicy) -> Result<Self, FenLoadError> {
+        let board = Board::from_fen(fen).map_err(FenLoadError::Syntax)?;
+        let errors = board.validation_errors(policy);
+        if errors.is_empty() {
+            Ok(board)
+        } else {
+            Err(FenLoadError::InvalidPosition(errors))
+        }
+    }
+
+    /// Validate this position with [`FenPolicy::Strict`].
+    ///
+    /// The checks are structural and conservative: exactly one commoner per
+    /// side, no pawns on the back ranks, consistent castling rights and
+    /// en-passant geometry, a conservative material bound, and no check against
+    /// the side that just moved. They do **not** prove that the position is
+    /// reachable from the starting position.
+    ///
+    /// # Errors
+    ///
+    /// Returns the accumulated [`ValidationErrors`] when any check fails.
+    pub fn validate(&self) -> Result<(), ValidationErrors> {
+        let errors = self.validation_errors(FenPolicy::Strict);
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// Accumulate semantic validation errors for `policy`.
+    fn validation_errors(&self, policy: FenPolicy) -> ValidationErrors {
+        if policy == FenPolicy::Permissive {
+            return ValidationErrors::empty();
+        }
+
+        let mut errors = ValidationErrors::empty();
+
+        // 1. Board presence and commoner counts.
+        if self.occupied().is_empty() && policy != FenPolicy::AllowTerminal {
+            errors |= ValidationErrors::EMPTY_BOARD;
+        }
+        let white_commoners = self.commoners(Color::White).count();
+        let black_commoners = self.commoners(Color::Black).count();
+        match policy {
+            FenPolicy::Strict | FenPolicy::AllowImpossibleCheck => {
+                if white_commoners == 0 {
+                    errors |= ValidationErrors::MISSING_COMMONER_WHITE;
+                } else if white_commoners > 1 {
+                    errors |= ValidationErrors::TOO_MANY_COMMONERS_WHITE;
+                }
+                if black_commoners == 0 {
+                    errors |= ValidationErrors::MISSING_COMMONER_BLACK;
+                } else if black_commoners > 1 {
+                    errors |= ValidationErrors::TOO_MANY_COMMONERS_BLACK;
+                }
+            }
+            FenPolicy::AllowTerminal => {
+                if white_commoners > 1 {
+                    errors |= ValidationErrors::TOO_MANY_COMMONERS_WHITE;
+                }
+                if black_commoners > 1 {
+                    errors |= ValidationErrors::TOO_MANY_COMMONERS_BLACK;
+                }
+            }
+            FenPolicy::Permissive => unreachable!(),
+        }
+
+        // 2. Pawns on the back ranks.
+        const RANK_1: Bitboard = Bitboard(0x0000_0000_0000_00FF);
+        const RANK_8: Bitboard = Bitboard(0xFF00_0000_0000_0000);
+        if !(self.pieces_pt(PieceType::Pawn) & (RANK_1 | RANK_8)).is_empty() {
+            errors |= ValidationErrors::PAWNS_ON_BACKRANK;
+        }
+
+        // 3. Castling rights must have the required commoner and rook.
+        let white_commoner = make_piece(Color::White, PieceType::Commoner);
+        let white_rook = make_piece(Color::White, PieceType::Rook);
+        let black_commoner = make_piece(Color::Black, PieceType::Commoner);
+        let black_rook = make_piece(Color::Black, PieceType::Rook);
+        if self.castling_rights & WK_CASTLE != 0
+            && (self.squares[Square::E1 as usize] != white_commoner
+                || self.squares[Square::H1 as usize] != white_rook)
+        {
+            errors |= ValidationErrors::INVALID_CASTLING_RIGHTS;
+        }
+        if self.castling_rights & WQ_CASTLE != 0
+            && (self.squares[Square::E1 as usize] != white_commoner
+                || self.squares[Square::A1 as usize] != white_rook)
+        {
+            errors |= ValidationErrors::INVALID_CASTLING_RIGHTS;
+        }
+        if self.castling_rights & BK_CASTLE != 0
+            && (self.squares[Square::E8 as usize] != black_commoner
+                || self.squares[Square::H8 as usize] != black_rook)
+        {
+            errors |= ValidationErrors::INVALID_CASTLING_RIGHTS;
+        }
+        if self.castling_rights & BQ_CASTLE != 0
+            && (self.squares[Square::E8 as usize] != black_commoner
+                || self.squares[Square::A8 as usize] != black_rook)
+        {
+            errors |= ValidationErrors::INVALID_CASTLING_RIGHTS;
+        }
+
+        // 4. Conservative material bounds: a legal start plus promotions.
+        for color in [Color::White, Color::Black] {
+            let pawns = self.pieces_color_pt(color, PieceType::Pawn).count();
+            let total = self.pieces_color(color).count();
+            if pawns > 8 || total > 16 {
+                errors |= ValidationErrors::TOO_MUCH_MATERIAL;
+            }
+            let free = 8u32.saturating_sub(pawns);
+            const INITIAL_COUNTS: [(PieceType, u32); 5] = [
+                (PieceType::Knight, 2),
+                (PieceType::Bishop, 2),
+                (PieceType::Rook, 2),
+                (PieceType::Queen, 1),
+                (PieceType::Commoner, 1),
+            ];
+            for (pt, initial) in INITIAL_COUNTS {
+                if self.pieces_color_pt(color, pt).count() > initial + free {
+                    errors |= ValidationErrors::TOO_MUCH_MATERIAL;
+                }
+            }
+        }
+
+        // 5. En-passant geometry must be consistent with a double push. A
+        // legal ep capture is deliberately not required: FSF records the
+        // target after every double push.
+        if let Some(sq) = self.ep_square {
+            let mut valid = true;
+            let expected_rank = match self.side_to_move {
+                Color::White => Rank::R6,
+                Color::Black => Rank::R3,
+            };
+            if rank_of(sq) != expected_rank {
+                valid = false;
+            } else {
+                let them = self.side_to_move.flip();
+                let (pawn_sq, origin_sq) = match self.side_to_move {
+                    Color::White => (
+                        Square::from_index(sq as i8 - 8),
+                        Square::from_index(sq as i8 + 8),
+                    ),
+                    Color::Black => (
+                        Square::from_index(sq as i8 + 8),
+                        Square::from_index(sq as i8 - 8),
+                    ),
+                };
+                if self.squares[pawn_sq as usize] != make_piece(them, PieceType::Pawn)
+                    || self.squares[origin_sq as usize] != NO_PIECE
+                    || self.squares[sq as usize] != NO_PIECE
+                {
+                    valid = false;
+                }
+            }
+            if !valid {
+                errors |= ValidationErrors::INVALID_EP_SQUARE;
+            }
+        }
+
+        // 6. The side that just moved must not be in check.
+        if policy != FenPolicy::AllowImpossibleCheck {
+            let just_moved = self.side_to_move.flip();
+            if !self.compute_checkers(just_moved).is_empty() {
+                errors |= ValidationErrors::OPPOSITE_CHECK;
+            }
+        }
+
+        errors
+    }
+
+    /// Serialize the board to a FEN string using the default
+    /// [`EnPassantMode::Always`] policy.
+    ///
+    /// This matches Fairy-Stockfish and prints the stored en-passant target
+    /// after every double push, even when no legal en-passant capture exists.
+    /// Use [`fen_with`](Self::fen_with) for canonicalized output.
     #[must_use]
     pub fn fen(&self) -> String {
+        self.write_fen(self.ep_square)
+    }
+
+    /// Serialize the board to a FEN string with the selected en-passant policy.
+    ///
+    /// [`EnPassantMode::Always`] is identical to [`fen`](Self::fen) and prints
+    /// the stored target. [`EnPassantMode::Legal`] prints `-` unless at least
+    /// one fully legal en-passant capture exists, which makes positions reached
+    /// by different move orders serialize identically.
+    #[must_use]
+    pub fn fen_with(&self, mode: EnPassantMode) -> String {
+        match mode {
+            EnPassantMode::Always => self.write_fen(self.ep_square),
+            EnPassantMode::Legal => self.write_fen(self.legal_ep_square()),
+        }
+    }
+
+    /// Shared FEN writer; `ep_square` is the policy-resolved target field.
+    fn write_fen(&self, ep_square: Option<Square>) -> String {
         let mut fen = String::new();
         for rank in (0..8).rev() {
             let mut empty = 0;
@@ -471,7 +942,7 @@ impl Board {
         }
 
         fen.push(' ');
-        match self.ep_square {
+        match ep_square {
             Some(sq) => fen.push_str(crate::types::sq_str(sq).unwrap_or("??")),
             None => fen.push('-'),
         }
@@ -569,10 +1040,53 @@ impl Board {
         self.castling_rights
     }
 
-    /// Return the en-passant target square, if any.
+    /// Return the stored en-passant target square, if any.
+    ///
+    /// This is the Fairy-Stockfish-style target recorded after every double
+    /// pawn push. It does not imply that an en-passant capture is legal; use
+    /// [`legal_ep_square`](Self::legal_ep_square) for a target that at least
+    /// one legal en-passant capture actually attacks.
     #[must_use]
     pub fn ep_square(&self) -> Option<Square> {
         self.ep_square
+    }
+
+    /// Return the stored en-passant target, but only when at least one fully
+    /// legal en-passant capture exists.
+    ///
+    /// This checks the mover's own pawns that attack the stored target and
+    /// validates each candidate with [`legal`](Self::legal), so pins,
+    /// self-explosion, and commoner attacks are all respected. It does not
+    /// build a [`MoveList`]. Terminal boards and positions
+    /// without an en-passant target return `None`.
+    #[must_use]
+    pub fn legal_ep_square(&self) -> Option<Square> {
+        let ep = self.ep_square?;
+        let mut state = StateInfo::new();
+        self.populate_state(&mut state);
+        if state.commoners_count == 0 || state.them_commoners_count == 0 {
+            return None;
+        }
+
+        let us = self.side_to_move;
+        let them = us.flip();
+        // Attack tables are symmetric, so this is the set of squares from which
+        // one of our pawns attacks the ep target.
+        let mut origins =
+            attacks::pawn_attacks(them, ep) & self.pieces_color_pt(us, PieceType::Pawn);
+        while !origins.is_empty() {
+            let from = origins.pop_lsb();
+            let victim = match us {
+                Color::White => Square::from_index(ep as i8 - 8),
+                Color::Black => Square::from_index(ep as i8 + 8),
+            };
+            if self.piece_on(victim) == make_piece(them, PieceType::Pawn)
+                && self.legal(Move::make_enpassant(from, ep), &state)
+            {
+                return Some(ep);
+            }
+        }
+        None
     }
 
     /// Return the half-move clock (plies since the last pawn move or capture).
@@ -598,12 +1112,36 @@ impl Board {
 
     /// Return the current Zobrist hash of the position.
     ///
-    /// The hash includes pieces, side to move, castling rights, and en-passant
-    /// file, but not the half-move clock or fullmove counter.
+    /// The hash includes pieces, side to move, castling rights, and the stored
+    /// en-passant file, but not the half-move clock or fullmove counter. This
+    /// is the [`EnPassantMode::Always`] policy, identical to
+    /// [`hash_with(EnPassantMode::Always)`](Self::hash_with).
     #[inline]
     #[must_use]
     pub fn hash(&self) -> u64 {
         self.hash
+    }
+
+    /// Return the Zobrist hash with the selected en-passant policy.
+    ///
+    /// [`EnPassantMode::Always`] is identical to [`hash`](Self::hash).
+    /// [`EnPassantMode::Legal`] removes the stored en-passant file key unless
+    /// [`legal_ep_square`](Self::legal_ep_square) is `Some`, so positions that
+    /// differ only by a non-capturable ep target share a key. Evaluating the
+    /// legal policy is more expensive because it validates the candidate
+    /// captures; the default [`hash`](Self::hash) stays a field read.
+    #[inline]
+    #[must_use]
+    pub fn hash_with(&self, mode: EnPassantMode) -> u64 {
+        match mode {
+            EnPassantMode::Always => self.hash,
+            EnPassantMode::Legal => match self.ep_square {
+                Some(sq) if self.legal_ep_square().is_none() => {
+                    self.hash ^ crate::zobrist::ZOBRIST.ep[file_of(sq) as usize]
+                }
+                _ => self.hash,
+            },
+        }
     }
 
     /// Zobrist hash of the position after `m`, without modifying `self`.
@@ -612,7 +1150,9 @@ impl Board {
     /// `{ let mut b = self.clone(); b.do_move(m, &mut st); b.hash() }` for
     /// every move `m` that [`do_move`](Self::do_move) accepts in this position
     /// (every pseudo-legal move). Cheaper than a `do_move`/`undo_move`
-    /// round-trip: no board, bitboard, or undo-record writes.
+    /// round-trip: no board, bitboard, or undo-record writes. This uses the
+    /// default [`EnPassantMode::Always`] policy; use
+    /// [`hash_after_with`](Self::hash_after_with) to select a policy.
     ///
     /// # Panics
     ///
@@ -620,43 +1160,97 @@ impl Board {
     /// move `do_move` would accept).
     #[must_use]
     pub fn hash_after(&self, m: Move) -> u64 {
+        if m.move_type() == MoveType::Castling {
+            return self.hash_after_castling(m);
+        }
+        self.hash_after_classified(m, self.classify_move(m))
+    }
+
+    /// Zobrist hash and half-move clock of the position after `m`, computed
+    /// together, without modifying `self`.
+    ///
+    /// Exactly equal to `(self.hash_after(m), self.rule50_after(m))`, and to
+    /// the `(hash(), rule50())` pair of a cloned board after
+    /// [`do_move`](Self::do_move). It exists so that a consumer building child
+    /// keys can classify `m` once instead of twice; it does **not** replace
+    /// [`hash_after`](Self::hash_after) or
+    /// [`rule50_after`](Self::rule50_after). The hash uses the default
+    /// [`EnPassantMode::Always`] policy, like `hash_after`.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, panics if `from` holds no piece (i.e. `m` is not a
+    /// move `do_move` would accept).
+    #[must_use]
+    pub fn hash_and_rule50_after(&self, m: Move) -> (u64, u16) {
+        if m.move_type() == MoveType::Castling {
+            return (self.hash_after_castling(m), self.rule50 + 1);
+        }
+        let class = self.classify_move(m);
+        (
+            self.hash_after_classified(m, class),
+            self.rule50_after_classified(class),
+        )
+    }
+
+    /// Castling branch of [`hash_after`](Self::hash_after); castling never
+    /// captures and never changes the en-passant file.
+    fn hash_after_castling(&self, m: Move) -> u64 {
         let us = self.side_to_move;
         let from = m.from_sq();
         let to = m.to_sq();
 
-        if m.move_type() == MoveType::Castling {
-            let (kfrom, kto, rfrom, rto) = castling_squares(us, to > from);
-            let commoner = make_piece(us, PieceType::Commoner);
-            let rook = make_piece(us, PieceType::Rook);
-            let mut h = self.hash
-                ^ crate::zobrist::ZOBRIST.side
-                ^ piece_key(kfrom, commoner)
-                ^ piece_key(kto, commoner)
-                ^ piece_key(rfrom, rook)
-                ^ piece_key(rto, rook);
-            let new_rights = self.castling_rights
-                & match us {
-                    Color::White => !(WK_CASTLE | WQ_CASTLE),
-                    Color::Black => !(BK_CASTLE | BQ_CASTLE),
-                };
-            h ^= crate::zobrist::ZOBRIST.castling[self.castling_rights as usize];
-            h ^= crate::zobrist::ZOBRIST.castling[new_rights as usize];
-            if let Some(sq) = self.ep_square {
-                h ^= crate::zobrist::ZOBRIST.ep[file_of(sq) as usize];
-            }
-            return h;
+        let (kfrom, kto, rfrom, rto) = castling_squares(us, to > from);
+        let commoner = make_piece(us, PieceType::Commoner);
+        let rook = make_piece(us, PieceType::Rook);
+        let mut h = self.hash
+            ^ crate::zobrist::ZOBRIST.side
+            ^ piece_key(kfrom, commoner)
+            ^ piece_key(kto, commoner)
+            ^ piece_key(rfrom, rook)
+            ^ piece_key(rto, rook);
+        let new_rights = self.castling_rights
+            & match us {
+                Color::White => !(WK_CASTLE | WQ_CASTLE),
+                Color::Black => !(BK_CASTLE | BQ_CASTLE),
+            };
+        h ^= crate::zobrist::ZOBRIST.castling[self.castling_rights as usize];
+        h ^= crate::zobrist::ZOBRIST.castling[new_rights as usize];
+        if let Some(sq) = self.ep_square {
+            h ^= crate::zobrist::ZOBRIST.ep[file_of(sq) as usize];
         }
+        h
+    }
 
-        let piece = self.squares[from as usize];
+    /// Classify the non-castling move `m` once for the child-key helpers.
+    ///
+    /// Panics in debug builds when the origin square is empty.
+    fn classify_move(&self, m: Move) -> MoveClass {
+        let piece = self.squares[m.from_sq() as usize];
         debug_assert!(
             piece != NO_PIECE,
-            "hash_after on a move from an empty square"
+            "hash_after/rule50_after on a move from an empty square"
         );
-        // Pawn iff the low three bits of the raw encoding are `Pawn + 1`
-        // (piece types are encoded as `type + 1`, pawn is variant 0). Avoids
-        // the `type_of()` option/table round-trip on the hot quiet path.
-        let is_pawn = piece.raw() & 7 == PieceType::Pawn as u8 + 1;
-        let is_capture = !self.empty(to);
+        MoveClass {
+            piece,
+            // Pawn iff the low three bits of the raw encoding are `Pawn + 1`
+            // (piece types are encoded as `type + 1`, pawn is variant 0).
+            // Avoids the `type_of()` option/table round-trip on the hot
+            // quiet path.
+            is_pawn: piece.raw() & 7 == PieceType::Pawn as u8 + 1,
+            is_capture: !self.empty(m.to_sq()),
+        }
+    }
+
+    /// Hash branch of [`hash_after`](Self::hash_after) for an already
+    /// classified non-castling move.
+    fn hash_after_classified(&self, m: Move, class: MoveClass) -> u64 {
+        let us = self.side_to_move;
+        let from = m.from_sq();
+        let to = m.to_sq();
+        let piece = class.piece;
+        let is_pawn = class.is_pawn;
+        let is_capture = class.is_capture;
         let is_capture_or_ep = is_capture || m.move_type() == MoveType::EnPassant;
 
         let mut h = self.hash ^ crate::zobrist::ZOBRIST.side;
@@ -812,6 +1406,46 @@ impl Board {
         h
     }
 
+    /// Zobrist hash of the position after `m` with the selected en-passant
+    /// policy, without modifying `self`.
+    ///
+    /// Exactly equal to
+    /// `{ let mut b = self.clone(); b.do_move(m, &mut st); b.hash_with(mode) }`
+    /// for every move `m` that [`do_move`](Self::do_move) accepts. With
+    /// [`EnPassantMode::Always`] this delegates to [`hash_after`](Self::hash_after)
+    /// and keeps its fast path. With [`EnPassantMode::Legal`] a double pawn
+    /// push clones and plays the move to evaluate the child's legal ep square;
+    /// this is a convenience, not a hot-loop substitute for the default pair.
+    /// Consumers that need normalized keys in a tight loop should use
+    /// [`legal_ep_square`](Self::legal_ep_square) directly.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, panics if `from` holds no piece (i.e. `m` is not a
+    /// move `do_move` would accept).
+    #[must_use]
+    pub fn hash_after_with(&self, m: Move, mode: EnPassantMode) -> u64 {
+        match mode {
+            EnPassantMode::Always => self.hash_after(m),
+            EnPassantMode::Legal => {
+                // Only a double pawn push can create an ep target.
+                let is_double_push = m.move_type() == MoveType::Normal
+                    && (m.to_sq() as i8 - m.from_sq() as i8).abs() == 16
+                    && self
+                        .piece_on(m.from_sq())
+                        .type_of()
+                        .is_some_and(|pt| pt == PieceType::Pawn);
+                if !is_double_push {
+                    return self.hash_after(m);
+                }
+                let mut child = self.clone();
+                let mut state = StateInfo::new();
+                child.do_move(m, &mut state);
+                child.hash_with(EnPassantMode::Legal)
+            }
+        }
+    }
+
     /// Half-move clock after `m`, without modifying `self`.
     ///
     /// Exactly equal to the [`rule50()`](Self::rule50) value
@@ -828,57 +1462,170 @@ impl Board {
         if m.move_type() == MoveType::Castling {
             return self.rule50 + 1;
         }
-        let piece = self.squares[m.from_sq() as usize];
-        debug_assert!(
-            piece != NO_PIECE,
-            "rule50_after on a move from an empty square"
-        );
-        let pt = piece.type_of().unwrap();
-        if pt == PieceType::Pawn || !self.empty(m.to_sq()) {
+        self.rule50_after_classified(self.classify_move(m))
+    }
+
+    /// Rule50 branch of [`rule50_after`](Self::rule50_after) for an already
+    /// classified non-castling move.
+    fn rule50_after_classified(&self, class: MoveClass) -> u16 {
+        if class.is_pawn || class.is_capture {
             0
         } else {
             self.rule50 + 1
         }
     }
 
-    /// Return the bitboard of commoners (king-like pseudo-royal pieces) for a color.
+    /// Return the bitboard of commoners (king-like pieces) for a color.
+    ///
+    /// Legal atomic positions contain at most one commoner per color; a board
+    /// with only one commoner in total is terminal.
     #[inline(always)]
     #[must_use]
     pub fn commoners(&self, c: Color) -> Bitboard {
         self.pieces_color_pt(c, PieceType::Commoner)
     }
 
-    /// Return the game outcome from the side-to-move perspective, if the game
-    /// is over.
+    /// Return the game outcome from the side-to-move perspective, if the
+    /// position is decided under the atomic rules/WDL view.
     ///
-    /// Commoner extinction for the side to move is a loss, extinction of the
-    /// opponent is a win, the 50-move rule (100 plies) is a draw, and a position
-    /// with no legal moves is a draw by stalemate.
+    /// Branches are evaluated in this order:
+    ///
+    /// 1. the side to move has no commoner → [`Outcome::Loss`];
+    /// 2. the opponent has no commoner → [`Outcome::Win`];
+    /// 3. only the two commoners remain → [`Outcome::Draw`] (the
+    ///    [`is_material_draw`](Self::is_material_draw) WDL shortcut);
+    /// 4. no legal moves: the commoner is attacked → `Loss`, otherwise
+    ///    `Draw` (stalemate);
+    /// 5. the 50-move rule (`rule50 >= 100`) → `Draw`.
+    ///
+    /// Mate outranks the clock: branch 4 is resolved before branch 5 when the
+    /// side to move is in check, so checkmate on the clock's last ply is a
+    /// loss, not a draw. This matches Fairy-Stockfish's
+    /// `rule50 > 99 && (!checkers() || MoveList<LEGAL>(pos).size())` ordering.
+    /// When the side to move is not in check, the 50-move branch is decided
+    /// without running move generation.
+    ///
+    /// This method populates one temporary [`StateInfo`] and uses the
+    /// existence query, but never builds a [`MoveList`].
+    ///
+    /// # WDL view versus literal game over
+    ///
+    /// [`Outcome`] is the WDL view. A commoner-only board is reported as a
+    /// draw here even before the 50-move rule has elapsed, because no legal
+    /// move can change the material. Use [`is_terminal`](Self::is_terminal)
+    /// for the literal rules/game-over predicate, which does not include that
+    /// shortcut.
     #[must_use]
     pub fn outcome(&self) -> Option<Outcome> {
-        let us = self.side_to_move;
-        if self.commoners(us).is_empty() {
+        let mut state = StateInfo::new();
+        self.populate_state(&mut state);
+        self.outcome_with_state(&state)
+    }
+
+    /// Same as [`outcome`](Self::outcome), reusing a populated [`StateInfo`].
+    ///
+    /// `state` must have been populated by
+    /// [`populate_state`](Self::populate_state) for this board. A stale
+    /// `StateInfo` can change extinction, check, and stalemate results.
+    ///
+    /// This may run
+    /// [`has_legal_move_with_state`](crate::movegen::has_legal_move_with_state)
+    /// when the answer depends on whether a legal move exists.
+    #[must_use]
+    pub fn outcome_with_state(&self, state: &StateInfo) -> Option<Outcome> {
+        self.outcome_impl(state, None)
+    }
+
+    /// Hot-path form of [`outcome_with_state`](Self::outcome_with_state) when
+    /// the caller already knows whether a legal move exists.
+    ///
+    /// `moves_exist` must be the result of
+    /// [`has_legal_move_with_state(self, state)`](crate::movegen::has_legal_move_with_state).
+    /// It is authoritative: passing `false` for a non-terminal position
+    /// reports `Draw` or `Loss` according to
+    /// [`StateInfo::checkers`], even though no move generation was run. The
+    /// value is not consulted when extinction, the material shortcut, or the
+    /// non-check 50-move branch already decides the position.
+    #[must_use]
+    pub fn outcome_with(&self, state: &StateInfo, moves_exist: bool) -> Option<Outcome> {
+        self.outcome_impl(state, Some(moves_exist))
+    }
+
+    /// One precedence implementation shared by every `outcome*` query.
+    fn outcome_impl(&self, state: &StateInfo, moves_exist: Option<bool>) -> Option<Outcome> {
+        if state.commoners_count == 0 {
             return Some(Outcome::Loss);
         }
-        if self.commoners(us.flip()).is_empty() {
+        if state.them_commoners_count == 0 {
             return Some(Outcome::Win);
         }
-        if self.rule50 >= 100 {
+        if self.is_material_draw() {
             return Some(Outcome::Draw);
         }
-        let mut moves = MoveList::new();
-        crate::movegen::generate_legal(self, &mut moves);
-        if moves.is_empty() {
+
+        // The clock is a draw without movegen when there is no check. When the
+        // side to move is in check, mate outranks the clock, so resolve the
+        // existence question first (Fairy-Stockfish's `!checkers() || legal`
+        // guard).
+        if self.rule50 >= 100 && state.checkers.is_empty() {
+            return Some(Outcome::Draw);
+        }
+
+        let moves_exist =
+            moves_exist.unwrap_or_else(|| crate::movegen::has_legal_move_with_state(self, state));
+
+        if !moves_exist {
+            return Some(if state.checkers.is_empty() {
+                Outcome::Draw
+            } else {
+                Outcome::Loss
+            });
+        }
+        if self.rule50 >= 100 {
             return Some(Outcome::Draw);
         }
         None
     }
 
-    /// Returns `true` if the game is over.
-    #[inline]
+    /// Return `true` if both colors have exactly one commoner and no other
+    /// pieces (an atomic K-vs-K position).
+    ///
+    /// This is the only material draw in atomic chess. It is deliberately
+    /// **not** a general “insufficient material” test: a lone bishop, knight,
+    /// or rook can win immediately by capturing the enemy commoner when its own
+    /// commoner is outside the blast, so endings such as K+B vs K, K+N vs K,
+    /// and K+R vs K are not draws. There is no K+B/K+N/K+R table here.
+    ///
+    /// The color checks exclude artificial boards with two commoners of one
+    /// color, which are not atomic positions. Adjacency is irrelevant: touching
+    /// commoners alone satisfy this predicate, but touching commoners with any
+    /// other piece on the board do not.
+    #[must_use]
+    pub fn is_material_draw(&self) -> bool {
+        self.occupied().count() == 2
+            && self.commoners(Color::White).count() == 1
+            && self.commoners(Color::Black).count() == 1
+    }
+
+    /// Return `true` if the game is literally over.
+    ///
+    /// This is extinction (either side has no commoner), the 50-move rule
+    /// (`rule50 >= 100`), or no legal moves. It deliberately does **not**
+    /// include the commoner-only material shortcut from
+    /// [`outcome`](Self::outcome): a K-vs-K position with `rule50 < 100` is a
+    /// WDL draw, but the game has not ended and may still reach the 50-move
+    /// rule.
+    ///
+    /// This method populates a temporary [`StateInfo`] and uses the
+    /// move-existence query. It never calls [`outcome`](Self::outcome).
     #[must_use]
     pub fn is_terminal(&self) -> bool {
-        self.outcome().is_some()
+        let mut state = StateInfo::new();
+        self.populate_state(&mut state);
+        self.commoners(self.side_to_move).is_empty()
+            || self.commoners(self.side_to_move.flip()).is_empty()
+            || self.rule50 >= 100
+            || !crate::movegen::has_legal_move_with_state(self, &state)
     }
 
     /// Return `true` if `m` is a capture on this board.
@@ -887,6 +1634,160 @@ impl Board {
     pub fn is_capture(&self, m: Move) -> bool {
         m.move_type() == MoveType::EnPassant
             || (m.move_type() != MoveType::Castling && self.piece_on(m.to_sq()) != NO_PIECE)
+    }
+
+    /// Return the full 3×3 atomic blast area centered on `sq`: the square
+    /// itself plus its eight neighbours.
+    ///
+    /// This is pure geometry and deliberately includes the center and any
+    /// pawn squares. Atomic rules make pawns immune to the blast except at
+    /// ground zero, so [`blast_casualties`](Self::blast_casualties) and
+    /// [`do_move`](Self::do_move) mask out pawns before removing pieces.
+    #[inline]
+    #[must_use]
+    pub fn blast_zone(sq: Square) -> Bitboard {
+        attacks::king_attacks(sq) | Bitboard::square_bb(sq)
+    }
+
+    /// Return every piece `m` would remove, without modifying the board.
+    ///
+    /// `m` is expected to be a pseudo-legal capture (normal capture or en
+    /// passant). Castling and non-capturing moves return
+    /// [`BlastCasualties::default`], since quiet moves have no blast.
+    ///
+    /// The result includes:
+    /// - the normal capture victim, or the en-passant victim (also identified
+    ///   by [`BlastCasualties::en_passant_victim`]);
+    /// - every non-pawn in the blast ring around the destination;
+    /// - the capturer at ground zero (even when it is a pawn or a promoted
+    ///   piece).
+    ///
+    /// This mirrors [`do_move`](Self::do_move) without mutation: it neither
+    /// calls `do_move` nor allocates.
+    #[must_use]
+    pub fn blast_casualties(&self, m: Move) -> BlastCasualties {
+        let mut casualties = BlastCasualties::default();
+        if m.move_type() == MoveType::Castling || !self.is_capture(m) {
+            return casualties;
+        }
+
+        let us = self.side_to_move;
+        let from = m.from_sq();
+        let to = m.to_sq();
+        let piece = self.piece_on(from);
+        let Some(pt) = piece.type_of() else {
+            return casualties;
+        };
+
+        let to_bb = Bitboard::square_bb(to);
+        let from_bb = Bitboard::square_bb(from);
+        // Simulated post-capture, pre-blast occupancy and pawns, matching the
+        // state `do_move` uses when it builds the blast set.
+        let mut occupied = self.occupied();
+        let mut pawns = self.by_type[PieceType::Pawn as usize];
+
+        if m.move_type() == MoveType::EnPassant {
+            let victim = match us {
+                Color::White => Square::from_index(to as i8 - 8),
+                Color::Black => Square::from_index(to as i8 + 8),
+            };
+            let victim_bb = Bitboard::square_bb(victim);
+            match us.flip() {
+                Color::White => casualties.white = casualties.white | victim_bb,
+                Color::Black => casualties.black = casualties.black | victim_bb,
+            }
+            casualties.en_passant_victim = Some(victim);
+            occupied = occupied & !victim_bb;
+            pawns = pawns & !victim_bb;
+        } else {
+            // A normal capture always has a piece on the destination.
+            let victim_color = self.piece_on(to).color().unwrap();
+            match victim_color {
+                Color::White => casualties.white = casualties.white | to_bb,
+                Color::Black => casualties.black = casualties.black | to_bb,
+            }
+            occupied = occupied & !to_bb;
+            pawns = pawns & !to_bb;
+        }
+
+        // Relocate the capturer, applying a promotion if any.
+        occupied = (occupied & !from_bb) | to_bb;
+        if m.move_type() == MoveType::Promotion {
+            pawns = pawns & !from_bb;
+        } else if pt == PieceType::Pawn {
+            pawns = (pawns & !from_bb) | to_bb;
+        }
+
+        let area = Self::blast_zone(to) & !pawns;
+        let mut removed = (area & occupied) | to_bb;
+        while !removed.is_empty() {
+            let sq = removed.pop_lsb();
+            let victim_color = if sq == to {
+                us
+            } else {
+                self.piece_on(sq).color().unwrap()
+            };
+            match victim_color {
+                Color::White => casualties.white = casualties.white | Bitboard::square_bb(sq),
+                Color::Black => casualties.black = casualties.black | Bitboard::square_bb(sq),
+            }
+        }
+
+        casualties
+    }
+
+    /// Return `true` when `m` resets the half-move clock.
+    ///
+    /// A move is zeroing when it is a pawn move, a promotion, an en-passant
+    /// capture, or a capture of any kind. Castling increments the clock, so it
+    /// is not zeroing. Returns `false` for [`Move::NONE`] and moves whose
+    /// origin is empty.
+    ///
+    /// This is the safe, board-aware counterpart to
+    /// [`rule50_after`](Self::rule50_after): it answers the same question and
+    /// never panics on malformed input.
+    #[must_use]
+    pub fn is_zeroing(&self, m: Move) -> bool {
+        let from = m.from_sq();
+        if m == Move::NONE || from == Square::NONE || self.piece_on(from) == NO_PIECE {
+            return false;
+        }
+        if m.is_en_passant() || m.is_promotion() {
+            return true;
+        }
+        if m.is_castling() {
+            return false;
+        }
+        self.piece_on(from)
+            .type_of()
+            .is_some_and(|pt| pt == PieceType::Pawn)
+            || !self.empty(m.to_sq())
+    }
+
+    /// Return `true` when `m` is a normal two-square pawn push from the start
+    /// rank.
+    ///
+    /// Checks the move type, the moving piece (a pawn of the side to move), the
+    /// file, the two-rank distance, and that the intermediate square is empty.
+    /// A rook or other slider moving two ranks, a one-square pawn move, and a
+    /// promotion all return `false`.
+    #[must_use]
+    pub fn is_double_push(&self, m: Move) -> bool {
+        if m.move_type() != MoveType::Normal {
+            return false;
+        }
+        let from = m.from_sq();
+        let to = m.to_sq();
+        let piece = self.piece_on(from);
+        if piece.color() != Some(self.side_to_move)
+            || piece.type_of() != Some(PieceType::Pawn)
+            || file_of(from) != file_of(to)
+            || (to as i8 - from as i8).abs() != 16
+        {
+            return false;
+        }
+        let middle = Square::from_index((from as i8 + to as i8) / 2);
+        self.empty(middle)
     }
 
     /// Return all pieces that attack `sq` on the given occupancy.
@@ -930,48 +1831,47 @@ impl Board {
         attackers
     }
 
+    /// Return the attackers of `sq` restricted to pieces of one color.
+    ///
+    /// Equivalent to `self.attackers_to(sq, occupied) & self.pieces_color(color)`.
+    #[must_use]
+    pub fn attackers_to_color(&self, sq: Square, color: Color, occupied: Bitboard) -> Bitboard {
+        self.attackers_to(sq, occupied) & self.pieces_color(color)
+    }
+
     pub(crate) fn compute_checkers(&self, us: Color) -> Bitboard {
         let them = us.flip();
         let commoners = self.commoners(us);
-        if commoners.is_empty() {
+        let them_commoners = self.commoners(them);
+
+        // Legal atomic positions have at most one commoner per side. If either
+        // side has none, the game is already over, so there is no check.
+        if commoners.is_empty() || them_commoners.is_empty() {
+            return Bitboard::EMPTY;
+        }
+        let ksq = commoners.lsb();
+
+        // The two commoners are the sides' only commoners. If they touch,
+        // neither may capture the other: the blast would destroy the
+        // capturer's own commoner. No other enemy piece can capture ours
+        // either, because that blast would also destroy the enemy's only
+        // commoner. Touching therefore makes our commoner immune to *all*
+        // attacks, so it is not in check.
+        if !(them_commoners & attacks::king_attacks(ksq)).is_empty() {
             return Bitboard::EMPTY;
         }
 
-        let mut checkers = Bitboard::EMPTY;
         let occupied = self.occupied();
-
         let them_bb = self.pieces_color(them);
-        let mut c = commoners;
-        while !c.is_empty() {
-            let ksq = c.pop_lsb();
-            let rook_atk = attacks::rook_attacks(ksq, occupied);
-            let bishop_atk = attacks::bishop_attacks(ksq, occupied);
-            let queen_atk = rook_atk | bishop_atk;
-            checkers = checkers
-                | (rook_atk & self.by_type[PieceType::Rook as usize] & them_bb)
-                | (bishop_atk & self.by_type[PieceType::Bishop as usize] & them_bb)
-                | (queen_atk & self.by_type[PieceType::Queen as usize] & them_bb)
-                | (attacks::knight_attacks(ksq)
-                    & self.by_type[PieceType::Knight as usize]
-                    & them_bb)
-                | (attacks::pawn_attacks(us, ksq)
-                    & self.by_type[PieceType::Pawn as usize]
-                    & them_bb);
-        }
+        let rook_atk = attacks::rook_attacks(ksq, occupied);
+        let bishop_atk = attacks::bishop_attacks(ksq, occupied);
+        let queen_atk = rook_atk | bishop_atk;
 
-        // Adjacent commoner check (extinction pseudo-royal)
-        let them_commoners = self.commoners(them);
-        if !them_commoners.is_empty() && !commoners.is_empty() {
-            let mut tc = them_commoners;
-            while !tc.is_empty() {
-                let tksq = tc.pop_lsb();
-                if attacks::king_attacks(tksq) & commoners != Bitboard::EMPTY {
-                    checkers = checkers | Bitboard::square_bb(tksq);
-                }
-            }
-        }
-
-        checkers
+        (rook_atk & self.by_type[PieceType::Rook as usize] & them_bb)
+            | (bishop_atk & self.by_type[PieceType::Bishop as usize] & them_bb)
+            | (queen_atk & self.by_type[PieceType::Queen as usize] & them_bb)
+            | (attacks::knight_attacks(ksq) & self.by_type[PieceType::Knight as usize] & them_bb)
+            | (attacks::pawn_attacks(us, ksq) & self.by_type[PieceType::Pawn as usize] & them_bb)
     }
 
     /// Return the bitboard of enemy pieces checking the side to move.
@@ -1301,13 +2201,30 @@ impl Board {
     /// Check whether `m` is legal under atomic chess rules.
     ///
     /// Considers blast-zone effects (self-explosion), castling pass-through
-    /// safety, and commoner extinction. The last commoner is immune from
-    /// adjacent-commoner checks; touching an enemy commoner is allowed and does
-    /// not count as an attack.
+    /// safety, and commoner extinction. A move that destroys any of the mover's
+    /// commoners is illegal; in a legal atomic position there is exactly one, so
+    /// there is no spare-commoner exception. Touching the enemy commoner is
+    /// allowed and does not count as an attack: any capture would also blast
+    /// the enemy's only commoner away.
     ///
     /// `state` must contain up-to-date cached fields for the current position.
+    /// A terminal board (either side has no commoner) has no legal moves.
+    ///
+    /// # Preconditions
+    ///
+    /// This is the low-level predicate used by the move generator. It assumes
+    /// that `m` is pseudo-legal and that `state` has been populated with
+    /// [`populate_state`](Self::populate_state). For untrusted move input use
+    /// [`is_legal`](Self::is_legal) or
+    /// [`is_legal_with_state`](Self::is_legal_with_state), which validate the
+    /// move shape first.
     #[must_use]
     pub fn legal(&self, m: Move, state: &StateInfo) -> bool {
+        // A board with only one commoner is terminal.
+        if state.commoners_count == 0 || state.them_commoners_count == 0 {
+            return false;
+        }
+
         let from = m.from_sq();
         let to = m.to_sq();
         let us = self.side_to_move;
@@ -1329,17 +2246,15 @@ impl Board {
             } else {
                 [Square::from_index(ksq as i8 - 1), ksq]
             };
+            let enemy_commoners = self.commoners(them);
             for &sq in &pass_through {
-                let adjacent_enemy_commoners = self.commoners(them) & attacks::king_attacks(sq);
-                if adjacent_enemy_commoners.is_empty() {
-                    let enemy_commoner_attack = attacks::king_attacks(sq)
-                        & self.by_type[PieceType::Commoner as usize]
-                        & self.by_color[them as usize];
-                    if square_attacked_by(self, sq, occupied, self.by_color[them as usize])
-                        || !enemy_commoner_attack.is_empty()
-                    {
-                        return false;
-                    }
+                // A commoner adjacent to this square makes the commoner
+                // immune to every attack while it stands there.
+                if !(enemy_commoners & attacks::king_attacks(sq)).is_empty() {
+                    continue;
+                }
+                if square_attacked_by(self, sq, occupied, self.by_color[them as usize]) {
+                    return false;
                 }
             }
         }
@@ -1369,41 +2284,321 @@ impl Board {
             occupied = occupied & !(blast_adjacent | Bitboard::square_bb(kto));
         }
 
-        let mut our_commoners = self.commoners(us) & occupied;
+        let pre_commoners = self.commoners(us);
+        let mut our_commoners = pre_commoners & occupied;
 
         if !is_capture && piece == make_piece(us, PieceType::Commoner) {
             our_commoners = our_commoners | Bitboard::square_bb(kto);
         }
 
-        if our_commoners.is_empty() {
+        // A move may not destroy any of our commoners. In a legal position
+        // there is exactly one, so this is the usual self-explosion check.
+        if our_commoners.count() != pre_commoners.count() {
             return false;
         }
 
-        let our_pr_count = state.commoners_count as usize;
-        let them_pr_count = state.them_commoners_count as usize;
+        // Capturing the enemy's only commoner wins immediately; the mover's
+        // own commoner cannot be in check after the game has ended.
+        let enemy_commoners = self.commoners(them) & occupied;
+        if enemy_commoners.is_empty() {
+            return true;
+        }
 
-        if our_pr_count <= 1 {
-            let enemy_pr_destroyed =
-                them_pr_count <= 1 && (self.commoners(them) & occupied).is_empty();
+        let ksq = our_commoners.lsb();
+        // Touching the enemy commoner grants immunity to every attack.
+        if !(enemy_commoners & attacks::king_attacks(ksq)).is_empty() {
+            return true;
+        }
 
-            if !enemy_pr_destroyed {
-                let them_commoners = self.commoners(them);
-                let enemy_survivors = self.by_color[them as usize] & occupied;
+        !square_attacked_by(self, ksq, occupied, self.by_color[them as usize] & occupied)
+    }
 
-                let mut c = our_commoners;
-                while !c.is_empty() {
-                    let ksq = c.pop_lsb();
-                    let adjacent_enemy = them_commoners & attacks::king_attacks(ksq);
-                    if adjacent_enemy.is_empty()
-                        && square_attacked_by(self, ksq, occupied, enemy_survivors)
-                    {
-                        return false;
+    /// Check whether `m` is fully legal on this board.
+    ///
+    /// Populates a temporary [`StateInfo`] internally, then applies
+    /// [`is_legal_with_state`](Self::is_legal_with_state). This is the
+    /// untrusted-input single-move predicate; it never builds or clones a
+    /// [`MoveList`].
+    #[must_use]
+    pub fn is_legal(&self, m: Move) -> bool {
+        let mut state = StateInfo::new();
+        self.populate_state(&mut state);
+        self.is_legal_with_state(m, &state)
+    }
+
+    /// Check whether `m` is fully legal using a caller-populated [`StateInfo`].
+    ///
+    /// The result is exactly membership in
+    /// `generate_legal_with_state(self, state, ..)`: the move must be
+    /// pseudo-legal *and* pass [`legal`](Self::legal). The shape check is what
+    /// makes arbitrary 16-bit input safe; for example, an encoded castling
+    /// move whose origin is not a commoner home square is rejected even if
+    /// [`legal`](Self::legal) would otherwise accept it. The hot move generator
+    /// keeps calling [`legal`](Self::legal) directly.
+    ///
+    /// The caller is responsible for ensuring `state` is up to date; stale
+    /// state can change the answer, exactly as it does for
+    /// [`legal`](Self::legal).
+    #[must_use]
+    pub fn is_legal_with_state(&self, m: Move, state: &StateInfo) -> bool {
+        self.is_pseudo_legal(m) && self.legal(m, state)
+    }
+
+    /// Check whether `m` is pseudo-legal on this board.
+    ///
+    /// The result is exactly membership in
+    /// [`generate_pseudo_legal`](crate::movegen::generate_pseudo_legal): the
+    /// origin holds a piece of the side to move, the destination is not
+    /// occupied by that side (except for the internal castling encoding), and
+    /// the move shape matches the moving piece. Castling rights, the rook and
+    /// commoner home squares, and the empty path are checked, but attacked
+    /// pass-through squares are not; those require [`legal`](Self::legal).
+    ///
+    /// This is **not** a legality guarantee and does not check self-explosion
+    /// or check. No [`MoveList`] is built.
+    #[must_use]
+    pub fn is_pseudo_legal(&self, m: Move) -> bool {
+        if m == Move::NONE {
+            return false;
+        }
+
+        let from = m.from_sq();
+        let to = m.to_sq();
+        if from == to {
+            return false;
+        }
+        // `from_bits` accepts non-canonical promotion-type bits on non-promotion
+        // moves; the generator never emits them.
+        if !m.has_canonical_promotion_bits() {
+            return false;
+        }
+
+        let us = self.side_to_move;
+        let piece = self.piece_on(from);
+        if piece == NO_PIECE || piece.color() != Some(us) {
+            return false;
+        }
+
+        if m.move_type() == MoveType::Castling {
+            return self.is_pseudo_legal_castling(from, to);
+        }
+
+        let to_piece = self.piece_on(to);
+        if to_piece != NO_PIECE && to_piece.color() == Some(us) {
+            return false;
+        }
+
+        let Some(pt) = piece.type_of() else {
+            return false;
+        };
+        // Only pawns have non-normal encodings. A knight/rook/etc. bit pattern
+        // with promotion, en-passant, or castling type bits is malformed; the
+        // generator emits ordinary moves for these pieces.
+        if pt != PieceType::Pawn && m.move_type() != MoveType::Normal {
+            return false;
+        }
+        match pt {
+            PieceType::Pawn => self.is_pseudo_legal_pawn(m),
+            PieceType::Knight => {
+                !(attacks::knight_attacks(from) & Bitboard::square_bb(to)).is_empty()
+            }
+            PieceType::Bishop => !(attacks::bishop_attacks(from, self.occupied())
+                & Bitboard::square_bb(to))
+            .is_empty(),
+            PieceType::Rook => {
+                !(attacks::rook_attacks(from, self.occupied()) & Bitboard::square_bb(to)).is_empty()
+            }
+            PieceType::Queen => !(attacks::queen_attacks(from, self.occupied())
+                & Bitboard::square_bb(to))
+            .is_empty(),
+            PieceType::Commoner => {
+                !(attacks::king_attacks(from) & Bitboard::square_bb(to)).is_empty()
+            }
+        }
+    }
+
+    /// Pawn branch of [`is_pseudo_legal`](Self::is_pseudo_legal), mirroring
+    /// the pawn generator exactly.
+    fn is_pseudo_legal_pawn(&self, m: Move) -> bool {
+        let us = self.side_to_move;
+        let them = us.flip();
+        let from = m.from_sq();
+        let to = m.to_sq();
+        let (start_rank, promotion_from_rank, promotion_rank) = match us {
+            Color::White => (Rank::R2, Rank::R7, Rank::R8),
+            Color::Black => (Rank::R7, Rank::R2, Rank::R1),
+        };
+        let from_rank = rank_of(from);
+        let to_rank = rank_of(to);
+        let them_bb = self.pieces_color(them);
+        let attacks_bb = attacks::pawn_attacks(us, from);
+        let captures_to = attacks_bb & them_bb & Bitboard::square_bb(to);
+
+        match m.move_type() {
+            MoveType::Promotion => {
+                if from_rank != promotion_from_rank || to_rank != promotion_rank {
+                    return false;
+                }
+                let single = attacks::pawn_pushes(us, from);
+                let is_push = !single.is_empty() && to == single.lsb() && self.empty(to);
+                is_push || !captures_to.is_empty()
+            }
+            MoveType::EnPassant => {
+                let expected_rank = match us {
+                    Color::White => Rank::R6,
+                    Color::Black => Rank::R3,
+                };
+                if to_rank != expected_rank || self.ep_square != Some(to) {
+                    return false;
+                }
+                if (attacks_bb & Bitboard::square_bb(to)).is_empty() {
+                    return false;
+                }
+                let captured_sq = match us {
+                    Color::White => Square::from_index(to as i8 - 8),
+                    Color::Black => Square::from_index(to as i8 + 8),
+                };
+                captured_sq != Square::NONE
+                    && self.piece_on(captured_sq) == make_piece(them, PieceType::Pawn)
+            }
+            MoveType::Normal => {
+                // The generator emits a promotion, never a normal move, when
+                // a pawn reaches the last rank.
+                if to_rank == promotion_rank {
+                    return false;
+                }
+
+                let single = attacks::pawn_pushes(us, from);
+                if !single.is_empty() && to == single.lsb() && self.empty(to) {
+                    return true;
+                }
+
+                if from_rank == start_rank {
+                    let double = attacks::pawn_double_pushes(us, from);
+                    if !double.is_empty() && to == double.lsb() && self.empty(to) {
+                        let intermediate = match us {
+                            Color::White => Square::from_index(to as i8 - 8),
+                            Color::Black => Square::from_index(to as i8 + 8),
+                        };
+                        return intermediate != Square::NONE && self.empty(intermediate);
                     }
                 }
+
+                !captures_to.is_empty()
+            }
+            MoveType::Castling => false,
+        }
+    }
+
+    /// Castling branch of [`is_pseudo_legal`](Self::is_pseudo_legal). The
+    /// encoded destination is the rook home square; attacked pass-through
+    /// squares are deliberately left to [`legal`](Self::legal).
+    fn is_pseudo_legal_castling(&self, from: Square, to: Square) -> bool {
+        let us = self.side_to_move;
+        let (
+            king_right,
+            queen_right,
+            king_sq,
+            king_rook,
+            queen_rook,
+            king_side_clear,
+            queen_side_clear,
+        ) = match us {
+            Color::White => (
+                WK_CASTLE,
+                WQ_CASTLE,
+                Square::E1,
+                Square::H1,
+                Square::A1,
+                self.empty(Square::F1) && self.empty(Square::G1),
+                self.empty(Square::B1) && self.empty(Square::C1) && self.empty(Square::D1),
+            ),
+            Color::Black => (
+                BK_CASTLE,
+                BQ_CASTLE,
+                Square::E8,
+                Square::H8,
+                Square::A8,
+                self.empty(Square::F8) && self.empty(Square::G8),
+                self.empty(Square::B8) && self.empty(Square::C8) && self.empty(Square::D8),
+            ),
+        };
+
+        if from != king_sq {
+            return false;
+        }
+        let (right, rook_sq, path_clear) = if to == king_rook {
+            (king_right, king_rook, king_side_clear)
+        } else if to == queen_rook {
+            (queen_right, queen_rook, queen_side_clear)
+        } else {
+            return false;
+        };
+
+        self.castling_rights & right != 0
+            && self.piece_on(king_sq) == make_piece(us, PieceType::Commoner)
+            && self.piece_on(rook_sq) == make_piece(us, PieceType::Rook)
+            && path_clear
+    }
+
+    /// Board-aware UCI lookup.
+    ///
+    /// Parses `s` with [`Move::from_uci`](crate::Move::from_uci), then tries
+    /// the board-dependent encodings that plain UCI text cannot distinguish:
+    /// the four castling destinations (`e1g1`, `e1c1`, `e8g8`, `e8c8`) map to
+    /// the internal king-takes-rook encoding, and a normal-looking move onto
+    /// the current en-passant target maps to an en-passant capture. Only a
+    /// fully legal candidate is returned. If no special encoding is legal, the
+    /// parsed ordinary move is checked last, so a rook move such as `e8g8`
+    /// still resolves correctly when castling is unavailable.
+    ///
+    /// `"0000"`, malformed text, and illegal moves return `None`.
+    /// [`Move::from_uci`](crate::Move::from_uci) is syntax-only and does not
+    /// resolve castling or en passant; this method is the safe replacement for
+    /// generating all legal moves and comparing UCI strings.
+    #[must_use]
+    pub fn move_from_uci(&self, s: &str) -> Option<Move> {
+        let parsed = Move::from_uci(s)?;
+        if parsed == Move::NONE {
+            return None;
+        }
+
+        let mut state = StateInfo::new();
+        self.populate_state(&mut state);
+
+        for candidate in [
+            self.resolve_castling_uci(parsed),
+            self.resolve_en_passant_uci(parsed),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if self.is_legal_with_state(candidate, &state) {
+                return Some(candidate);
             }
         }
 
-        true
+        self.is_legal_with_state(parsed, &state).then_some(parsed)
+    }
+
+    /// Map UCI castling destinations to the internal king-takes-rook encoding.
+    fn resolve_castling_uci(&self, m: Move) -> Option<Move> {
+        match (m.from_sq(), m.to_sq()) {
+            (Square::E1, Square::G1) => Some(Move::make_castling(Square::E1, Square::H1)),
+            (Square::E1, Square::C1) => Some(Move::make_castling(Square::E1, Square::A1)),
+            (Square::E8, Square::G8) => Some(Move::make_castling(Square::E8, Square::H8)),
+            (Square::E8, Square::C8) => Some(Move::make_castling(Square::E8, Square::A8)),
+            _ => None,
+        }
+    }
+
+    /// Map a normal-looking move onto the current en-passant target to the
+    /// internal en-passant encoding.
+    fn resolve_en_passant_uci(&self, m: Move) -> Option<Move> {
+        if m.move_type() != MoveType::Normal || self.ep_square != Some(m.to_sq()) {
+            return None;
+        }
+        Some(Move::make_enpassant(m.from_sq(), m.to_sq()))
     }
 }
 
@@ -1451,6 +2646,24 @@ fn square_attacked_by(board: &Board, sq: Square, occupied: Bitboard, enemy_bb: B
     }
 
     false
+}
+
+/// One-shot classification of a non-castling move for the child-key helpers
+/// ([`Board::hash_after`], [`Board::rule50_after`], and
+/// [`Board::hash_and_rule50_after`]).
+///
+/// Both child-key quantities need the moving piece and whether the move is a
+/// pawn move or a capture; computing them once lets
+/// [`Board::hash_and_rule50_after`] avoid a second origin lookup.
+#[derive(Debug, Clone, Copy)]
+struct MoveClass {
+    /// Piece standing on the move's origin square (never [`NO_PIECE`] for a
+    /// move `do_move` accepts).
+    piece: Piece,
+    /// The moving piece is a pawn (a promotion still moves a pawn).
+    is_pawn: bool,
+    /// The destination square is occupied (not true for en passant).
+    is_capture: bool,
 }
 
 /// Return the Zobrist piece key for the piece with raw encoding `raw`
@@ -1739,12 +2952,245 @@ mod tests {
     }
 
     #[test]
+    fn validate_accepts_legal_positions() {
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "rnbqkbnr/ppp2pp1/4p2p/3p4/3PP3/7N/PPP2PPP/RNBQKB1R w KQkq - 0 4",
+            "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+            // FSF-style ep target with no legal ep capture.
+            "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2",
+            // Promotion-heavy, with the side to move in check (allowed).
+            "4k3/PPPPPPPP/8/8/8/8/8/4K3 b - - 0 1",
+        ];
+        for fen in fens {
+            let board = Board::from_fen(fen).expect("test FEN must parse");
+            assert_eq!(board.validate(), Ok(()), "unexpected errors for {fen}");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_structural_errors() {
+        let cases: &[(&str, ValidationErrors)] = &[
+            (
+                "8/8/8/8/8/8/8/8 w - - 0 1",
+                ValidationErrors::EMPTY_BOARD
+                    .union(ValidationErrors::MISSING_COMMONER_WHITE)
+                    .union(ValidationErrors::MISSING_COMMONER_BLACK),
+            ),
+            (
+                "4k3/8/8/8/8/8/8/8 w - - 0 1",
+                ValidationErrors::MISSING_COMMONER_WHITE,
+            ),
+            (
+                "8/8/8/8/8/8/8/4K3 w - - 0 1",
+                ValidationErrors::MISSING_COMMONER_BLACK,
+            ),
+            (
+                "4k3/8/8/8/8/8/8/3KK3 w - - 0 1",
+                ValidationErrors::TOO_MANY_COMMONERS_WHITE,
+            ),
+            (
+                "3kk3/8/8/8/8/8/8/4K3 w - - 0 1",
+                ValidationErrors::TOO_MANY_COMMONERS_BLACK,
+            ),
+            (
+                "4k2P/8/8/8/8/8/8/p3K3 w - - 0 1",
+                ValidationErrors::PAWNS_ON_BACKRANK,
+            ),
+            (
+                "4k3/4p3/8/4p3/8/8/8/4K3 w - e6 0 1",
+                ValidationErrors::INVALID_EP_SQUARE,
+            ),
+            (
+                "4k3/8/4n3/4p3/8/8/8/4K3 w - e6 0 1",
+                ValidationErrors::INVALID_EP_SQUARE,
+            ),
+            (
+                "4k3/QQQQQQQQ/QQ2QQQQ/8/8/qq2qqqq/qqqqqqqq/4K3 w - - 0 1",
+                ValidationErrors::TOO_MUCH_MATERIAL,
+            ),
+            (
+                "4k3/4R3/8/8/8/8/8/4K3 w - - 0 1",
+                ValidationErrors::OPPOSITE_CHECK,
+            ),
+        ];
+        for &(fen, expected) in cases {
+            let board = Board::from_fen(fen).expect("test FEN must parse");
+            let errors = board.validate().expect_err("position should be rejected");
+            assert!(
+                errors.contains(expected),
+                "expected {expected} for {fen}, got {errors}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_is_opt_in() {
+        let fens = [
+            "8/8/8/8/8/8/8/8 w - - 0 1",
+            "4k3/8/8/8/8/8/8/8 w - - 0 1",
+            "8/8/8/8/8/8/8/4K3 w - - 0 1",
+            "4k3/8/8/8/8/8/8/3KK3 w - - 0 1",
+            "3kk3/8/8/8/8/8/8/4K3 w - - 0 1",
+            "4k2P/8/8/8/8/8/8/p3K3 w - - 0 1",
+            "4k3/4p3/8/4p3/8/8/8/4K3 w - e6 0 1",
+            "4k3/8/4n3/4p3/8/8/8/4K3 w - e6 0 1",
+            "4k3/QQQQQQQQ/QQ2QQQQ/8/8/qq2qqqq/qqqqqqqq/4K3 w - - 0 1",
+            "4k3/4R3/8/8/8/8/8/4K3 w - - 0 1",
+        ];
+        for fen in fens {
+            assert!(
+                Board::from_fen(fen).is_ok(),
+                "permissive parser must still accept {fen}"
+            );
+        }
+    }
+
+    #[test]
+    fn fen_policy_behavior() {
+        let legal = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+        assert!(Board::from_fen_with(legal, FenPolicy::Strict).is_ok());
+
+        let missing = "4k3/8/8/8/8/8/8/8 w - - 0 1";
+        match Board::from_fen_with(missing, FenPolicy::Strict) {
+            Err(FenLoadError::InvalidPosition(errors)) => {
+                assert!(errors.contains(ValidationErrors::MISSING_COMMONER_WHITE));
+            }
+            other => panic!("expected InvalidPosition, got {other:?}"),
+        }
+
+        let terminal = "8/8/8/8/8/8/8/K7 w - - 0 1";
+        assert!(Board::from_fen_with(terminal, FenPolicy::AllowTerminal).is_ok());
+        let empty = "8/8/8/8/8/8/8/8 w - - 0 1";
+        assert!(Board::from_fen_with(empty, FenPolicy::AllowTerminal).is_ok());
+
+        let two_commoners = "4k3/8/8/8/8/8/8/3KK3 w - - 0 1";
+        match Board::from_fen_with(two_commoners, FenPolicy::AllowTerminal) {
+            Err(FenLoadError::InvalidPosition(errors)) => {
+                assert!(errors.contains(ValidationErrors::TOO_MANY_COMMONERS_WHITE));
+            }
+            other => panic!("expected InvalidPosition, got {other:?}"),
+        }
+
+        let opposite_check = "4k3/4R3/8/8/8/8/8/4K3 w - - 0 1";
+        assert!(Board::from_fen_with(opposite_check, FenPolicy::Strict).is_err());
+        assert!(Board::from_fen_with(opposite_check, FenPolicy::AllowImpossibleCheck).is_ok());
+
+        let all_fens = [
+            legal,
+            missing,
+            terminal,
+            empty,
+            two_commoners,
+            opposite_check,
+            "4k3/4p3/8/4p3/8/8/8/4K3 w - e6 0 1",
+            "4k3/QQQQQQQQ/QQ2QQQQ/8/8/qq2qqqq/qqqqqqqq/4K3 w - - 0 1",
+        ];
+        for fen in all_fens {
+            match (
+                Board::from_fen(fen),
+                Board::from_fen_with(fen, FenPolicy::Permissive),
+            ) {
+                (Ok(a), Ok(b)) => {
+                    assert_eq!(a.fen(), b.fen(), "permissive FEN mismatch for {fen}");
+                    assert_eq!(a.hash(), b.hash(), "permissive hash mismatch for {fen}");
+                }
+                (Err(a), Err(FenLoadError::Syntax(b))) => {
+                    assert_eq!(a.to_string(), b.to_string(), "syntax mismatch for {fen}");
+                }
+                (a, b) => panic!("permissive mismatch for {fen}: {a:?} vs {b:?}"),
+            }
+        }
+
+        assert!(matches!(
+            Board::from_fen_with("not a fen", FenPolicy::Strict),
+            Err(FenLoadError::Syntax(FenError::TooShort { .. }))
+        ));
+    }
+
+    #[test]
+    fn proof_db_workflow() {
+        // A proof-DB style ingestion path: the permissive parser still accepts
+        // artificial fixtures, while the strict loader rejects them unless the
+        // caller explicitly opts into a terminal policy.
+        let malformed = "4k3/8/8/8/8/8/8/3KK3 w - - 0 1";
+        assert!(Board::from_fen(malformed).is_ok());
+        match Board::from_fen_with(malformed, FenPolicy::Strict) {
+            Err(FenLoadError::InvalidPosition(errors)) => {
+                assert!(errors.contains(ValidationErrors::TOO_MANY_COMMONERS_WHITE));
+            }
+            other => panic!("expected InvalidPosition, got {other:?}"),
+        }
+
+        let artificial = "8/8/8/8/8/8/8/K7 w - - 0 1";
+        assert!(Board::from_fen(artificial).is_ok());
+        assert!(Board::from_fen_with(artificial, FenPolicy::AllowTerminal).is_ok());
+    }
+
+    #[test]
+    fn validation_errors_display_and_bits() {
+        let errors = ValidationErrors::EMPTY_BOARD
+            .union(ValidationErrors::MISSING_COMMONER_WHITE)
+            .union(ValidationErrors::PAWNS_ON_BACKRANK);
+        assert!(errors.contains(ValidationErrors::EMPTY_BOARD));
+        assert!(errors.contains(ValidationErrors::MISSING_COMMONER_WHITE));
+        assert!(!errors.contains(ValidationErrors::MISSING_COMMONER_BLACK));
+        assert_eq!(
+            errors.intersection(ValidationErrors::EMPTY_BOARD),
+            ValidationErrors::EMPTY_BOARD
+        );
+        assert_eq!(
+            errors.bits(),
+            ValidationErrors::EMPTY_BOARD.bits()
+                | ValidationErrors::MISSING_COMMONER_WHITE.bits()
+                | ValidationErrors::PAWNS_ON_BACKRANK.bits()
+        );
+        assert!(ValidationErrors::empty().is_empty());
+        assert!(!errors.is_empty());
+
+        let text = errors.to_string();
+        assert!(text.contains("EMPTY_BOARD"), "{text}");
+        assert!(text.contains("MISSING_COMMONER_WHITE"), "{text}");
+        assert!(text.contains("PAWNS_ON_BACKRANK"), "{text}");
+        assert!(!text.contains("MISSING_COMMONER_BLACK"), "{text}");
+    }
+
+    #[test]
     fn test_checkers() {
         // Position where white queen gives check to black commoner
         let fen = "4k3/8/8/8/8/8/8/4Q2K b - - 0 1";
         let board = Board::from_fen(fen).unwrap();
         let checkers = board.checkers();
         assert!(!checkers.is_empty(), "Expected checkers, got empty");
+    }
+
+    #[test]
+    fn test_touching_commoners_are_immune() {
+        // Exactly one commoner each, adjacent: neither can capture the other
+        // (the blast would destroy the capturer as well), so adjacency is not
+        // a check and the commoner is immune to *every* attacker.
+        let board = Board::from_fen("8/8/8/8/8/8/4k3/4K3 w - - 0 1").unwrap();
+        assert!(board.checkers().is_empty());
+
+        // The black rook attacks e1 along the first rank, but the white
+        // commoner touches the black one, so it cannot be captured.
+        let board = Board::from_fen("8/8/8/8/8/8/4k3/r3K3 w - - 0 1").unwrap();
+        assert!(board.checkers().is_empty());
+        let mut moves = MoveList::new();
+        crate::movegen::generate_legal(&board, &mut moves);
+        // d1, f1, d2, f2: every destination is still adjacent to the black
+        // commoner, so the rook's attack does not matter.
+        assert_eq!(moves.len(), 4);
+    }
+
+    #[test]
+    fn test_castling_through_square_adjacent_to_commoner() {
+        // White may castle through f1, which the black commoner on f2 attacks.
+        // Touching the enemy commoner makes the white commoner immune there.
+        let board = Board::from_fen("8/8/8/8/8/8/5k2/4K2R w K - 0 1").unwrap();
+        let mut moves = MoveList::new();
+        crate::movegen::generate_legal(&board, &mut moves);
+        assert!(moves.as_slice().iter().any(|&m| m.to_uci() == "e1g1"));
     }
 
     #[test]
@@ -1786,32 +3232,26 @@ mod tests {
     }
 
     #[test]
-    fn test_self_explosion_legal_with_surviving_commoner() {
-        // White commoners on d3 AND e1; white rook on d5, black pawn on d4.
-        // Rook takes pawn on d4 — blast zone (c3-e5) includes d3, destroying
-        // the commoner on d3, but the commoner on e1 survives.
-        // This is NOT self-explosion — only the LAST commoner being destroyed
-        // makes a move illegal.
-        let fen = "4k3/8/8/3R4/3p4/3K4/8/4K3 w - - 0 1";
-        let board = Board::from_fen(fen).unwrap();
+    fn test_legal_rejects_moves_on_terminal_board() {
+        // Only one commoner remains on the board, so the game is over even
+        // though the surviving side has pseudo-legal moves.
+        let board = Board::from_fen("8/8/8/8/8/8/8/K7 w - - 0 1").unwrap();
+        let mut state = StateInfo::new();
+        board.populate_state(&mut state);
         let mut moves = MoveList::new();
-        crate::movegen::generate_legal(&board, &mut moves);
-        // The capture should be LEGAL because e1 survives and is not under attack.
-        let has_rook_d4 = moves
-            .as_slice()
-            .iter()
-            .any(|&m| m.from_sq() == Square::D5 && m.to_sq() == Square::D4);
-        assert!(
-            has_rook_d4,
-            "rook capture on d4 should be legal (e1 commoner survives)"
-        );
+        crate::movegen::generate_pseudo_legal(&board, &mut moves);
+        assert!(!moves.is_empty());
+        for &m in moves.as_slice() {
+            assert!(!board.legal(m, &state), "move {m:?} must not be legal");
+        }
     }
 
     #[test]
-    fn test_self_explosion_illegal_last_commoner() {
-        // White commoner ONLY on d3; white rook on d5, black pawn on d4.
+    fn test_self_explosion_illegal() {
+        // White's only commoner is on d3; white rook on d5, black pawn on d4.
         // Rook takes pawn on d4 — blast zone includes d3, destroying the
-        // LAST (only) commoner → self-explosion, illegal.
+        // commoner → self-explosion, illegal. There is no "spare commoner"
+        // exception in atomic chess.
         let fen = "4k3/8/8/3R4/3p4/3K4/8/8 w - - 0 1";
         let board = Board::from_fen(fen).unwrap();
         let mut moves = MoveList::new();
@@ -1819,7 +3259,7 @@ mod tests {
         for &m in moves.as_slice() {
             assert!(
                 m.from_sq() != Square::D5 || m.to_sq() != Square::D4,
-                "rook capture on d4 should be illegal (last commoner destroyed)"
+                "rook capture on d4 should be illegal (commoner destroyed)"
             );
         }
     }
@@ -1975,18 +3415,272 @@ mod tests {
 
     #[test]
     fn test_outcome_draw_rule50() {
-        let fen = "4k3/8/8/8/8/8/8/4K3 w - - 100 1";
+        // Not commoner-only: the clock, not the material shortcut, decides.
+        let fen = "4k3/8/8/8/8/8/8/4K2R w - - 100 1";
         let board = Board::from_fen(fen).unwrap();
+        assert!(!board.is_material_draw());
         assert_eq!(board.outcome(), Some(Outcome::Draw));
+        assert!(board.is_terminal());
     }
 
     #[test]
     fn test_outcome_draw_stalemate() {
-        // Black commoner on h8 is boxed in by white pawns on g7 and h7;
-        // g8 is attacked by h7, and capturing either pawn destroys the last commoner.
+        // White's only commoner is enclosed by black knights and not attacked:
+        // every "escape" is a capture that self-destructs it. Stalemate.
+        let fen = "7k/8/8/8/8/8/nn6/Kn6 w - - 0 1";
+        let board = Board::from_fen(fen).unwrap();
+        assert!(board.checkers().is_empty());
+        assert_eq!(board.outcome(), Some(Outcome::Draw));
+    }
+
+    #[test]
+    fn test_outcome_loss_no_moves_in_check() {
+        // Black's commoner on h8 is attacked by the g7 pawn and has no legal
+        // moves (g8 is covered by h7, capturing either pawn self-destructs).
+        // Unlike a true stalemate, this is a loss for the side to move.
         let fen = "7k/6PP/8/8/8/8/8/7K b - - 0 1";
         let board = Board::from_fen(fen).unwrap();
-        assert_eq!(board.outcome(), Some(Outcome::Draw));
+        assert!(!board.checkers().is_empty());
+        assert_eq!(board.outcome(), Some(Outcome::Loss));
+    }
+
+    #[test]
+    fn terminal_precedence_table() {
+        // One table pins every feedback FEN and the full precedence order.
+        // (fen, outcome, legal moves, checkers, is_terminal)
+        let cases: &[(&str, Option<Outcome>, usize, u32, bool)] = &[
+            // Touching commoners: no check, ordinary moves remain. This is
+            // also K vs K, so the WDL shortcut applies; the game is not over
+            // before the 50-move rule.
+            (
+                "8/8/8/8/8/8/4k3/4K3 w - - 0 1",
+                Some(Outcome::Draw),
+                4,
+                0,
+                false,
+            ),
+            // Checkmate, mate must outrank the material/clock branches.
+            (
+                "7K/8/8/8/8/8/1Q6/k7 b - - 0 1",
+                Some(Outcome::Loss),
+                0,
+                1,
+                true,
+            ),
+            // Checkmate on the clock's last ply is still a loss.
+            (
+                "7K/8/8/8/8/8/1Q6/k7 b - - 100 1",
+                Some(Outcome::Loss),
+                0,
+                1,
+                true,
+            ),
+            // Opponent already extinct: win and terminal, no legal moves.
+            ("8/8/8/8/8/8/8/K7 w - - 0 1", Some(Outcome::Win), 0, 0, true),
+            // K vs K is a WDL draw, but the game has not ended yet.
+            (
+                "4k3/8/8/8/8/8/8/4K3 w - - 0 1",
+                Some(Outcome::Draw),
+                5,
+                0,
+                false,
+            ),
+            // K vs K on the clock is both a WDL draw and literally over.
+            (
+                "4k3/8/8/8/8/8/8/4K3 w - - 100 1",
+                Some(Outcome::Draw),
+                5,
+                0,
+                true,
+            ),
+            // Artificial both-extinct board: own extinction wins the tie.
+            ("8/8/8/8/8/8/8/8 w - - 0 1", Some(Outcome::Loss), 0, 0, true),
+        ];
+
+        for &(fen, expected_outcome, legal, checkers, terminal) in cases {
+            let board = Board::from_fen(fen).expect("precedence FEN must parse");
+            let mut moves = MoveList::new();
+            crate::movegen::generate_legal(&board, &mut moves);
+
+            assert_eq!(board.outcome(), expected_outcome, "outcome for {fen}");
+            assert_eq!(moves.len(), legal, "legal move count for {fen}");
+            assert_eq!(
+                board.checkers().count(),
+                checkers,
+                "checker count for {fen}"
+            );
+            assert_eq!(
+                crate::movegen::has_legal_move(&board),
+                legal != 0,
+                "has_legal_move for {fen}"
+            );
+            assert_eq!(board.is_terminal(), terminal, "is_terminal for {fen}");
+        }
+    }
+
+    fn assert_outcome_equivalence(board: &Board) {
+        let mut state = StateInfo::new();
+        board.populate_state(&mut state);
+
+        let expected = board.outcome();
+        assert_eq!(
+            expected,
+            board.outcome_with_state(&state),
+            "outcome_with_state mismatch at {}",
+            board.fen()
+        );
+
+        let moves_exist = crate::movegen::has_legal_move_with_state(board, &state);
+        assert_eq!(
+            expected,
+            board.outcome_with(&state, moves_exist),
+            "outcome_with mismatch at {}",
+            board.fen()
+        );
+    }
+
+    fn check_outcome_and_playout(
+        board: &mut Board,
+        rng: &mut Xorshift2,
+        depth: u32,
+        visited: &mut u64,
+    ) {
+        *visited += 1;
+        assert_outcome_equivalence(board);
+
+        let mut state = StateInfo::new();
+        board.populate_state(&mut state);
+
+        let mut list = MoveList::new();
+        crate::movegen::generate_legal_with_state(board, &state, &mut list);
+        if depth == 0 || list.is_empty() {
+            return;
+        }
+
+        let idx = (rng.next() % list.len() as u64) as usize;
+        let m = list[idx];
+        board.do_move(m, &mut state);
+        check_outcome_and_playout(board, rng, depth - 1, visited);
+        board.undo_move(m, &state);
+    }
+
+    #[test]
+    fn outcome_state_aware_equivalence() {
+        const FIXTURES: &[&str] = &[
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1",
+            "3k4/8/8/8/8/8/8/3QK3 b - - 0 1",
+            "7k/6PP/8/8/8/8/8/7K b - - 0 1",
+            "7k/8/8/8/8/8/nn6/Kn6 w - - 0 1",
+            "4k3/8/8/8/8/8/8/4K3 w - - 0 1",
+            "4k3/8/8/8/8/8/8/4K2R w - - 100 1",
+            "8/8/8/8/8/8/8/8 w - - 0 1",
+        ];
+        for fen in FIXTURES {
+            let board = Board::from_fen(fen).expect("fixture FEN must parse");
+            assert_outcome_equivalence(&board);
+        }
+
+        const START_FENS: &[&str] = &[
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2",
+            "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1",
+            "3k4/8/8/8/8/8/8/3QK3 b - - 0 1",
+        ];
+
+        let mut visited = 0u64;
+        for (i, fen) in START_FENS.iter().enumerate() {
+            for seed in 0..8u64 {
+                let mut board = Board::from_fen(fen).expect("start FEN must parse");
+                let mut rng = Xorshift2::new(0xA076_1D64_78BD_642F ^ ((i as u64) << 32) ^ seed);
+                check_outcome_and_playout(&mut board, &mut rng, 200, &mut visited);
+            }
+        }
+        assert!(
+            visited > 2_000,
+            "expected a few thousand positions, got {visited}"
+        );
+    }
+
+    #[test]
+    fn outcome_with_known_move() {
+        // Not in check: a caller-supplied `false` is the stalemate branch.
+        let board =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+        let mut state = StateInfo::new();
+        board.populate_state(&mut state);
+        assert!(crate::movegen::has_legal_move_with_state(&board, &state));
+        assert_eq!(board.outcome_with(&state, true), None);
+        assert_eq!(board.outcome_with(&state, false), Some(Outcome::Draw));
+
+        // In check with escapes: a caller-supplied `false` is the mate branch.
+        let board = Board::from_fen("3k4/8/8/8/8/8/8/3QK3 b - - 0 1").unwrap();
+        let mut state = StateInfo::new();
+        board.populate_state(&mut state);
+        assert!(!state.checkers.is_empty());
+        assert!(crate::movegen::has_legal_move_with_state(&board, &state));
+        assert_eq!(board.outcome_with(&state, true), None);
+        assert_eq!(board.outcome_with(&state, false), Some(Outcome::Loss));
+    }
+
+    #[test]
+    fn material_draw_is_commoner_only() {
+        for fen in [
+            "4k3/8/8/8/8/8/8/4K3 w - - 0 1",
+            // Touching commoners are still bare K vs K.
+            "8/8/8/8/8/8/4k3/4K3 w - - 0 1",
+        ] {
+            let board = Board::from_fen(fen).unwrap();
+            assert!(board.is_material_draw(), "{fen}");
+            assert_eq!(board.outcome(), Some(Outcome::Draw), "{fen}");
+        }
+
+        // Touching commoners are *not* automatically a draw: the shortcut is
+        // bare K vs K, not adjacency. Here a black rook remains, so the
+        // position is WDL-undecided even though the commoners touch.
+        let touching_with_rook = Board::from_fen("8/8/8/8/8/8/4k3/r3K3 w - - 0 1").unwrap();
+        assert!(!touching_with_rook.is_material_draw());
+        assert_eq!(touching_with_rook.outcome(), None);
+        assert!(!touching_with_rook.is_terminal());
+
+        // There is deliberately no insufficient-material table: every one of
+        // these positions is an immediate win by capturing the enemy commoner,
+        // so `outcome` must stay `None` (WDL undecided) before the capture.
+        let counterexamples: &[(&str, Move)] = &[
+            (
+                "8/8/8/8/8/3B4/4k3/K7 w - - 0 1",
+                Move::make_move(Square::D3, Square::E2),
+            ),
+            (
+                "8/8/8/8/3N4/8/4k3/K7 w - - 0 1",
+                Move::make_move(Square::D4, Square::E2),
+            ),
+            (
+                "8/8/8/8/8/8/4k3/K3R3 w - - 0 1",
+                Move::make_move(Square::E1, Square::E2),
+            ),
+        ];
+
+        for &(fen, capture) in counterexamples {
+            let mut board = Board::from_fen(fen).expect("counterexample FEN must parse");
+            assert!(!board.is_material_draw(), "{fen}");
+            assert_eq!(board.outcome(), None, "{fen}");
+
+            let mut state = StateInfo::new();
+            board.populate_state(&mut state);
+            assert!(board.legal(capture, &state), "{fen}: {capture:?}");
+
+            board.do_move(capture, &mut state);
+            assert!(board.commoners(Color::Black).is_empty(), "{fen}");
+            assert_eq!(board.outcome(), Some(Outcome::Loss), "{fen}");
+
+            let mut moves = MoveList::new();
+            crate::movegen::generate_legal(&board, &mut moves);
+            assert!(moves.is_empty(), "{fen}");
+        }
     }
 
     #[test]
@@ -1999,6 +3693,91 @@ mod tests {
         assert!(!board.is_capture(non_capture));
     }
 
+    #[test]
+    fn legal_ep_square_detects_legal_capture() {
+        let board = Board::from_fen("8/8/8/PP6/kP1Pp3/PN2P3/8/6K1 b - d3 0 1").unwrap();
+        assert_eq!(board.ep_square(), Some(Square::D3));
+        assert_eq!(board.legal_ep_square(), Some(Square::D3));
+        assert!(board.is_legal(Move::make_enpassant(Square::E4, Square::D3)));
+
+        // A double push records an ep target even when no legal capture exists.
+        let board =
+            Board::from_fen("rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2")
+                .unwrap();
+        assert_eq!(board.ep_square(), Some(Square::D6));
+        assert_eq!(board.legal_ep_square(), None);
+
+        let board = Board::from_fen("8/8/8/8/8/8/8/4K2k w - - 0 1").unwrap();
+        assert_eq!(board.ep_square(), None);
+        assert_eq!(board.legal_ep_square(), None);
+    }
+
+    #[test]
+    fn ep_transposition_hash() {
+        let ep = Board::from_fen("r1bqkbnr/pppppppp/2n5/8/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq e3 0 3")
+            .unwrap();
+        let plain =
+            Board::from_fen("r1bqkbnr/pppppppp/2n5/8/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 0 3")
+                .unwrap();
+
+        for idx in 0..64 {
+            let sq = Square::from_u8(idx);
+            assert_eq!(
+                ep.piece_on(sq),
+                plain.piece_on(sq),
+                "placement differs at {sq:?}"
+            );
+        }
+        assert_eq!(ep.side_to_move(), plain.side_to_move());
+        assert_eq!(ep.castling_rights(), plain.castling_rights());
+
+        assert_ne!(ep.hash(), plain.hash());
+        assert_ne!(ep.fen(), plain.fen());
+        assert!(ep.fen().ends_with("b KQkq e3 0 3"));
+
+        assert_eq!(ep.legal_ep_square(), None);
+        assert_eq!(
+            ep.hash_with(EnPassantMode::Legal),
+            plain.hash_with(EnPassantMode::Legal)
+        );
+        assert_eq!(
+            ep.fen_with(EnPassantMode::Legal),
+            plain.fen_with(EnPassantMode::Legal)
+        );
+        assert!(ep.fen_with(EnPassantMode::Legal).ends_with("b KQkq - 0 3"));
+    }
+
+    #[test]
+    fn legal_ep_square_respects_pins_and_blast() {
+        // e5xd6 would open the e-file from the rook on e8 to the commoner on
+        // e1. The blast at d6 does not reach e8, so the pinned pawn cannot
+        // capture even though the target and victim pawn are present.
+        let pinned = Board::from_fen("4r2k/8/8/3pP3/8/8/8/4K3 w - d6 0 2").unwrap();
+        // e5xd6 blasts e7, which holds the mover's own commoner.
+        let self_blast = Board::from_fen("7k/4K3/8/3pP3/8/8/8/8 w - d6 0 2").unwrap();
+
+        for board in [pinned, self_blast] {
+            assert_eq!(board.ep_square(), Some(Square::D6));
+            assert_eq!(board.legal_ep_square(), None);
+            assert!(!board.is_legal(Move::make_enpassant(Square::E5, Square::D6)));
+        }
+    }
+
+    #[test]
+    fn ep_default_behavior_unchanged() {
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2",
+            "r1bqkbnr/pppppppp/2n5/8/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq e3 0 3",
+            "8/8/8/PP6/kP1Pp3/PN2P3/8/6K1 b - d3 0 1",
+        ];
+        for fen in fens {
+            let board = Board::from_fen(fen).unwrap();
+            assert_eq!(board.hash(), board.hash_with(EnPassantMode::Always));
+            assert_eq!(board.fen(), board.fen_with(EnPassantMode::Always));
+        }
+    }
+
     // --- hash_after / rule50_after equivalence tests ---
 
     /// Assert the `hash_after`/`rule50_after` contract for a single move:
@@ -2006,6 +3785,15 @@ mod tests {
     fn assert_after_equivalence(board: &Board, m: Move) {
         let expected_hash = board.hash_after(m);
         let expected_rule50 = board.rule50_after(m);
+
+        // The combined accessor must agree with both separate functions.
+        assert_eq!(
+            board.hash_and_rule50_after(m),
+            (expected_hash, expected_rule50),
+            "hash_and_rule50_after mismatch for {} at {}",
+            m.to_uci(),
+            board.fen()
+        );
 
         let mut played = board.clone();
         let mut state = StateInfo::new();
@@ -2029,6 +3817,23 @@ mod tests {
         assert_eq!(board.fen(), board.fen()); // sanity; `board` is `&self`
     }
 
+    /// Assert the `hash_after_with` contract for both en-passant policies.
+    fn assert_after_with_equivalence(board: &Board, m: Move) {
+        for mode in [EnPassantMode::Always, EnPassantMode::Legal] {
+            let expected = board.hash_after_with(m, mode);
+            let mut played = board.clone();
+            let mut state = StateInfo::new();
+            played.do_move(m, &mut state);
+            assert_eq!(
+                expected,
+                played.hash_with(mode),
+                "hash_after_with({mode:?}) mismatch for {} at {}",
+                m.to_uci(),
+                board.fen()
+            );
+        }
+    }
+
     /// Deterministic xorshift64 PRNG (mirrors the movegen harness).
     struct Xorshift2(u64);
 
@@ -2047,6 +3852,96 @@ mod tests {
         }
     }
 
+    /// Assert that `blast_casualties` reproduces the removals `do_move`
+    /// records for a single move.
+    fn assert_blast_casualties_equivalence(board: &Board, m: Move) {
+        let expected = board.blast_casualties(m);
+
+        let mut played = board.clone();
+        let mut state = StateInfo::new();
+        played.do_move(m, &mut state);
+
+        let mut white = Bitboard::EMPTY;
+        let mut black = Bitboard::EMPTY;
+        // `do_move` records blast removals in `captured`, but the ordinary
+        // capture victim lives in `cap_sq`/`cap_piece`.
+        let removed = state
+            .captured
+            .iter()
+            .take(state.captured_count as usize)
+            .copied()
+            .chain(state.cap_sq.map(|sq| (sq, state.cap_piece)));
+        for (sq, piece) in removed {
+            let sq_bb = Bitboard::square_bb(sq);
+            match piece.color().expect("captured pieces have a color") {
+                Color::White => white = white | sq_bb,
+                Color::Black => black = black | sq_bb,
+            }
+        }
+
+        assert_eq!(
+            expected.white,
+            white,
+            "blast white casualties mismatch for {} at {}",
+            m.to_uci(),
+            board.fen()
+        );
+        assert_eq!(
+            expected.black,
+            black,
+            "blast black casualties mismatch for {} at {}",
+            m.to_uci(),
+            board.fen()
+        );
+
+        let ep_victim = if m.move_type() == MoveType::EnPassant {
+            let to = m.to_sq();
+            Some(match board.side_to_move() {
+                Color::White => Square::from_index(to as i8 - 8),
+                Color::Black => Square::from_index(to as i8 + 8),
+            })
+        } else {
+            None
+        };
+        assert_eq!(
+            expected.en_passant_victim,
+            ep_victim,
+            "blast en-passant victim mismatch for {} at {}",
+            m.to_uci(),
+            board.fen()
+        );
+        assert_eq!(expected.is_empty(), expected.all().is_empty());
+    }
+
+    fn check_blast_and_playout(
+        board: &mut Board,
+        rng: &mut Xorshift2,
+        depth: u32,
+        visited: &mut u64,
+    ) {
+        *visited += 1;
+
+        let mut pseudo = MoveList::new();
+        crate::movegen::generate_pseudo_legal(board, &mut pseudo);
+        for &m in pseudo.as_slice() {
+            assert_blast_casualties_equivalence(board, m);
+        }
+
+        let mut state = StateInfo::new();
+        board.populate_state(&mut state);
+        let mut list = MoveList::new();
+        crate::movegen::generate_legal_with_state(board, &state, &mut list);
+        if depth == 0 || list.is_empty() {
+            return;
+        }
+
+        let idx = (rng.next() % list.len() as u64) as usize;
+        let m = list[idx];
+        board.do_move(m, &mut state);
+        check_blast_and_playout(board, rng, depth - 1, visited);
+        board.undo_move(m, &state);
+    }
+
     /// At every visited position, check `hash_after`/`rule50_after` for every
     /// pseudo-legal move against a cloned board's `do_move`, then recurse
     /// along a random legal move (same walk as the movegen harness).
@@ -2062,6 +3957,7 @@ mod tests {
         crate::movegen::generate_pseudo_legal(board, &mut pseudo);
         for &m in pseudo.as_slice() {
             assert_after_equivalence(board, m);
+            assert_after_with_equivalence(board, m);
         }
 
         let mut state = StateInfo::new();
@@ -2079,6 +3975,33 @@ mod tests {
         board.do_move(m, &mut state);
         check_after_and_playout(board, rng, depth - 1, visited);
         board.undo_move(m, &state);
+    }
+
+    /// Dedicated check for the combined child-key accessor: over seeded random
+    /// playouts it must equal `(hash_after, rule50_after)` for every
+    /// pseudo-legal move (the helper also compares that pair with a cloned
+    /// board's `do_move` result).
+    #[test]
+    fn hash_and_rule50_after_matches_separate() {
+        const START_FENS: &[&str] = &[
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1",
+        ];
+
+        let mut visited = 0u64;
+        for (i, fen) in START_FENS.iter().enumerate() {
+            for seed in 0..8u64 {
+                let mut board = Board::from_fen(fen).expect("start FEN must parse");
+                let mut rng = Xorshift2::new(0xB502_6F5A_A2C3_5C01 ^ ((i as u64) << 32) ^ seed);
+                check_after_and_playout(&mut board, &mut rng, 100, &mut visited);
+            }
+        }
+        assert!(
+            visited > 500,
+            "expected several hundred positions, got {visited}"
+        );
     }
 
     #[test]
@@ -2194,6 +4117,159 @@ mod tests {
             }
             let _ = name;
         }
+    }
+
+    #[test]
+    fn blast_casualties_matches_do_move() {
+        const START_FENS: &[&str] = &[
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2",
+            "4k3/4n3/8/2Pp4/8/8/8/4K3 w - d6 0 2",
+            "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1",
+            "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+        ];
+
+        let mut visited = 0u64;
+        for (i, fen) in START_FENS.iter().enumerate() {
+            for seed in 0..8u64 {
+                let mut board = Board::from_fen(fen).expect("start FEN must parse");
+                let mut rng = Xorshift2::new(0xC2B2_AE3D_27D4_EB4F ^ ((i as u64) << 32) ^ seed);
+                check_blast_and_playout(&mut board, &mut rng, 200, &mut visited);
+            }
+        }
+        assert!(
+            visited > 2_000,
+            "expected a few thousand positions, got {visited}"
+        );
+    }
+
+    #[test]
+    fn blast_zone_geometry() {
+        let center = Board::blast_zone(Square::D4);
+        assert_eq!(center.count(), 9);
+        assert!(center & Bitboard::square_bb(Square::D4) != Bitboard::EMPTY);
+        for sq in [
+            Square::C3,
+            Square::C4,
+            Square::C5,
+            Square::D3,
+            Square::D5,
+            Square::E3,
+            Square::E4,
+            Square::E5,
+        ] {
+            assert!(
+                center & Bitboard::square_bb(sq) != Bitboard::EMPTY,
+                "missing {sq:?}"
+            );
+        }
+
+        assert_eq!(Board::blast_zone(Square::A1).count(), 4);
+        assert_eq!(Board::blast_zone(Square::H8).count(), 4);
+        assert!(Board::blast_zone(Square::A1) & Bitboard::square_bb(Square::A1) != Bitboard::EMPTY);
+    }
+
+    #[test]
+    fn blast_casualties_normal_capture() {
+        // Qd4xd5: the black knight on d5 is captured, the black knight on e6
+        // and the white knight on c4 are in the ring, and the queen dies at
+        // ground zero. The origin d4 is not part of the removal set.
+        let board = Board::from_fen("4k3/8/4n3/3n4/2NQ4/8/8/4K3 w - - 0 1").unwrap();
+        let m = Move::make_move(Square::D4, Square::D5);
+        let casualties = board.blast_casualties(m);
+
+        let whites = Bitboard::square_bb(Square::C4) | Bitboard::square_bb(Square::D5);
+        let blacks = Bitboard::square_bb(Square::D5) | Bitboard::square_bb(Square::E6);
+        assert_eq!(casualties.white, whites);
+        assert_eq!(casualties.black, blacks);
+        assert_eq!(casualties.all(), whites | blacks);
+        assert_eq!(casualties.en_passant_victim, None);
+        assert!(!casualties.is_empty());
+    }
+
+    #[test]
+    fn blast_casualties_pawn_immunity() {
+        // exd5: the black pawn on d5 is the victim and the white pawn at
+        // ground zero dies. The white pawn on c5 and the black pawn on e5 are
+        // in the ring but immune. Nothing else is removed.
+        let board = Board::from_fen("4k3/8/8/2Ppp3/4P3/8/8/4K3 w - - 0 1").unwrap();
+        let m = Move::make_move(Square::E4, Square::D5);
+        let casualties = board.blast_casualties(m);
+
+        assert_eq!(casualties.white, Bitboard::square_bb(Square::D5));
+        assert_eq!(casualties.black, Bitboard::square_bb(Square::D5));
+        assert_eq!(casualties.en_passant_victim, None);
+
+        // The ring pawns survive on the actual board too.
+        let mut played = board.clone();
+        let mut state = StateInfo::new();
+        played.do_move(m, &mut state);
+        assert_eq!(
+            played.piece_on(Square::C5),
+            make_piece(Color::White, PieceType::Pawn)
+        );
+        assert_eq!(
+            played.piece_on(Square::E5),
+            make_piece(Color::Black, PieceType::Pawn)
+        );
+    }
+
+    #[test]
+    fn blast_casualties_en_passant() {
+        // cxd6 e.p.: the victim is the black pawn on d5 behind the target; the
+        // black knight on e7 is in the ring; the capturing pawn dies at d6.
+        let board = Board::from_fen("4k3/4n3/8/2Pp4/8/8/8/4K3 w - d6 0 2").unwrap();
+        let m = Move::make_enpassant(Square::C5, Square::D6);
+        let casualties = board.blast_casualties(m);
+
+        let blacks = Bitboard::square_bb(Square::D5) | Bitboard::square_bb(Square::E7);
+        assert_eq!(casualties.white, Bitboard::square_bb(Square::D6));
+        assert_eq!(casualties.black, blacks);
+        assert_eq!(casualties.en_passant_victim, Some(Square::D5));
+        assert_eq!(casualties.all(), blacks | Bitboard::square_bb(Square::D6));
+    }
+
+    #[test]
+    fn blast_casualties_quiet_castle_promotion() {
+        let start = Board::new();
+        assert!(
+            start
+                .blast_casualties(Move::make_move(Square::E2, Square::E4))
+                .is_empty()
+        );
+
+        let castling = Board::from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1").unwrap();
+        assert!(
+            castling
+                .blast_casualties(Move::make_castling(Square::E1, Square::H1))
+                .is_empty()
+        );
+
+        let promotion = Board::from_fen("k7/4P3/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        assert!(
+            promotion
+                .blast_casualties(Move::make_promotion(
+                    Square::E7,
+                    Square::E8,
+                    PieceType::Queen
+                ))
+                .is_empty()
+        );
+
+        // A capture promotion blasts: b7xa8=Q removes the knight on a8 and
+        // the promoted queen at ground zero, while the white pawn on a7 is
+        // immune in the ring.
+        let capture_promotion = Board::from_fen("n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1").unwrap();
+        let casualties = capture_promotion.blast_casualties(Move::make_promotion(
+            Square::B7,
+            Square::A8,
+            PieceType::Queen,
+        ));
+        assert_eq!(casualties.white, Bitboard::square_bb(Square::A8));
+        assert_eq!(casualties.black, Bitboard::square_bb(Square::A8));
+        assert_eq!(casualties.en_passant_victim, None);
+        assert!(!casualties.is_empty());
     }
 
     #[test]
@@ -2398,5 +4474,497 @@ mod tests {
             without_commoner > 0,
             "corpus never exercises the no-commoner guard"
         );
+    }
+
+    #[test]
+    fn attackers_to_color_matches_intersection() {
+        for fen in TRIVIAL_LEGALITY_CORPUS {
+            let board = Board::from_fen(fen).expect("corpus FEN must parse");
+            let occupied = board.occupied();
+            for idx in 0..64u8 {
+                let sq = Square::from_u8(idx);
+                for color in [Color::White, Color::Black] {
+                    assert_eq!(
+                        board.attackers_to_color(sq, color, occupied),
+                        board.attackers_to(sq, occupied) & board.pieces_color(color),
+                        "attackers_to_color mismatch at {fen}, {sq:?}, {color:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn is_zeroing_matches_rule50_after() {
+        for fen in TRIVIAL_LEGALITY_CORPUS {
+            let board = Board::from_fen(fen).expect("corpus FEN must parse");
+            let mut moves = MoveList::new();
+            crate::movegen::generate_pseudo_legal(&board, &mut moves);
+            for &m in moves.as_slice() {
+                assert_eq!(
+                    board.is_zeroing(m),
+                    board.rule50_after(m) == 0,
+                    "is_zeroing mismatch for {} at {fen}",
+                    m.to_uci()
+                );
+            }
+        }
+
+        let start = Board::new();
+        assert!(!start.is_zeroing(Move::NONE));
+        assert!(!start.is_zeroing(Move::make_move(Square::E4, Square::E5)));
+        assert!(!start.is_zeroing(Move::make_castling(Square::E1, Square::H1)));
+    }
+
+    #[test]
+    fn is_double_push_matches_move() {
+        let start = Board::new();
+        assert!(start.is_double_push(Move::make_move(Square::E2, Square::E4)));
+        assert!(!start.is_double_push(Move::make_move(Square::E2, Square::E3)));
+
+        let black =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1").unwrap();
+        assert!(black.is_double_push(Move::make_move(Square::E7, Square::E5)));
+
+        // A rook sliding two ranks is not a double pawn push.
+        let rook = Board::from_fen("4k3/8/8/8/8/8/8/R3K3 w - - 0 1").unwrap();
+        assert!(!rook.is_double_push(Move::make_move(Square::A1, Square::A3)));
+
+        // Promotions are never double pushes.
+        let promotion = Board::from_fen("k7/4P3/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        assert!(!promotion.is_double_push(Move::make_promotion(
+            Square::E7,
+            Square::E8,
+            PieceType::Queen
+        )));
+
+        for fen in TRIVIAL_LEGALITY_CORPUS {
+            let board = Board::from_fen(fen).expect("corpus FEN must parse");
+            let mut moves = MoveList::new();
+            crate::movegen::generate_pseudo_legal(&board, &mut moves);
+            for &m in moves.as_slice() {
+                let from = m.from_sq();
+                let to = m.to_sq();
+                let piece = board.piece_on(from);
+                let expected = m.move_type() == MoveType::Normal
+                    && piece.color() == Some(board.side_to_move())
+                    && piece.type_of() == Some(PieceType::Pawn)
+                    && file_of(from) == file_of(to)
+                    && (to as i8 - from as i8).abs() == 16
+                    && board.empty(Square::from_index((from as i8 + to as i8) / 2));
+                assert_eq!(
+                    board.is_double_push(m),
+                    expected,
+                    "is_double_push mismatch for {} at {fen}",
+                    m.to_uci()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn corpus_legal_move_count_below_max_moves() {
+        let mut max_seen = 0;
+        let mut moves = MoveList::new();
+        for fen in TRIVIAL_LEGALITY_CORPUS {
+            let board = Board::from_fen(fen).expect("corpus FEN must parse");
+            moves.clear();
+            crate::movegen::generate_legal(&board, &mut moves);
+            max_seen = max_seen.max(moves.len());
+        }
+        assert!(
+            max_seen < MAX_MOVES,
+            "corpus maximum {max_seen} reached MAX_MOVES"
+        );
+    }
+
+    #[test]
+    fn observed_maximum_legal_move_count() {
+        // Largest count found by scanning all 41 perft positions through depth
+        // 4 (14,003,267 positions). This pins the value quoted by the
+        // `MAX_MOVES` documentation.
+        let board = Board::from_fen("8/8/5q2/3N3p/1r5P/4q3/6Kk/8 b - - 25 63")
+            .expect("largest-count FEN must parse");
+        let mut moves = MoveList::new();
+        crate::movegen::generate_legal(&board, &mut moves);
+        assert_eq!(moves.len(), 68);
+        assert!(moves.len() < MAX_MOVES);
+    }
+
+    // --- single-move predicates and UCI lookup ---
+
+    /// Assert both single-move predicates against the generated lists for every
+    /// pseudo-legal move of `board`.
+    fn assert_move_predicates(board: &Board) {
+        let mut state = StateInfo::new();
+        board.populate_state(&mut state);
+
+        let mut legal = MoveList::new();
+        crate::movegen::generate_legal_with_state(board, &state, &mut legal);
+
+        let mut pseudo = MoveList::new();
+        crate::movegen::generate_pseudo_legal(board, &mut pseudo);
+
+        for &m in pseudo.as_slice() {
+            assert!(
+                board.is_pseudo_legal(m),
+                "pseudo generator emitted {} which the predicate rejects at {}",
+                m.to_uci(),
+                board.fen()
+            );
+            let expected = legal.as_slice().contains(&m);
+            assert_eq!(
+                board.is_legal_with_state(m, &state),
+                expected,
+                "is_legal_with_state mismatch for {} at {}",
+                m.to_uci(),
+                board.fen()
+            );
+            assert_eq!(
+                board.is_legal(m),
+                expected,
+                "is_legal mismatch for {} at {}",
+                m.to_uci(),
+                board.fen()
+            );
+        }
+    }
+
+    fn check_move_predicate_playout(
+        board: &mut Board,
+        rng: &mut Xorshift2,
+        depth: u32,
+        visited: &mut u64,
+    ) {
+        *visited += 1;
+        assert_move_predicates(board);
+
+        let mut state = StateInfo::new();
+        board.populate_state(&mut state);
+        let mut list = MoveList::new();
+        crate::movegen::generate_legal_with_state(board, &state, &mut list);
+        if depth == 0 || list.is_empty() {
+            return;
+        }
+
+        let idx = (rng.next() % list.len() as u64) as usize;
+        let m = list[idx];
+        board.do_move(m, &mut state);
+        check_move_predicate_playout(board, rng, depth - 1, visited);
+        board.undo_move(m, &state);
+    }
+
+    const PREDICATE_START_FENS: &[&str] = &[
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2",
+        "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1",
+        "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+    ];
+
+    #[test]
+    fn is_pseudo_legal_matches_generator() {
+        for fen in TRIVIAL_LEGALITY_CORPUS {
+            let board = Board::from_fen(fen).expect("corpus FEN must parse");
+            assert_move_predicates(&board);
+        }
+
+        let mut visited = 0u64;
+        for (i, fen) in PREDICATE_START_FENS.iter().enumerate() {
+            for seed in 0..4u64 {
+                let mut board = Board::from_fen(fen).expect("start FEN must parse");
+                let mut rng = Xorshift2::new(0xD1B5_4A32_D192_ED03 ^ ((i as u64) << 32) ^ seed);
+                check_move_predicate_playout(&mut board, &mut rng, 80, &mut visited);
+            }
+        }
+        assert!(visited > 500, "only visited {visited} positions");
+    }
+
+    #[test]
+    fn is_pseudo_legal_rejects_malformed_moves() {
+        let start = Board::new();
+        let malformed = [
+            Move::NONE,
+            Move::make_move(Square::E2, Square::E2),
+            Move::make_move(Square::E7, Square::E5),
+            Move::make_move(Square::E4, Square::E5),
+            Move::make_move(Square::E2, Square::E5),
+            Move::make_move(Square::E2, Square::D3),
+            Move::make_move(Square::G1, Square::E2),
+            Move::make_move(Square::A1, Square::A3),
+            Move::make_promotion(Square::E2, Square::E4, PieceType::Queen),
+            Move::make_promotion(Square::A2, Square::A4, PieceType::Queen),
+            Move::make_enpassant(Square::E2, Square::E4),
+            // Castling is blocked in the start position.
+            Move::make_castling(Square::E1, Square::H1),
+        ];
+        for m in malformed {
+            assert!(
+                !start.is_pseudo_legal(m),
+                "start position accepted {}",
+                m.to_uci()
+            );
+        }
+
+        // Rights missing: the internal castling encoding is not pseudo-legal.
+        let no_rights = Board::from_fen("r3k2r/8/8/8/8/8/8/R3K2R w - - 0 1").unwrap();
+        assert!(!no_rights.is_pseudo_legal(Move::make_castling(Square::E1, Square::H1)));
+        assert!(!no_rights.is_pseudo_legal(Move::make_castling(Square::E1, Square::A1)));
+
+        // Rights present but the path is occupied.
+        let blocked = Board::from_fen("r3k2r/8/8/8/8/8/8/R3KB1R w KQkq - 0 1").unwrap();
+        assert!(!blocked.is_pseudo_legal(Move::make_castling(Square::E1, Square::H1)));
+
+        // Castling destinations use the internal rook-square encoding.
+        let castling = Board::from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1").unwrap();
+        assert!(castling.is_pseudo_legal(Move::make_castling(Square::E1, Square::H1)));
+        assert!(castling.is_pseudo_legal(Move::make_castling(Square::E1, Square::A1)));
+        assert!(!castling.is_pseudo_legal(Move::make_castling(Square::E1, Square::G1)));
+
+        // En passant must target the actual ep square and have a captured pawn.
+        let ep = Board::from_fen("4k3/8/8/2Pp4/8/8/8/4K3 w - d6 0 2").unwrap();
+        assert!(ep.is_pseudo_legal(Move::make_enpassant(Square::C5, Square::D6)));
+        assert!(!ep.is_pseudo_legal(Move::make_enpassant(Square::C5, Square::E6)));
+        assert!(!ep.is_pseudo_legal(Move::make_enpassant(Square::C5, Square::D5)));
+
+        // A normal move may not replace a promotion, and promotions need the
+        // correct origin and destination ranks.
+        let promotion = Board::from_fen("k7/4P3/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        assert!(!promotion.is_pseudo_legal(Move::make_move(Square::E7, Square::E8)));
+        assert!(promotion.is_pseudo_legal(Move::make_promotion(
+            Square::E7,
+            Square::E8,
+            PieceType::Queen
+        )));
+        assert!(!promotion.is_pseudo_legal(Move::make_promotion(
+            Square::E6,
+            Square::E7,
+            PieceType::Queen
+        )));
+    }
+
+    #[test]
+    fn is_legal_matches_generated_list() {
+        for fen in TRIVIAL_LEGALITY_CORPUS {
+            let board = Board::from_fen(fen).expect("corpus FEN must parse");
+            assert_move_predicates(&board);
+        }
+
+        let mut visited = 0u64;
+        for (i, fen) in PREDICATE_START_FENS.iter().enumerate() {
+            for seed in 0..4u64 {
+                let mut board = Board::from_fen(fen).expect("start FEN must parse");
+                let mut rng = Xorshift2::new(0xA076_1D64_78BD_642F ^ ((i as u64) << 32) ^ seed);
+                check_move_predicate_playout(&mut board, &mut rng, 80, &mut visited);
+            }
+        }
+        assert!(visited > 500, "only visited {visited} positions");
+    }
+
+    #[test]
+    fn is_legal_classifies_all_wire_codes() {
+        for fen in [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+            "4k3/8/8/2Pp4/8/8/8/4K3 w - d6 0 2",
+            "k7/4P3/8/8/8/8/8/4K3 w - - 0 1",
+            "8/8/8/8/8/8/8/k7 w - - 0 1",
+        ] {
+            let board = Board::from_fen(fen).expect("fixture FEN must parse");
+            let mut state = StateInfo::new();
+            board.populate_state(&mut state);
+            let mut legal = MoveList::new();
+            crate::movegen::generate_legal_with_state(&board, &state, &mut legal);
+
+            for bits in 0..=u16::MAX {
+                let Some(m) = Move::from_bits(bits) else {
+                    continue;
+                };
+                let expected = legal.as_slice().contains(&m);
+                assert_eq!(
+                    board.is_legal_with_state(m, &state),
+                    expected,
+                    "wire code {bits:#06x} ({}) at {fen}",
+                    m.to_uci()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn is_legal_covers_every_move_type() {
+        let cases = [
+            (
+                "quiet and double push",
+                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                Move::make_move(Square::E2, Square::E4),
+            ),
+            (
+                "capture",
+                "4k3/8/8/3p4/4P3/8/8/4K3 w - - 0 1",
+                Move::make_move(Square::E4, Square::D5),
+            ),
+            (
+                "en passant",
+                "4k3/8/8/2Pp4/8/8/8/4K3 w - d6 0 2",
+                Move::make_enpassant(Square::C5, Square::D6),
+            ),
+            (
+                "promotion",
+                "k7/4P3/8/8/8/8/8/4K3 w - - 0 1",
+                Move::make_promotion(Square::E7, Square::E8, PieceType::Knight),
+            ),
+            (
+                "castling",
+                "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+                Move::make_castling(Square::E1, Square::H1),
+            ),
+        ];
+
+        for (name, fen, m) in cases {
+            let board = Board::from_fen(fen).expect("fixture FEN must parse");
+            let mut legal = MoveList::new();
+            crate::movegen::generate_legal(&board, &mut legal);
+            assert!(board.is_pseudo_legal(m), "{name} should be pseudo-legal");
+            assert!(board.is_legal(m), "{name} should be legal");
+            assert!(legal.as_slice().contains(&m), "{name} should be generated");
+            assert_eq!(
+                board.move_from_uci(&m.to_uci()),
+                Some(m),
+                "{name} should round-trip through UCI"
+            );
+        }
+    }
+
+    #[test]
+    fn move_from_uci_resolves_castling() {
+        let white = Board::from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1").unwrap();
+        assert_eq!(
+            white.move_from_uci("e1g1"),
+            Some(Move::make_castling(Square::E1, Square::H1))
+        );
+        assert_eq!(
+            white.move_from_uci("e1c1"),
+            Some(Move::make_castling(Square::E1, Square::A1))
+        );
+
+        let black = Board::from_fen("r3k2r/8/8/8/8/8/8/R3K2R b KQkq - 0 1").unwrap();
+        assert_eq!(
+            black.move_from_uci("e8g8"),
+            Some(Move::make_castling(Square::E8, Square::H8))
+        );
+        assert_eq!(
+            black.move_from_uci("e8c8"),
+            Some(Move::make_castling(Square::E8, Square::A8))
+        );
+
+        // The resolved move must be the internal king-takes-rook encoding,
+        // and its UCI text maps the rook square back to the castled square.
+        let resolved = white.move_from_uci("e1g1").unwrap();
+        assert_eq!(resolved.to_sq(), Square::H1);
+        assert_eq!(resolved.to_uci(), "e1g1");
+    }
+
+    #[test]
+    fn move_from_uci_rejects_illegal() {
+        let start = Board::new();
+        for text in ["e7e5", "0000", "e2e2", "e2e4x", "a0a1", "e2e"] {
+            assert_eq!(start.move_from_uci(text), None, "accepted {text:?}");
+        }
+        assert_eq!(
+            start.move_from_uci("e2e4"),
+            Some(Move::make_move(Square::E2, Square::E4))
+        );
+
+        let no_rights = Board::from_fen("r3k2r/8/8/8/8/8/8/R3K2R w - - 0 1").unwrap();
+        assert_eq!(no_rights.move_from_uci("e1g1"), None);
+        assert_eq!(no_rights.move_from_uci("e1c1"), None);
+
+        let blocked = Board::from_fen("r3k2r/8/8/8/8/8/8/R3KB1R w KQkq - 0 1").unwrap();
+        assert_eq!(blocked.move_from_uci("e1g1"), None);
+
+        // Pseudo-legal castling through an attacked square is still illegal.
+        let through_check = Board::from_fen("4kr2/8/8/8/8/8/8/4K2R w K - 0 1").unwrap();
+        assert!(through_check.is_pseudo_legal(Move::make_castling(Square::E1, Square::H1)));
+        assert_eq!(through_check.move_from_uci("e1g1"), None);
+
+        // Illegal promotion: the square is not reachable by a pawn.
+        let no_pawn = Board::from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        assert_eq!(no_pawn.move_from_uci("e7e8q"), None);
+    }
+
+    #[test]
+    fn move_from_uci_promotion_and_ep() {
+        let promotion = Board::from_fen("k7/4P3/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        assert_eq!(
+            promotion.move_from_uci("e7e8q"),
+            Some(Move::make_promotion(
+                Square::E7,
+                Square::E8,
+                PieceType::Queen
+            ))
+        );
+        assert_eq!(
+            promotion.move_from_uci("e7e8n"),
+            Some(Move::make_promotion(
+                Square::E7,
+                Square::E8,
+                PieceType::Knight
+            ))
+        );
+        assert_eq!(promotion.move_from_uci("e7e8k"), None);
+
+        let ep = Board::from_fen("4k3/8/8/2Pp4/8/8/8/4K3 w - d6 0 2").unwrap();
+        assert_eq!(
+            ep.move_from_uci("c5d6"),
+            Some(Move::make_enpassant(Square::C5, Square::D6))
+        );
+        assert_eq!(ep.move_from_uci("c5e6"), None);
+    }
+
+    fn check_uci_lookup_playout(
+        board: &mut Board,
+        rng: &mut Xorshift2,
+        depth: u32,
+        visited: &mut u64,
+    ) {
+        *visited += 1;
+
+        let mut state = StateInfo::new();
+        board.populate_state(&mut state);
+        let mut list = MoveList::new();
+        crate::movegen::generate_legal_with_state(board, &state, &mut list);
+
+        for &m in list.as_slice() {
+            let text = m.to_uci();
+            assert_eq!(
+                board.move_from_uci(&text),
+                Some(m),
+                "UCI lookup for {text} at {}",
+                board.fen()
+            );
+        }
+
+        if depth == 0 || list.is_empty() {
+            return;
+        }
+        let idx = (rng.next() % list.len() as u64) as usize;
+        let m = list[idx];
+        board.do_move(m, &mut state);
+        check_uci_lookup_playout(board, rng, depth - 1, visited);
+        board.undo_move(m, &state);
+    }
+
+    #[test]
+    fn move_from_uci_matches_full_list_lookup() {
+        let mut visited = 0u64;
+        for (i, fen) in PREDICATE_START_FENS.iter().enumerate() {
+            for seed in 0..4u64 {
+                let mut board = Board::from_fen(fen).expect("start FEN must parse");
+                let mut rng = Xorshift2::new(0x9E37_79B9_7F4A_7C15 ^ ((i as u64) << 32) ^ seed);
+                check_uci_lookup_playout(&mut board, &mut rng, 100, &mut visited);
+            }
+        }
+        assert!(visited > 500, "only visited {visited} positions");
     }
 }

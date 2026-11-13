@@ -315,6 +315,25 @@ pub(crate) fn pawn_double_pushes(c: Color, sq: Square) -> Bitboard {
     PAWN_DOUBLE_PUSHES[sq as usize][c as usize]
 }
 
+/// Return the attack set for a piece type of the given color on `sq`.
+///
+/// This is the public dispatch helper over the individual attack tables.
+/// Pawns use [`pawn_attacks`] (color-aware); sliders use the supplied
+/// `occupied` bitboard; the commoner moves like a king. Consumers that need to
+/// classify attacks for arbitrary piece types should use this instead of
+/// re-implementing the match themselves.
+#[inline]
+pub fn attacks_from(pt: PieceType, color: Color, sq: Square, occupied: Bitboard) -> Bitboard {
+    match pt {
+        PieceType::Pawn => pawn_attacks(color, sq),
+        PieceType::Knight => knight_attacks(sq),
+        PieceType::Bishop => bishop_attacks(sq, occupied),
+        PieceType::Rook => rook_attacks(sq, occupied),
+        PieceType::Queen => queen_attacks(sq, occupied),
+        PieceType::Commoner => king_attacks(sq),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,6 +518,49 @@ mod tests {
             pawn_attacks(Color::White, Square::H2),
             Bitboard::square_bb(Square::G3)
         );
+    }
+
+    #[test]
+    fn attacks_from_matches_individual_functions() {
+        let occupancies = [
+            Bitboard::EMPTY,
+            Bitboard::square_bb(Square::E5),
+            Bitboard::square_bb(Square::D4) | Bitboard::square_bb(Square::F6),
+            Bitboard::square_bb(Square::A1)
+                | Bitboard::square_bb(Square::H8)
+                | Bitboard::square_bb(Square::B7),
+        ];
+        let squares = [Square::A1, Square::B1, Square::D4, Square::E5, Square::H8];
+        let piece_types = [
+            PieceType::Pawn,
+            PieceType::Knight,
+            PieceType::Bishop,
+            PieceType::Rook,
+            PieceType::Queen,
+            PieceType::Commoner,
+        ];
+
+        for &occ in &occupancies {
+            for &sq in &squares {
+                for &pt in &piece_types {
+                    for color in [Color::White, Color::Black] {
+                        let expected = match pt {
+                            PieceType::Pawn => pawn_attacks(color, sq),
+                            PieceType::Knight => knight_attacks(sq),
+                            PieceType::Bishop => bishop_attacks(sq, occ),
+                            PieceType::Rook => rook_attacks(sq, occ),
+                            PieceType::Queen => queen_attacks(sq, occ),
+                            PieceType::Commoner => king_attacks(sq),
+                        };
+                        assert_eq!(
+                            attacks_from(pt, color, sq, occ),
+                            expected,
+                            "attacks_from({pt:?}, {color:?}, {sq:?})"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

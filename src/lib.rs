@@ -13,18 +13,63 @@
 //! - **Pawns and the blast:** pawns are not removed by the blast except when
 //!   a pawn is the capturer at the blast square (`to`). In that case the
 //!   capturing pawn is also destroyed.
-//! - **COMMONER replaces KING:** a commoner moves like a king. Losing all of
-//!   your commoners loses the game.
-//! - **Pseudo-royal only for the last commoner:** a commoner is treated as
-//!   pseudo-royal (it cannot be left under attack and its loss ends the game)
-//!   only when it is the side's last commoner. Touching an enemy commoner is
-//!   allowed and does not count as an attack. This is `extinctionPseudoRoyal`
-//!   with the default `extinctionPieceCount = 0` in Fairy-Stockfish's `atomic`
-//!   variant.
+//! - **COMMONER replaces KING:** each side has exactly one commoner, which
+//!   moves like a king. There is no way to gain another one: pawns promote only
+//!   to knight, bishop, rook, or queen, and there are no drops. A board
+//!   therefore has one or two commoners, and a board with only one commoner is
+//!   terminal.
+//! - **Commoner royalty:** the commoner may not be left under attack and may
+//!   not be destroyed; doing so loses the game. Touching the enemy commoner is
+//!   allowed and does not count as an attack: any capture would also blast the
+//!   enemy's only commoner away. This is `extinctionPseudoRoyal` with the
+//!   default `extinctionPieceCount = 0` in Fairy-Stockfish's `atomic` variant.
 //! - **Not `atomar`:** commoners are not mutually immune and there is no
 //!   `mutuallyImmuneTypes` / `blastImmuneTypes` rule.
 //! - **No check/mate in the usual sense:** the game ends when a side has no
-//!   commoners left.
+//!   commoner left. With no legal moves, an attacked commoner loses and a safe
+//!   commoner is stalemated.
+//! - **Terminal precedence:** commoner extinction, then the commoner-only WDL
+//!   draw, then no legal moves (attacked → loss, safe → draw), then the
+//!   50-move rule. Mate outranks the clock: a checkmate on the 100th half-move
+//!   is a loss, not a draw.
+//! - **No insufficient-material draw:** there is no FIDE-style material table.
+//!   A board with only the two commoners is a WDL draw and runs into the
+//!   50-move rule. Endings such as K+B vs K, K+N vs K, and K+R vs K are not
+//!   draws: the piece can capture the enemy commoner when its own commoner is
+//!   outside the blast. Touching commoners are not automatically a draw when
+//!   other pieces remain.
+//!
+//! # Move API
+//!
+//! [`Move`] has a stable 16-bit wire encoding via [`Move::to_bits`] and
+//! [`Move::from_bits`], and implements `Hash` and `Ord`, so consumers can key
+//! collections by move. [`Move::from_uci`] is a syntax-only parser (castling
+//! text becomes a normal two-square move); [`Board::move_from_uci`] is the
+//! board-aware lookup that resolves castling and en-passant encodings and
+//! requires full legality. [`Move::write_uci`] formats without allocating, and
+//! `Display` delegates to it.
+//!
+//! For untrusted single moves, use [`Board::is_legal`] or
+//! [`Board::is_legal_with_state`]; [`Board::is_pseudo_legal`] mirrors the
+//! pseudo-legal generator. None of these builds a [`MoveList`].
+//!
+//! # Position keys and en passant
+//!
+//! [`Board::hash`] and [`Board::fen`] follow Fairy-Stockfish and include the
+//! stored en-passant target after every double pawn push, even when no legal
+//! en-passant capture exists. For canonicalized keys, use
+//! [`Board::legal_ep_square`] with [`EnPassantMode::Legal`] via
+//! [`Board::hash_with`], [`Board::fen_with`], or [`Board::hash_after_with`].
+//! Positions that differ only by a non-capturable ep target then share a key
+//! and a FEN while the default `Always` behavior stays unchanged.
+//!
+//! # Feature flags
+//!
+//! - `unsafe-optimizations` (off by default): removes the bounds check from
+//!   the magic-bitboard table lookup. Every index stays provably in bounds by
+//!   the magic-table construction invariants (see the `magic` module safety
+//!   note); enable it only if you are willing to audit that argument. It
+//!   changes no public API and no move-generation semantics.
 //!
 //! # Example
 //!
@@ -48,8 +93,8 @@ pub mod types;
 pub(crate) mod util;
 pub(crate) mod zobrist;
 
-pub use board::Board;
-pub use types::{Bitboard, Color, Move, MoveList, Outcome, PieceType, Square};
+pub use board::{BlastCasualties, Board, FenLoadError, FenPolicy, ValidationErrors};
+pub use types::{Bitboard, Color, EnPassantMode, Move, MoveList, Outcome, PieceType, Square};
 
 /// Count the number of legal moves at each node to the given depth (perft).
 ///

@@ -7,13 +7,41 @@ reference implementation.
 ## Features
 
 - Legal move generation (pseudo-legal + legality filtering)
+- Single-move queries without building a move list: `Board::is_pseudo_legal()`,
+  `Board::is_legal()`, and state-aware `Board::is_legal_with_state()`
+- Stable 16-bit `Move` wire encoding (`Move::to_bits()` / `Move::from_bits()`),
+  plus `Hash`/`Ord` for use as a map or set key
+- UCI move parsing and formatting: syntax-only `Move::from_uci()`,
+  board-aware `Board::move_from_uci()` (resolves castling and en passant),
+  allocation-free `Move::write_uci()`, and `Display`
 - FEN parsing and output (standard notation only — `K`/`k` label the commoner)
+- Opt-in semantic validation for untrusted FENs: `Board::validate()`,
+  `Board::from_fen_with()`, `FenPolicy`, and `ValidationErrors`. The default
+  `Board::from_fen()` stays permissive and unchanged.
 - Perft (performance test) recursion
-- Blast-on-capture, commoner pseudo-royalty (only for the last commoner), pawn
-  blast immunity (except for the capturing pawn at the blast square)
-- Incremental Zobrist hashing (`Board::hash()`)
-- Game-over detection (`Board::outcome()`, `Board::is_terminal()`)
-- Pure safe Rust, zero dependencies
+- Blast-on-capture, commoner royalty (one commoner per side, no promotion to
+  commoner), pawn blast immunity (except for the capturing pawn at the blast
+  square)
+- Canonical blast helpers: `Board::blast_zone()` for the 3×3 geometry and
+  `Board::blast_casualties()` for the pieces a capture removes, split by color
+  and including the en-passant victim
+- Rule conveniences: `attacks::attacks_from()`,
+  `Board::attackers_to_color()`, board-aware `Board::is_zeroing()` /
+  `Board::is_double_push()`, and order-preserving `MoveList::retain()`
+- Incremental Zobrist hashing (`Board::hash()`) and FSF-compatible FEN output
+- Canonical en-passant keys and FEN output: `Board::legal_ep_square()` and
+  `EnPassantMode::Legal` via `hash_with()`, `fen_with()`, and
+  `hash_after_with()`. The default `hash()`/`fen()`/`hash_after()` keep the
+  Fairy-Stockfish `Always` policy, so existing keys and output are unchanged.
+- Game-over detection (`Board::outcome()`, state-aware `outcome_with_state()` /
+  `outcome_with()`, and the strict `Board::is_terminal()`)
+- Correct terminal precedence: mate outranks the 50-move clock, and only the
+  two commoners remaining is a WDL draw. There is deliberately no
+  insufficient-material table (K+B/K+N/K+R vs K can be an immediate win), and
+  touching commoners are not automatically drawn when other pieces remain.
+- Pure safe Rust by default, zero dependencies. The opt-in
+  `unsafe-optimizations` feature removes bounds checks from the magic
+  bitboard lookup; see [Feature flags](#feature-flags).
 
 ## Usage (library)
 
@@ -21,7 +49,7 @@ Add `atomic-movegen` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-atomic-movegen = "2.3.0"
+atomic-movegen = "2.4.0"
 ```
 
 ```rust
@@ -31,6 +59,21 @@ use atomic_movegen::perft;
 let mut board = Board::new();
 let nodes = perft(&mut board, 3);
 assert_eq!(nodes, 8902);
+```
+
+For untrusted FEN input, use the opt-in validation layer:
+
+```rust
+use atomic_movegen::{Board, FenLoadError, FenPolicy};
+
+let board = Board::from_fen_with(
+    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+    FenPolicy::Strict,
+).unwrap();
+assert!(board.validate().is_ok());
+
+let bad = Board::from_fen_with("8/8/8/8/8/8/8/8 w - - 0 1", FenPolicy::Strict);
+assert!(matches!(bad, Err(FenLoadError::InvalidPosition(_))));
 ```
 
 ## Usage (CLI perft)
@@ -70,6 +113,22 @@ cargo run --example fen_after "FEN" MOVE      # FEN + moves after playing MOVE (
 cargo run --example debug_moves "FEN"         # pseudo-legal vs. legal counts, duplicates
 cargo run --example pawn_debug "FEN"          # pawn inspections and manual move checks
 cargo run --example test_d5g8                 # attack-table sanity check (hardcoded position)
+```
+
+## Feature flags
+
+- `unsafe-optimizations` (off by default): removes the bounds check from the
+  magic-bitboard table lookup. All indices remain provably in bounds under
+  the magic-table construction invariants; enable it only if you audit that
+  argument. It does not change any public API or move-generation semantics.
+
+The combined child-key accessor `Board::hash_and_rule50_after(m)` returns
+`(hash_after(m), rule50_after(m))` while classifying the move once, which is
+useful when prefetching child keys for every candidate move.
+
+```sh
+cargo build --features unsafe-optimizations
+cargo test --features unsafe-optimizations
 ```
 
 ## Development

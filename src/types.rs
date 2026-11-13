@@ -415,10 +415,29 @@ pub enum Outcome {
     Draw,
 }
 
+/// How an en-passant target participates in a position key or FEN.
+///
+/// The stored en-passant target follows Fairy-Stockfish: a double pawn push
+/// always records one, even when no legal en-passant capture exists. The
+/// default [`Board::hash`](crate::Board::hash) and
+/// [`Board::fen`](crate::Board::fen) use [`Always`](Self::Always); the
+/// `_with` variants accept this mode explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum EnPassantMode {
+    /// Include the stored ep square after every double push (FSF-compatible,
+    /// the default for `hash()` and `fen()`).
+    Always,
+    /// Include the ep square only when at least one fully legal ep capture
+    /// exists.
+    Legal,
+}
+
 /// A piece type (pawn, knight, bishop, rook, queen, or commoner).
 ///
-/// In atomic chess, a *commoner* moves like a king and is pseudo-royal:
-/// losing all commoners loses the game.
+/// In atomic chess, a *commoner* moves like a king and is royal: losing it
+/// loses the game. Each side has at most one commoner, and pawns cannot
+/// promote to a commoner.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
@@ -568,6 +587,8 @@ pub const fn make_piece(color: Color, pt: PieceType) -> Piece {
 }
 
 /// The piece types a pawn may promote to, ordered by promotion bit encoding.
+///
+/// Atomic chess does not allow promotion to a commoner.
 pub const PROMOTION_PIECES: [PieceType; 4] = [
     PieceType::Queen,
     PieceType::Rook,
@@ -588,14 +609,60 @@ pub enum MoveType {
 
 /// A chess move packed into a 16-bit integer.
 ///
-/// Bit layout (0-indexed LSB): `to_sq:6 | from_sq:6 | type:2 | promotion_type:2`.
-/// - `promotion_type` is valid only when `type == Promotion`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// # Stable wire encoding
+///
+/// Bit layout (0-indexed LSB):
+/// `to_sq:6 | from_sq:6 | type:2 | promotion_type:2`.
+/// - `to_sq` and `from_sq` are square indices `0..64` (`a1` = 0, `h8` = 63).
+/// - `type` is the [`MoveType`] discriminant (`Normal` = 0, `Promotion` = 1,
+///   `EnPassant` = 2, `Castling` = 3).
+/// - `promotion_type` is an index into [`PROMOTION_PIECES`] and is meaningful
+///   only when `type == Promotion`.
+///
+/// The layout, the sentinel [`Move::NONE`] value `0`, and the order of
+/// [`PROMOTION_PIECES`] (queen, rook, bishop, knight) are semver-stable: they
+/// can only change in a major release, because [`to_bits`](Self::to_bits) is
+/// intended to be persisted. Castling and en-passant moves use the board's
+/// internal encoding, which [`Display`](fmt::Display) and
+/// [`Board::move_from_uci`](crate::Board::move_from_uci) translate to and from
+/// ordinary UCI text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Move(u16);
 
 impl Move {
     /// A sentinel value representing "no move".
     pub const NONE: Move = Move(0);
+
+    /// Return the stable 16-bit wire encoding of this move.
+    ///
+    /// This is the exact inverse of [`from_bits`](Self::from_bits) for every
+    /// structurally valid value. The bit layout is documented on [`Move`] and
+    /// is semver-stable.
+    #[inline]
+    #[must_use]
+    pub const fn to_bits(self) -> u16 {
+        self.0
+    }
+
+    /// Decode a stable 16-bit wire code.
+    ///
+    /// - `0` decodes to `Some(Move::NONE)`.
+    /// - Any other code whose origin equals its destination decodes to `None`.
+    /// - Every remaining code decodes to `Some(move)`; no board legality is
+    ///   implied. In particular, a castling or en-passant bit pattern is only
+    ///   meaningful together with a board.
+    #[must_use]
+    pub fn from_bits(bits: u16) -> Option<Move> {
+        if bits == 0 {
+            return Some(Move::NONE);
+        }
+        let m = Move(bits);
+        if m.from_sq() == m.to_sq() {
+            None
+        } else {
+            Some(m)
+        }
+    }
 
     /// Return the origin square of this move.
     #[inline]
@@ -636,6 +703,17 @@ impl Move {
     #[inline(always)]
     pub(crate) fn needs_full_legal_check(self) -> bool {
         ((self.0 >> 12) & 3) >= 2
+    }
+
+    /// Returns `true` when the promotion-type bits are canonical for this move
+    /// type: they are free for promotions and zero for every other type.
+    ///
+    /// [`from_bits`](Self::from_bits) deliberately decodes non-canonical
+    /// patterns; the board-aware pseudo-legality predicate rejects them because
+    /// the generator never emits them.
+    #[inline(always)]
+    pub(crate) fn has_canonical_promotion_bits(self) -> bool {
+        self.move_type() == MoveType::Promotion || ((self.0 >> 14) & 3) == 0
     }
 
     /// Return the move type (normal, promotion, en-passant, castling).
@@ -725,16 +803,60 @@ impl Move {
         self.move_type() == MoveType::EnPassant
     }
 
-    /// Returns the UCI representation of this move.
+    /// Parse a move in UCI coordinate notation without consulting a board.
     ///
-    /// Returns `"0000"` for `Move::NONE`. Castling destinations are mapped to
-    /// `g1`/`c1`/`g8`/`c8`, and promotion moves append `n`/`b`/`r`/`q`.
+    /// This is a *syntax-only* parser: `e1g1` yields an ordinary
+    /// `e1 -> g1` move, not a castling move. Use
+    /// [`Board::move_from_uci`](crate::Board::move_from_uci) to resolve
+    /// castling destinations and to require legality. `"0000"` maps to
+    /// [`Move::NONE`]. Promotion suffixes are `n`, `b`, `r`, and `q`; anything
+    /// else, a malformed length, or equal origin and destination returns
+    /// `None`.
     #[must_use]
-    pub fn to_uci(self) -> String {
-        if self.0 == 0 {
-            return "0000".to_string();
+    pub fn from_uci(s: &str) -> Option<Move> {
+        if s == "0000" {
+            return Some(Move::NONE);
         }
-        let from = sq_str(self.from_sq()).unwrap_or("??");
+
+        let bytes = s.as_bytes();
+        if !(bytes.len() == 4 || bytes.len() == 5) || !s.is_ascii() {
+            return None;
+        }
+
+        let from = parse_sq(&s[..2])?;
+        let to = parse_sq(&s[2..4])?;
+        if from == to {
+            return None;
+        }
+
+        if bytes.len() == 4 {
+            return Some(Move::make_move(from, to));
+        }
+
+        let promotion = match bytes[4] {
+            b'n' => PieceType::Knight,
+            b'b' => PieceType::Bishop,
+            b'r' => PieceType::Rook,
+            b'q' => PieceType::Queen,
+            _ => return None,
+        };
+        Some(Move::make_promotion(from, to, promotion))
+    }
+
+    /// Write this move in UCI coordinate notation without allocating.
+    ///
+    /// [`Move::NONE`] writes `0000`. Castling destinations are mapped to
+    /// `g1`/`c1`/`g8`/`c8`, and promotion moves append `n`/`b`/`r`/`q`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`fmt::Error`] if the writer fails.
+    pub fn write_uci(self, out: &mut impl fmt::Write) -> fmt::Result {
+        if self.0 == 0 {
+            return out.write_str("0000");
+        }
+
+        out.write_str(sq_str(self.from_sq()).unwrap_or("??"))?;
         let to = if self.is_castling() {
             match (self.from_sq(), self.to_sq()) {
                 (Square::E1, Square::H1) => "g1",
@@ -746,27 +868,50 @@ impl Move {
         } else {
             sq_str(self.to_sq()).unwrap_or("??")
         };
-        let mut s = String::from(from) + to;
+        out.write_str(to)?;
+
         if self.is_promotion() {
             let ch = match self.promotion_type() {
                 PieceType::Knight => 'n',
                 PieceType::Bishop => 'b',
                 PieceType::Rook => 'r',
                 PieceType::Queen => 'q',
-                _ => unreachable!(),
+                _ => unreachable!("promotion_type is one of PROMOTION_PIECES"),
             };
-            s.push(ch);
+            out.write_char(ch)?;
         }
+        Ok(())
+    }
+
+    /// Returns the UCI representation of this move.
+    ///
+    /// Returns `"0000"` for `Move::NONE`. Castling destinations are mapped to
+    /// `g1`/`c1`/`g8`/`c8`, and promotion moves append `n`/`b`/`r`/`q`. This
+    /// allocates exactly once; use [`write_uci`](Self::write_uci) to avoid the
+    /// allocation.
+    #[must_use]
+    pub fn to_uci(self) -> String {
+        let mut s = String::with_capacity(5);
+        self.write_uci(&mut s)
+            .expect("writing to a String cannot fail");
         s
     }
 }
 
-/// Maximum number of moves that can be generated for any atomic chess position.
+impl fmt::Display for Move {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        (*self).write_uci(f)
+    }
+}
+
+/// Capacity of a [`MoveList`], in moves.
 ///
-/// The absolute upper bound is well below 256:
-/// - At most 64 squares with attackers
-/// - Perft at depth 1 on the most complex legal positions yields < 150 moves
-/// - 256 provides a comfortable safety margin.
+/// The largest legal move count observed in this crate's perft-corpus scan
+/// (all 41 test positions, every position reached through depth 4) is 68. For
+/// comparison, standard chess has a known maximum of 218 legal moves. The
+/// value 256 is a deliberately conservative safety margin, not a proven tight
+/// bound for every artificial board; the generator's per-piece target masks
+/// make it comfortably large in practice.
 pub const MAX_MOVES: usize = 256;
 
 /// A fixed-capacity, stack-allocated list of `Move` values.
@@ -810,18 +955,35 @@ impl MoveList {
 
     /// Appends a move to the end of the list.
     ///
-    /// # Panics
-    /// Panics in debug mode if the list is full (`len == MAX_MOVES`).
-    /// In release mode, exceeding the capacity silently overwrites (unreachable
-    /// in practice due to the move-count bound).
+    /// The list keeps at most [`MAX_MOVES`] moves. In debug builds, pushing
+    /// when the list is full (`len == MAX_MOVES`) triggers an assertion. In
+    /// release builds, a push at capacity is silently ignored; it does not
+    /// overwrite an existing move. The generator is expected to stay far below
+    /// the capacity.
     #[inline]
     pub fn push(&mut self, m: Move) {
         debug_assert!(self.len < MAX_MOVES, "MoveList overflow");
-        // Safe: unreachable in practice due to move-count bound.
         if self.len < MAX_MOVES {
             self.moves[self.len] = m;
             self.len += 1;
         }
+    }
+
+    /// Keeps only the moves for which `f` returns `true`, preserving order.
+    ///
+    /// The closure receives each move by value. The list is compacted in place
+    /// and its length is updated to the number of retained moves.
+    #[inline]
+    pub fn retain(&mut self, mut f: impl FnMut(Move) -> bool) {
+        let mut write = 0;
+        for read in 0..self.len {
+            let m = self.moves[read];
+            if f(m) {
+                self.moves[write] = m;
+                write += 1;
+            }
+        }
+        self.len = write;
     }
 
     /// Sets the length directly (caller must ensure `len <= MAX_MOVES` and
@@ -1001,6 +1163,36 @@ mod tests {
     }
 
     #[test]
+    fn move_list_retain_preserves_order() {
+        let moves = [
+            Move::make_move(Square::A1, Square::A2),
+            Move::make_move(Square::B1, Square::B3),
+            Move::make_move(Square::C1, Square::C2),
+            Move::make_move(Square::D1, Square::D4),
+            Move::make_move(Square::E1, Square::E2),
+            Move::make_move(Square::F1, Square::F3),
+        ];
+        let mut list = MoveList::new();
+        for &m in &moves {
+            list.push(m);
+        }
+
+        list.retain(|m| {
+            let index = moves.iter().position(|&candidate| candidate == m).unwrap();
+            index % 2 == 0
+        });
+
+        assert_eq!(list.len(), 3);
+        assert_eq!(list.as_slice(), &[moves[0], moves[2], moves[4]]);
+        assert!(list.as_slice().iter().all(|m| m.to_bits() != 0));
+
+        // A predicate that rejects everything empties the list.
+        list.retain(|_| false);
+        assert!(list.is_empty());
+        assert!(list.as_slice().is_empty());
+    }
+
+    #[test]
     fn test_move_encoding() {
         let m = Move::make_move(Square::A2, Square::A4);
         assert_eq!(m.from_sq(), Square::A2);
@@ -1033,6 +1225,13 @@ mod tests {
     fn test_piece_no_piece() {
         assert_eq!(NO_PIECE.color(), None);
         assert_eq!(NO_PIECE.type_of(), None);
+    }
+
+    #[test]
+    fn test_commoner_is_not_a_promotion_piece() {
+        // Atomic chess has no promotion to commoner; each side keeps its
+        // original commoner for the whole game.
+        assert!(!PROMOTION_PIECES.contains(&PieceType::Commoner));
     }
 
     #[test]
@@ -1078,5 +1277,157 @@ mod tests {
 
         let m = Move::make_promotion(Square::H2, Square::H1, PieceType::Knight);
         assert_eq!(m.to_uci(), "h2h1n");
+    }
+
+    #[test]
+    fn move_bits_roundtrip_exhaustive() {
+        assert_eq!(Move::from_bits(0), Some(Move::NONE));
+
+        for bits in 0..=u16::MAX {
+            let from = (bits >> 6) & 0x3f;
+            let to = bits & 0x3f;
+            let structurally_valid = bits == 0 || from != to;
+            let decoded = Move::from_bits(bits);
+            assert_eq!(
+                decoded.is_some(),
+                structurally_valid,
+                "from_bits({bits:#06x}) validity"
+            );
+            if let Some(m) = decoded {
+                assert_eq!(m.to_bits(), bits, "roundtrip for {bits:#06x}");
+            }
+        }
+
+        // `a1a1` and `a2a2`-style codes are rejected; zero is the only
+        // special sentinel.
+        assert_eq!(Move::from_bits(0), Some(Move::NONE));
+        assert_eq!(Move::from_bits(8 | (8 << 6)), None);
+        assert_eq!(Move::from_bits((1 << 12) | (8 | (8 << 6))), None);
+    }
+
+    #[test]
+    fn move_bits_stable_golden() {
+        // Hard-coded wire values pin the layout and PROMOTION_PIECES order.
+        let cases = [
+            (Move::make_move(Square::E2, Square::E4), 796),
+            (Move::make_castling(Square::E1, Square::H1), 12_551),
+            (Move::make_castling(Square::E1, Square::A1), 12_544),
+            (Move::make_castling(Square::E8, Square::H8), 16_191),
+            (Move::make_castling(Square::E8, Square::A8), 16_184),
+            (Move::make_enpassant(Square::C5, Square::D6), 10_411),
+            (
+                Move::make_promotion(Square::A7, Square::A8, PieceType::Queen),
+                7_224,
+            ),
+            (
+                Move::make_promotion(Square::A7, Square::A8, PieceType::Rook),
+                23_608,
+            ),
+            (
+                Move::make_promotion(Square::A7, Square::A8, PieceType::Bishop),
+                39_992,
+            ),
+            (
+                Move::make_promotion(Square::A7, Square::A8, PieceType::Knight),
+                56_376,
+            ),
+        ];
+
+        for (m, expected_bits) in cases {
+            assert_eq!(m.to_bits(), expected_bits, "golden bits for {m}");
+            assert_eq!(Move::from_bits(expected_bits), Some(m));
+        }
+        assert_eq!(Move::NONE.to_bits(), 0);
+    }
+
+    #[test]
+    fn move_uci_parse_format() {
+        assert_eq!(
+            Move::from_uci("e2e4"),
+            Some(Move::make_move(Square::E2, Square::E4))
+        );
+        assert_eq!(Move::from_uci("0000"), Some(Move::NONE));
+
+        // Syntax-only: castling text is an ordinary two-square move here.
+        assert_eq!(
+            Move::from_uci("e1g1"),
+            Some(Move::make_move(Square::E1, Square::G1))
+        );
+        assert_eq!(
+            Move::from_uci("e8c8"),
+            Some(Move::make_move(Square::E8, Square::C8))
+        );
+
+        let promotions = [
+            ("a7a8q", PieceType::Queen),
+            ("a7a8r", PieceType::Rook),
+            ("a7a8b", PieceType::Bishop),
+            ("a7a8n", PieceType::Knight),
+        ];
+        for (text, pt) in promotions {
+            let parsed = Move::from_uci(text).expect("promotion must parse");
+            assert_eq!(parsed.promotion_type(), pt);
+            assert_eq!(parsed.to_uci(), text);
+        }
+
+        for malformed in [
+            "", "e2e", "e2e44", "e2e9", "i2e4", "e2e2", "a1a1", "00000", "e2e4 ", "e7e8Q", "a7a8k",
+            "a7a8p",
+        ] {
+            assert_eq!(Move::from_uci(malformed), None, "parsed {malformed:?}");
+        }
+    }
+
+    #[test]
+    fn move_display_alloc_free() {
+        let moves = [
+            Move::NONE,
+            Move::make_move(Square::E2, Square::E4),
+            Move::make_castling(Square::E1, Square::H1),
+            Move::make_castling(Square::E8, Square::A8),
+            Move::make_enpassant(Square::C5, Square::D6),
+            Move::make_promotion(Square::A7, Square::A8, PieceType::Queen),
+            Move::make_promotion(Square::H2, Square::H1, PieceType::Knight),
+        ];
+
+        for m in moves {
+            let mut written = String::new();
+            m.write_uci(&mut written)
+                .expect("String writer cannot fail");
+            assert_eq!(written, m.to_uci());
+            assert_eq!(format!("{m}"), m.to_uci());
+        }
+        assert_eq!(format!("{}", Move::NONE), "0000");
+    }
+
+    #[test]
+    fn move_ord_hash() {
+        let moves = [
+            Move::make_promotion(Square::A7, Square::A8, PieceType::Knight),
+            Move::make_move(Square::E2, Square::E4),
+            Move::make_castling(Square::E1, Square::H1),
+            Move::make_move(Square::A2, Square::A4),
+            Move::NONE,
+        ];
+
+        for &a in &moves {
+            for &b in &moves {
+                assert_eq!(
+                    a.cmp(&b),
+                    a.to_bits().cmp(&b.to_bits()),
+                    "ordering must follow the wire encoding"
+                );
+            }
+        }
+
+        let mut set = std::collections::HashSet::new();
+        set.insert(Move::make_move(Square::E2, Square::E4));
+        set.insert(Move::make_move(Square::E2, Square::E4));
+        set.insert(Move::make_move(Square::A2, Square::A4));
+        assert_eq!(set.len(), 2);
+
+        let mut sorted = moves;
+        sorted.sort();
+        assert!(sorted.windows(2).all(|w| w[0].to_bits() <= w[1].to_bits()));
     }
 }
