@@ -111,6 +111,15 @@
 //! `outcome`'s precedence, including the commoner-only material draw, so it is
 //! not the same as [`Board::is_terminal`].
 //!
+//! # Conformance corpus
+//!
+//! [`conformance::CASES`] is a small frozen corpus of positions with their
+//! ordered pseudo-legal and legal moves, outcome and terminal reason, literal
+//! terminal flag, both en-passant key modes, and clocks. It is inert data for
+//! downstream differential testing; `tests/conformance.rs` verifies every case
+//! against the engine. [`CONFORMANCE_CASES`] is the same slice re-exported at
+//! the crate root.
+//!
 //! # Generation order contract
 //!
 //! Generation order is a public compatibility contract: pawn moves per pawn in
@@ -172,6 +181,7 @@
 pub mod attacks;
 pub(crate) mod bitboard;
 pub mod board;
+pub mod conformance;
 pub mod effects;
 pub(crate) mod magic;
 pub mod movegen;
@@ -181,6 +191,7 @@ pub(crate) mod util;
 pub(crate) mod zobrist;
 
 pub use board::{BlastCasualties, Board, FenLoadError, FenPolicy, StateInfo, ValidationErrors};
+pub use conformance::{CASES as CONFORMANCE_CASES, ConformanceCase};
 pub use effects::{EffectContext, MoveEffect};
 pub use setup::{Setup, SetupError};
 pub use types::{

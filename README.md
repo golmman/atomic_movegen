@@ -68,6 +68,11 @@ reference implementation.
   `MaterialDraw`, or `FiftyMoveRule`. The reason mirrors `outcome()`'s
   precedence, including the commoner-only material draw, so it is not the same
   as `is_terminal()`.
+- Frozen conformance corpus: `atomic_movegen::conformance::CASES` (also
+  re-exported as `CONFORMANCE_CASES`) records curated FENs with their ordered
+  pseudo-legal and legal moves, outcome and terminal reason, literal terminal
+  flag, both en-passant key modes, and clocks. It is inert data for downstream
+  differential testing and is verified case by case in `tests/conformance.rs`.
 - Correct terminal precedence: mate outranks the 50-move clock, and only the
   two commoners remaining is a WDL draw. There is deliberately no
   insufficient-material table (K+B/K+N/K+R vs K can be an immediate win), and
@@ -103,6 +108,38 @@ reference implementation.
   consumers must use a wildcard arm. Removing or renaming a variant is a major
   release. The crate is zero-dependency and safe-Rust-by-default; the only
   opt-in `unsafe` is the `unsafe-optimizations` magic-table lookup.
+
+## Conformance corpus
+
+`atomic_movegen::conformance::CASES` is a small, frozen set of positions with
+their expected observable state. It is public data, not a second rules
+implementation:
+
+```rust
+use atomic_movegen::conformance::CASES;
+use atomic_movegen::movegen::generate_legal;
+use atomic_movegen::Board;
+use atomic_movegen::MoveList;
+
+for case in CASES {
+    let board = Board::from_fen(case.fen).unwrap();
+    let mut moves = MoveList::new();
+    generate_legal(&board, &mut moves);
+    let uci: Vec<String> = moves.as_slice().iter().map(|m| m.to_uci()).collect();
+    assert_eq!(uci, case.legal);
+    assert_eq!(board.outcome(), case.outcome);
+    assert_eq!(board.hash(), case.hash_always);
+}
+```
+
+Each case also records the pseudo-legal order, terminal reason, `is_terminal`,
+the `EnPassantMode::Legal` key, `rule50`, and `game_ply`. The corpus covers the
+start position, middlegames, en passant, castling, promotions, checks, mate,
+stalemate, extinction, material and 50-move draws, pins, blast wins,
+self-explosions, the largest observed legal move count, and the 14
+`tests/perft_tests.rs` positions. `tests/conformance.rs` verifies every field
+against the engine. Treat any difference not announced as a rules fix as a veto
+in a downstream differential.
 
 ## Usage (library)
 

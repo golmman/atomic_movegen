@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Frozen conformance corpus. `atomic_movegen::conformance::CASES` (also
+  re-exported as `CONFORMANCE_CASES`) is a curated, public array of
+  `ConformanceCase` values covering the start position, middlegames, en
+  passant, castling (including an attacked path), promotions, checks, mate,
+  stalemate, extinction, material and 50-move draws, pins, blast wins,
+  self-explosions, the largest observed legal move count (68), and the 14
+  `tests/perft_tests.rs` positions. Each case records the FEN, ordered
+  pseudo-legal and legal UCI moves, outcome, terminal reason, `is_terminal`,
+  both en-passant key modes, `rule50`, and `game_ply`. `tests/conformance.rs`
+  verifies every field against the engine.
 - Terminal reasons. `TerminalReason` (`Extinction`, `NoMovesInCheck`,
   `Stalemate`, `MaterialDraw`, `FiftyMoveRule`) and `Terminal { outcome,
   reason }` are re-exported at the crate root. `Board::terminal()`,
