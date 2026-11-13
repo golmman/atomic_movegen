@@ -285,8 +285,34 @@ re-run.
   If a downstream asks for symmetry with `CONFORMANCE_CASES`, that is a
   one-line additive change.
 - The stale-`StateInfo` contract (plan 1/2 gap) is still not pinned by a test.
-- The 2.7.0 release is prepared but **not published**: the version bump is
-  uncommitted and this agent does not run `git commit`/`cargo publish`.
+- The 2.7.0 release is prepared and **publish-ready** but not published: the
+  version bump is committed, the tree is clean, and `cargo publish --dry-run`
+  passes without `--allow-dirty` (see “Release status”). This agent does not run
+  `git commit`/git tag/`cargo publish`; those three steps are the maintainer's.
+
+## Release status (2.7.0)
+
+Checked on the committed tree (`a6304ab finish handoff2 plan3`, clean working
+copy) immediately before publishing:
+
+| Check | Result |
+| --- | --- |
+| `Cargo.toml` version | `2.7.0`, `rust-version = "1.85"`, `edition 2024` |
+| `CHANGELOG.md` | `[2.7.0] - 2026-11-13` present, `[Unreleased]` empty |
+| `README.md` dependency snippet | `atomic-movegen = "2.7.0"` |
+| `cargo package --list` | 44 files; no `docs/**`, `Fairy-Stockfish/**`, `perf.data`, `tests/gen_moves.py` |
+| `cargo publish --dry-run` | packaged (206.4 KiB compressed), verified from the packed crate, upload aborted (dry run) |
+| `cargo test` | 163 unit tests + 11 integration binaries + 12 doctests, green |
+| `cargo test --features unsafe-optimizations` | green |
+| `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, `cargo doc` | clean, no warnings |
+| `cargo run --release --example verify_perft 5` | 41/41 in 2.216 s |
+
+Remaining maintainer steps: commit (this report edit only — it is under
+`docs/`, which `cargo package` excludes, so publishing does not depend on it),
+`cargo publish`, then tag `v2.7.0` and tell the downstream to re-run
+`measurements/plan29/probe.py` (gate: decided share > 10 % of built children).
+MSRV 1.85 was not re-verified locally: only the `stable` (1.99.1) toolchain is
+installed in this environment.
 
 ## Missing tests
 
