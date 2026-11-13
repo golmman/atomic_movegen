@@ -1,0 +1,114 @@
+//! The released public API surface, pinned by name.
+//!
+//! Every item the 2.7.0 release notes name must exist and resolve from the
+//! crate root, so the notes cannot drift from the code. This test says nothing
+//! about behaviour — the differential suites do that; it only fails when an
+//! item promised in `CHANGELOG.md` / `README.md` is missing, renamed, or no
+//! longer re-exported.
+
+use atomic_movegen::movegen::{generate_legal_with_state, generate_pseudo_legal};
+use atomic_movegen::{
+    AfterState, BlastCasualties, Board, Board as BoardRoot, CONFORMANCE_CASES, Color,
+    EffectContext, Move, MoveClassification, MoveEffect, MoveList, Outcome, PostMove, StateInfo,
+    Terminal, TerminalReason, conformance,
+};
+
+#[test]
+fn crate_root_reexports_resolve() {
+    // Types named in the 2.7.0 notes.
+    let _: fn(&Board) -> Color = BoardRoot::side_to_move;
+    let _: EffectContext = Board::new().effect_context();
+    let _: Outcome = Outcome::Draw;
+    let _: TerminalReason = TerminalReason::Stalemate;
+    let _: Terminal = Terminal {
+        outcome: Outcome::Loss,
+        reason: TerminalReason::Extinction,
+    };
+    let _: AfterState = AfterState::Undecided;
+    let _: BlastCasualties = BlastCasualties::default();
+
+    // The classification type and its two entry points.
+    let board = Board::new();
+    let ctx = board.effect_context();
+    let m = Move::from_uci("e2e4").unwrap();
+    let classification: MoveClassification = ctx.classification(&board, m);
+    let effect: MoveEffect = ctx.effect(&board, m);
+    assert_eq!(classification, effect.classification());
+
+    // The child summary.
+    let post: Option<PostMove> = ctx.post_move(&board, m);
+    assert!(post.is_some());
+
+    // The conformance corpora.
+    assert!(!CONFORMANCE_CASES.is_empty());
+    assert_eq!(CONFORMANCE_CASES.len(), conformance::CASES.len());
+    assert!(!conformance::CHILD_CASES.is_empty());
+}
+
+#[test]
+fn classification_is_usable_from_a_legal_list() {
+    // The consuming shape the API exists for: a caller that already has the
+    // legal list classifies without a second legality query.
+    let board =
+        Board::from_fen("r1bqkbnr/pppp2pp/2n5/4ppB1/1P1P4/7N/P1P1PPPP/RN1QKB1R b KQkq - 1 4")
+            .unwrap();
+    let mut state = StateInfo::new();
+    board.populate_state(&mut state);
+    let ctx = board.effect_context_with_state(&state);
+
+    let mut legal = MoveList::new();
+    generate_legal_with_state(&board, &state, &mut legal);
+    assert!(!legal.is_empty());
+
+    let mut captures = 0usize;
+    for &m in legal.as_slice() {
+        let c = ctx.classification(&board, m);
+        assert_eq!(c, ctx.effect(&board, m).classification(), "{m}");
+        assert!(
+            c.leaves_own_commoner,
+            "{m}: a legal move keeps the commoner"
+        );
+        if c.is_capture {
+            captures += 1;
+        }
+    }
+    assert!(captures > 0, "fixture should offer captures");
+
+    // A classification never claims legality: the self-explosion of the
+    // documented fixture is classified and is illegal.
+    let board = Board::from_fen("8/8/8/8/8/8/8/3qK3 w - - 0 1").unwrap();
+    let ctx = board.effect_context();
+    let m = Move::from_uci("e1d1").unwrap();
+    let c = ctx.classification(&board, m);
+    assert!(!c.leaves_own_commoner);
+    assert!(!ctx.is_legal(&board, m));
+    assert_eq!(
+        c,
+        ctx.effect(&board, m).classification(),
+        "classification is the effect without the verdict"
+    );
+
+    // And it agrees with `effect` for every pseudo-legal candidate, legal or
+    // not.
+    let mut pseudo = MoveList::new();
+    generate_pseudo_legal(&board, &mut pseudo);
+    for &m in pseudo.as_slice() {
+        assert_eq!(
+            ctx.classification(&board, m),
+            ctx.effect(&board, m).classification(),
+            "{m}"
+        );
+    }
+}
+
+#[test]
+fn public_types_are_send_and_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<MoveClassification>();
+    assert_send_sync::<MoveEffect>();
+    assert_send_sync::<PostMove>();
+    assert_send_sync::<AfterState>();
+    assert_send_sync::<EffectContext>();
+    assert_send_sync::<Terminal>();
+    assert_send_sync::<Outcome>();
+}

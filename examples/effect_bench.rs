@@ -3,7 +3,9 @@
 //!
 //! Three groups are reported per bench position:
 //!
-//! 1. per pseudo-legal move: `effect`/`is_legal` against `Board::legal`, and
+//! 1. per pseudo-legal move: `effect`/`is_legal` against `Board::legal`,
+//!    `classification` (the effect path without the legality ladder) against
+//!    `effect` and against the legal-list loop it is meant for, and
 //!    `child_outcome` (the two-level answer) against the split
 //!    `is_legal` + `terminal_after` pair it replaces;
 //! 2. per child: `terminal_after` (and `outcome_after`) against cloning the
@@ -163,6 +165,16 @@ fn main() {
             legal_moves.len()
         );
 
+        let mut i = 0usize;
+        let classification_ns = bench(
+            || {
+                let m = pseudo[i % pseudo.len()];
+                i += 1;
+                black_box(ctx.classification(&board, m));
+            },
+            repeats,
+            iterations,
+        );
         let mut i = 0usize;
         let effect_legal = bench(
             || {
@@ -376,10 +388,53 @@ fn main() {
             repeats,
             iterations,
         );
+        // The legal-list consumer loop MG18 is about: generate the legal list,
+        // then classify every move — once with `effect` (the ladder runs
+        // again) and once with `classification` (it does not).
+        let classify_after_generate_ns = bench(
+            || {
+                let mut list = MoveList::new();
+                generate_legal_with_state(&board, &state, &mut list);
+                let mut captures = 0usize;
+                for &m in list.as_slice() {
+                    captures += usize::from(ctx.classification(&board, m).is_capture);
+                }
+                black_box(captures);
+            },
+            repeats,
+            iterations,
+        );
+        let effect_after_generate_ns = bench(
+            || {
+                let mut list = MoveList::new();
+                generate_legal_with_state(&board, &state, &mut list);
+                let mut captures = 0usize;
+                for &m in list.as_slice() {
+                    captures += usize::from(ctx.effect(&board, m).is_capture);
+                }
+                black_box(captures);
+            },
+            repeats,
+            iterations,
+        );
+        let generate_only_ns = bench(
+            || {
+                let mut list = MoveList::new();
+                generate_legal_with_state(&board, &state, &mut list);
+                black_box(list.len());
+            },
+            repeats,
+            iterations,
+        );
 
         println!(
-            "  per pseudo-legal move: effect.is_legal {effect_legal:>9.1}  \
-             effect.full {effect_full:>9.1}  board.legal {board_legal:>9.1}"
+            "  per pseudo-legal move: classification {classification_ns:>9.1}  \
+             effect.full {effect_full:>9.1}  effect.is_legal {effect_legal:>9.1}  \
+             board.legal {board_legal:>9.1}"
+        );
+        println!(
+            "  legal list + classify: classify {classify_after_generate_ns:>9.1}  \
+             effect {effect_after_generate_ns:>9.1}  generate only {generate_only_ns:>9.1}"
         );
         println!(
             "  per legal move:        outcome_after {outcome_effect:>9.1}  \

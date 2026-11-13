@@ -98,6 +98,13 @@
 //! [`EffectContext::effect_and_post`] returns both values from one analysis
 //! pass.
 //!
+//! [`MoveClassification`] is [`MoveEffect`] without the legality verdict: the
+//! same five rules fields, derived by
+//! [`EffectContext::classification`] without running the legality ladder, for
+//! callers that already know the move is legal (for example because it came
+//! out of [`movegen::generate_legal_with_state`]).
+//! [`MoveEffect::classification`] returns the same value from a full effect.
+//!
 //! # Interchange: SAN and piece sets
 //!
 //! [`Board::san`] / [`Board::write_san`] format a **legal** move in standard
@@ -176,6 +183,7 @@
 //!   [`Board::outcome_after`], [`Board::terminal_after`],
 //!   [`Board::child_outcome`],
 //!   [`EffectContext::effect`], [`EffectContext::effect_and_post`],
+//!   [`EffectContext::classification`], [`MoveEffect::classification`],
 //!   [`EffectContext::post_move`], [`EffectContext::is_legal`],
 //!   [`EffectContext::terminal_after`], [`EffectContext::child_outcome`],
 //!   [`EffectContext::outcome_after`],
@@ -226,7 +234,7 @@ pub(crate) mod zobrist;
 
 pub use board::{BlastCasualties, Board, FenLoadError, FenPolicy, StateInfo, ValidationErrors};
 pub use conformance::{CASES as CONFORMANCE_CASES, ConformanceCase};
-pub use effects::{AfterState, EffectContext, MoveEffect, PostMove};
+pub use effects::{AfterState, EffectContext, MoveClassification, MoveEffect, PostMove};
 pub use setup::{Setup, SetupError};
 pub use types::{
     Bitboard, CastlingSide, Color, EnPassantMode, Move, MoveList, NO_PIECE, Outcome, Piece,
@@ -290,6 +298,7 @@ mod tests {
         assert_send_sync::<EffectContext>();
         assert_send_sync::<AfterState>();
         assert_send_sync::<MoveEffect>();
+        assert_send_sync::<MoveClassification>();
         assert_send_sync::<PostMove>();
         assert_send_sync::<Setup>();
         assert_send_sync::<FenLoadError>();

@@ -653,3 +653,191 @@ fn legal_stream_order_matches_golden_startpos() {
         ]
     );
 }
+
+/// Fixtures for the classification differential: the plan-1 child-view
+/// fixtures (stalemate, extinction, material draw, clock, en-passant escape,
+/// castling) plus the effect fixtures, so every rule branch of the analysis
+/// pass is visited at least once.
+const CLASSIFICATION_FIXTURES: &[&str] = &[
+    // Stalemate children.
+    "7k/7p/pK5P/P7/8/8/2r5/8 b - - 24 55",
+    "8/8/k7/2p4p/7P/7K/5r2/8 b - - 1 59",
+    // Extinction child.
+    "k1n5/8/1K6/8/8/8/8/8 b - - 0 1",
+    // Material-draw children, one from a capture.
+    "8/8/8/2R5/4n3/8/7K/5k2 b - - 13 69",
+    "8/8/8/8/8/7k/8/2K3Rr b - - 19 74",
+    "k7/8/8/8/8/8/8/7K w - - 0 1",
+    // Clock: a mate on the 100th ply and a quiet 50-move draw.
+    "7k/8/8/5N2/3K4/8/8/R6R w - - 99 60",
+    "4k3/8/8/8/8/8/8/R3K3 w - - 99 60",
+    // A child whose only legal move is an en-passant escape.
+    "8/5kp1/1p5p/p1p4P/PP2RPPK/6r1/8/7n b - - 17 41",
+    // A child that keeps (some) castling rights.
+    "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+    // Touching commoners: immune, and the capture of the enemy commoner
+    // explodes the mover's own.
+    "8/8/8/8/3kK2r/8/7b/8 w - - 0 1",
+    // Explosion wins for the mover.
+    "4R1k1/8/8/8/8/8/8/4K3 w - - 0 1",
+];
+
+#[test]
+fn classification_matches_effect_and_child() {
+    let mut candidates = 0u64;
+    let mut legal_candidates = 0u64;
+    let mut check = |board: &Board, state: &StateInfo| {
+        let ctx = board.effect_context_with_state(state);
+        let us = board.side_to_move();
+        let them = us.flip();
+        let mut pseudo = MoveList::new();
+        generate_pseudo_legal(board, &mut pseudo);
+        let mut legal = MoveList::new();
+        generate_legal_with_state(board, state, &mut legal);
+
+        for &m in pseudo.as_slice() {
+            let classification = ctx.classification(board, m);
+            let effect = ctx.effect(board, m);
+
+            // The two entry points derive the same five fields.
+            assert_eq!(
+                classification,
+                effect.classification(),
+                "{} {m}: classification vs effect",
+                board.fen()
+            );
+            assert_eq!(classification.is_capture, effect.is_capture, "{m}");
+            assert_eq!(classification.casualties, effect.casualties, "{m}");
+            assert_eq!(classification.checks_enemy, effect.checks_enemy, "{m}");
+            assert_eq!(
+                classification.explodes_enemy_commoner, effect.explodes_enemy_commoner,
+                "{m}"
+            );
+            assert_eq!(
+                classification.leaves_own_commoner, effect.leaves_own_commoner,
+                "{m}"
+            );
+
+            // Every field equals the independent board/child oracle.
+            assert_eq!(
+                classification.is_capture,
+                board.is_capture(m),
+                "{} {m}: capture",
+                board.fen()
+            );
+            assert_eq!(
+                classification.casualties,
+                board.blast_casualties(m),
+                "{} {m}: casualties",
+                board.fen()
+            );
+
+            let mut child = board.clone();
+            let mut child_state = StateInfo::new();
+            child.do_move(m, &mut child_state);
+            assert_eq!(
+                classification.leaves_own_commoner,
+                !child.commoners(us).is_empty(),
+                "{} {m}: own commoner",
+                board.fen()
+            );
+            assert_eq!(
+                classification.explodes_enemy_commoner,
+                !board.commoners(them).is_empty() && child.commoners(them).is_empty(),
+                "{} {m}: enemy commoner",
+                board.fen()
+            );
+            assert_eq!(
+                classification.checks_enemy,
+                !child.checkers().is_empty(),
+                "{} {m}: check",
+                board.fen()
+            );
+
+            // A classification of a legal move is exactly the effect of it.
+            if legal.as_slice().contains(&m) {
+                legal_candidates += 1;
+                assert_eq!(classification, effect.classification(), "{m}");
+            }
+            candidates += 1;
+        }
+    };
+
+    walk_corpus_and_fixtures(CLASSIFICATION_FIXTURES, &mut check);
+    walk_playouts(&mut check);
+    assert!(
+        candidates > 50_000,
+        "expected many candidates, got {candidates}"
+    );
+    assert!(
+        legal_candidates > 10_000,
+        "expected many legal candidates, got {legal_candidates}"
+    );
+    eprintln!("classification checked on {candidates} candidates ({legal_candidates} legal)");
+}
+
+#[test]
+fn classification_malformed_input() {
+    use atomic_movegen::{BlastCasualties, MoveClassification, Square};
+
+    let empty = MoveClassification {
+        is_capture: false,
+        casualties: BlastCasualties::default(),
+        checks_enemy: false,
+        explodes_enemy_commoner: false,
+        leaves_own_commoner: false,
+    };
+
+    // A board whose a1, e4 and e5 are empty, so the malformed moves are
+    // unambiguous.
+    let board = Board::from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+    let ctx = board.effect_context();
+    assert_eq!(ctx.classification(&board, Move::NONE), empty);
+    assert_eq!(
+        ctx.classification(&board, Move::NONE),
+        ctx.effect(&board, Move::NONE).classification()
+    );
+
+    // An empty origin square is malformed too.
+    let m = Move::make_move(Square::E4, Square::E5);
+    assert_eq!(ctx.classification(&board, m), empty);
+    assert_eq!(
+        ctx.classification(&board, m),
+        ctx.effect(&board, m).classification()
+    );
+
+    // The capture flag of malformed input comes from the *parent* view (as
+    // `effect` documents): `Move::NONE` has `a1` as its destination, which is
+    // occupied on the start position.
+    let board = Board::new();
+    let ctx = board.effect_context();
+    let e = ctx.classification(&board, Move::NONE);
+    assert_eq!(Move::NONE.to_sq(), Square::A1);
+    assert!(e.is_capture);
+    assert_eq!(e, ctx.effect(&board, Move::NONE).classification());
+    assert_eq!(e.casualties, BlastCasualties::default());
+    assert!(!e.checks_enemy);
+    assert!(!e.explodes_enemy_commoner);
+    assert!(!e.leaves_own_commoner);
+
+    // A game-over parent still classifies: the classification is not a
+    // legality verdict, so the quiet rook moves report `leaves_own_commoner`
+    // even though every one of them is illegal.
+    let board = Board::from_fen("8/8/8/8/8/8/8/R6K w - - 0 1").unwrap();
+    let ctx = board.effect_context();
+    let mut pseudo = MoveList::new();
+    generate_pseudo_legal(&board, &mut pseudo);
+    assert!(!pseudo.is_empty());
+    for &m in pseudo.as_slice() {
+        assert_eq!(
+            ctx.classification(&board, m),
+            ctx.effect(&board, m).classification(),
+            "{m}"
+        );
+        assert!(
+            ctx.classification(&board, m).leaves_own_commoner,
+            "{m}: a commoner-only move"
+        );
+        assert!(!ctx.is_legal(&board, m), "{m}: game over parent");
+    }
+}

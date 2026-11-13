@@ -2,6 +2,40 @@
 
 This guide explains how to find performance bottlenecks in a Rust application on Linux, especially how much CPU time is spent in different functions.
 
+## Where to look in this crate
+
+Before reaching for a profiler, the relevant code is small enough to name:
+
+- `src/board.rs` — `Board::do_move` / `undo_move`, `Board::legal`,
+  `populate_state`; the board's own hot path.
+- `src/position.rs` — the crate-private `PositionView` the rules read
+  (placement only). `Board::legal`, the move generator, the fast-legality
+  ladder, `child_view` (the child of a move, derived without a board write) and
+  `terminal_in_view` (the one terminal precedence) all live here.
+- `src/movegen.rs` — the pseudo-legal generator, the fast-legality ladder
+  (`legal_with_counts` and the per-move ladder above it), and
+  `has_legal_move_in_view`.
+- `src/effects.rs` — `EffectContext`: `analyze` (the child derivation),
+  `classification` (rules fields, no legality ladder) and `is_legal_from`
+  (the ladder on the child view). The child path of the effect context is the
+  place to look when a consumer reports time spent on “is this child over?”.
+- `src/magic.rs` / `src/attacks.rs` — slider tables and leaper attacks.
+
+Measured starting points (see `cargo run --release --example effect_bench`,
+`examples/verify_perft.rs` for whole-tree timing):
+
+- `Board::legal` ≈ 8–9 ns per candidate; the effect path ≈ 26–29 ns per
+  candidate because it derives the child placement instead of reading
+  node-constant `StateInfo`.
+- `generate_legal_with_state` ≈ 100–115 ns per node at the bench positions;
+  `for_each_legal` ≈ 75–85 ns; `has_legal_move` ≈ 6–7 ns (first legal move).
+- The child path (`terminal_after`, `child_outcome`, `post_move`) is 20–50 ns
+  per child on those positions.
+
+If a change makes any of these worse by more than ~2 %, treat it as a
+regression, not a note: profile first, then confirm with
+`cargo run --release --example verify_perft 5` for a whole-tree number.
+
 ## Is `perf` the right tool?
 
 Yes. For CPU bottlenecks in native Rust applications on Linux, `perf` is usually the right first serious tool.

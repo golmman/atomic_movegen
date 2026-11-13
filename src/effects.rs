@@ -66,6 +66,11 @@
 //! [`MoveEffect::casualties`] remains the effect-path summary of the same
 //! fact for consumers that only need the removed pieces.
 //!
+//! # Effect
+//!
+//! [`EffectContext::effect`] is the full answer: the classification plus the
+//! legality verdict.
+//!
 //! ```
 //! use atomic_movegen::{Board, Move};
 //!
@@ -80,6 +85,30 @@
 //! assert!(!effect.checks_enemy);
 //! assert_eq!(effect.is_legal, board.is_legal(m));
 //! ```
+//!
+//! # Classification without the legality ladder
+//!
+//! [`EffectContext::classification`] returns the rules fields of a move as a
+//! [`MoveClassification`] and stops there: no `is_attacked_by` query for the
+//! mover's commoner is run. A consumer that classified the moves it got from
+//! [`generate_legal_with_state`](crate::movegen::generate_legal_with_state) has
+//! already paid for the verdict, so [`effect`](EffectContext::effect) would
+//! repeat it.
+//!
+//! ```
+//! use atomic_movegen::{Board, MoveList};
+//! use atomic_movegen::movegen::generate_legal;
+//!
+//! let board = Board::from_fen("4R1k1/8/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+//! let ctx = board.effect_context();
+//! let mut legal = MoveList::new();
+//! generate_legal(&board, &mut legal);
+//!
+//! for &m in legal.as_slice() {
+//!     assert_eq!(ctx.classification(&board, m), ctx.effect(&board, m).classification());
+//! }
+//! ```
+//!
 
 use crate::attacks;
 use crate::board::{BlastCasualties, Board, StateInfo, is_attacked_by};
@@ -89,8 +118,9 @@ use crate::types::*;
 /// Node-constant data for classifying moves without mutating the board.
 ///
 /// Build once per position with [`Board::effect_context`] or
-/// [`Board::effect_context_with_state`], then call [`effect`](Self::effect) or
-/// [`is_legal`](Self::is_legal) for each pseudo-legal candidate. The context is
+/// [`Board::effect_context_with_state`], then call [`effect`](Self::effect),
+/// [`classification`](Self::classification) or [`is_legal`](Self::is_legal)
+/// for each pseudo-legal candidate. The context is
 /// a snapshot: it stays valid while `board` does not change and holds no
 /// reference to it.
 ///
@@ -111,10 +141,56 @@ pub struct EffectContext {
     game_over: bool,
 }
 
+/// The rules classification of one pseudo-legal move, without a legality
+/// verdict.
+///
+/// Equal field for field to the corresponding [`MoveEffect`] fields for every
+/// pseudo-legal move. Returned by [`EffectContext::classification`] for callers
+/// that already know the move is legal (for example because it came out of
+/// [`generate_legal_with_state`](crate::movegen::generate_legal_with_state)) and
+/// therefore have no use for a second legality query.
+///
+/// # Semantics
+///
+/// A classification is a statement about the *rules*, not about reachability:
+/// it says what the move and its blast would do, not whether the move is
+/// allowed. A move with `leaves_own_commoner == false` is a self-explosion and
+/// can never be legal, but every other field can be true or false for both
+/// legal and illegal moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MoveClassification {
+    /// The move removes a piece (normal capture or en passant).
+    pub is_capture: bool,
+    /// Every piece removed by the move's blast, including the capturer at
+    /// ground zero and the en-passant victim. Empty for quiet moves, quiet
+    /// promotions, and castling.
+    pub casualties: BlastCasualties,
+    /// The move leaves the enemy commoner attacked by the mover's pieces,
+    /// after the move and the blast.
+    ///
+    /// `false` when the enemy commoner is gone, when the mover has no commoner
+    /// left, or when the two commoners touch — touching makes the commoner
+    /// immune to every attack, so it is not a check.
+    pub checks_enemy: bool,
+    /// The move's blast removes the enemy commoner. Such a move ends the game
+    /// immediately; the blast may or may not also be the mover's own.
+    pub explodes_enemy_commoner: bool,
+    /// The mover still has at least one commoner after the move and the blast.
+    ///
+    /// A move with `false` here destroys the mover's own commoner and is
+    /// always illegal.
+    pub leaves_own_commoner: bool,
+}
+
 /// The rules effects of one pseudo-legal move.
 ///
 /// Returned by [`EffectContext::effect`]. Every field is derivable from the
 /// atomic rules alone; nothing here encodes a search design.
+///
+/// The five rules fields are also available on their own as a
+/// [`MoveClassification`], either with
+/// [`EffectContext::classification`] (which does not run the legality ladder)
+/// or with [`MoveEffect::classification`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MoveEffect {
     /// The move removes a piece (normal capture or en passant).
@@ -141,6 +217,21 @@ pub struct MoveEffect {
     /// Equivalent to [`Board::legal`] for a pseudo-legal move decorated by the
     /// same populated [`StateInfo`] as the context.
     pub is_legal: bool,
+}
+
+impl MoveEffect {
+    /// The classification part of this effect: everything except `is_legal`.
+    #[inline]
+    #[must_use]
+    pub fn classification(&self) -> MoveClassification {
+        MoveClassification {
+            is_capture: self.is_capture,
+            casualties: self.casualties,
+            checks_enemy: self.checks_enemy,
+            explodes_enemy_commoner: self.explodes_enemy_commoner,
+            leaves_own_commoner: self.leaves_own_commoner,
+        }
+    }
 }
 
 /// What an [`EffectContext`] knows about the child position after a move.
@@ -282,26 +373,70 @@ impl EffectContext {
     #[must_use]
     pub fn effect_and_post(&self, board: &Board, m: Move) -> (MoveEffect, Option<PostMove>) {
         let post = self.analyze(board, m);
-        let effect = match &post {
-            None => MoveEffect {
-                is_capture: self.view.is_capture(m),
-                casualties: BlastCasualties::default(),
-                checks_enemy: false,
-                explodes_enemy_commoner: false,
-                leaves_own_commoner: false,
-                is_legal: false,
-            },
-            Some(post) => MoveEffect {
-                is_capture: post.is_capture,
-                casualties: post.casualties,
-                checks_enemy: self.checks_enemy(post),
-                explodes_enemy_commoner: !self.their_commoners().is_empty()
-                    && post.view.commoners(self.them()).is_empty(),
-                leaves_own_commoner: !post.view.commoners(self.us()).is_empty(),
-                is_legal: self.is_legal_from(m, post),
-            },
+        let (classification, is_legal) = match &post {
+            None => (self.classify_malformed(m), false),
+            Some(post) => (self.classify(post), self.is_legal_from(m, post)),
+        };
+        let effect = MoveEffect {
+            is_capture: classification.is_capture,
+            casualties: classification.casualties,
+            checks_enemy: classification.checks_enemy,
+            explodes_enemy_commoner: classification.explodes_enemy_commoner,
+            leaves_own_commoner: classification.leaves_own_commoner,
+            is_legal,
         };
         (effect, post)
+    }
+
+    /// Classify `m` without running the legality ladder.
+    ///
+    /// Same fields as [`effect`](Self::effect) minus `is_legal`, derived in the
+    /// same analysis pass: no `is_attacked_by` query for the *mover's*
+    /// commoner is run. Use [`effect`](Self::effect) or
+    /// [`is_legal`](Self::is_legal) when the verdict itself is needed.
+    ///
+    /// Malformed input ([`Move::NONE`], an empty origin square, an origin
+    /// without a piece of the side to move) yields all-`false`/empty fields,
+    /// exactly like the malformed branch of [`effect`](Self::effect).
+    ///
+    /// The classification does not imply legality: a pseudo-legal move that
+    /// loses the mover's commoner is classified (`leaves_own_commoner ==
+    /// false`) and is illegal. Call this only for moves whose legality is
+    /// already known, e.g. moves taken from
+    /// [`generate_legal_with_state`](crate::movegen::generate_legal_with_state).
+    #[must_use]
+    pub fn classification(&self, board: &Board, m: Move) -> MoveClassification {
+        match self.analyze(board, m) {
+            None => self.classify_malformed(m),
+            Some(post) => self.classify(&post),
+        }
+    }
+
+    /// The rules fields of `m` for an already derived child.
+    ///
+    /// The single derivation behind [`classification`](Self::classification)
+    /// and [`effect`](Self::effect), so the two can never disagree.
+    fn classify(&self, post: &PostMove) -> MoveClassification {
+        MoveClassification {
+            is_capture: post.is_capture,
+            casualties: post.casualties,
+            checks_enemy: self.checks_enemy(post),
+            explodes_enemy_commoner: !self.their_commoners().is_empty()
+                && post.view.commoners(self.them()).is_empty(),
+            leaves_own_commoner: !post.view.commoners(self.us()).is_empty(),
+        }
+    }
+
+    /// The documented malformed-input classification: capture flag from the
+    /// parent view, everything else empty.
+    fn classify_malformed(&self, m: Move) -> MoveClassification {
+        MoveClassification {
+            is_capture: self.view.is_capture(m),
+            casualties: BlastCasualties::default(),
+            checks_enemy: false,
+            explodes_enemy_commoner: false,
+            leaves_own_commoner: false,
+        }
     }
 
     /// The child summary after `m`, derived without a board write.
@@ -890,6 +1025,51 @@ mod tests {
                 // `outcome_after` is the documented reduction of the arm.
                 assert_eq!(ctx.outcome_after(&board, m), actual.outcome(), "{fen} {m}");
             }
+        }
+    }
+
+    #[test]
+    fn classification_matches_effect() {
+        for fen in CORPUS {
+            let board = Board::from_fen(fen).expect("corpus FEN must parse");
+            let mut state = StateInfo::new();
+            board.populate_state(&mut state);
+            let ctx = EffectContext::new(&board, &state);
+
+            let mut pseudo = MoveList::new();
+            generate_pseudo_legal(&board, &mut pseudo);
+            for &m in pseudo.as_slice() {
+                let classification = ctx.classification(&board, m);
+                let effect = ctx.effect(&board, m);
+                assert_eq!(classification, effect.classification(), "{fen} {m}");
+                assert_eq!(classification.is_capture, effect.is_capture, "{fen} {m}");
+                assert_eq!(classification.casualties, effect.casualties, "{fen} {m}");
+                assert_eq!(
+                    classification.checks_enemy, effect.checks_enemy,
+                    "{fen} {m}"
+                );
+                assert_eq!(
+                    classification.explodes_enemy_commoner, effect.explodes_enemy_commoner,
+                    "{fen} {m}"
+                );
+                assert_eq!(
+                    classification.leaves_own_commoner, effect.leaves_own_commoner,
+                    "{fen} {m}"
+                );
+                assert_eq!(classification.is_capture, board.is_capture(m), "{fen} {m}");
+                assert_eq!(
+                    classification.casualties,
+                    board.blast_casualties(m),
+                    "{fen} {m}"
+                );
+            }
+
+            // The malformed branch of both entry points agrees as well.
+            assert_eq!(
+                ctx.classification(&board, Move::NONE),
+                ctx.effect(&board, Move::NONE).classification(),
+                "{fen}"
+            );
         }
     }
 

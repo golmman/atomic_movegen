@@ -7,8 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-11-13
+
+Child terminality without a board write, a two-level child answer, the
+post-move summary, and a legality-free classification of a move. The crate's
+hot path (`Board::legal`, `populate_state`, the generator and the fast-legality
+ladder) is unchanged since 2.6.0: no move order, perft value, hash, FEN output,
+or `Outcome`/`Terminal` semantics changed.
+
 ### Added
 
+- Move classification without the legality ladder. `MoveClassification`
+  (`is_capture`, `casualties`, `checks_enemy`, `explodes_enemy_commoner`,
+  `leaves_own_commoner`) is `MoveEffect` without `is_legal`, and is returned by
+  `EffectContext::classification()`, which skips the `is_attacked_by` query for
+  the mover's commoner. It is the query for a caller that already holds a legal
+  move (for example one taken from `movegen::generate_legal_with_state()`) and
+  therefore does not need the verdict a second time.
+  `MoveEffect::classification()` returns the same value from a full effect, and
+  both entry points share one derivation, so they cannot disagree. Measured
+  saving on this crate's bench positions: ~5–7 ns per pseudo-legal move
+  (`examples/effect_bench.rs`).
 - Child terminality without a board write. `EffectContext::terminal_after()`
   (and the `Board::terminal_after()` wrapper) return the child position's
   `Terminal { outcome, reason }` for every **pseudo-legal** move, equal to
@@ -43,6 +62,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `EffectContext::effect()` is now `effect_and_post(..).0` with the five rules
+  fields coming from `classification()`; its result is unchanged field for
+  field (the effect differential in `tests/effects.rs` is untouched).
 - `EffectContext::outcome_after()` lost its clone fallback: it is now
   `child_outcome(..).outcome()` — one analysis pass, with no board written,
   cloned or moved for any child. Signature and behaviour are unchanged
@@ -56,9 +78,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Property documentation: `EffectContext::outcome_after()` and
-  `Board::outcome_after()` now document that `None` means *illegal* **or**
-  *undecided*, and point at the queries that separate the two.
+- **Documentation only, no behaviour change:** `EffectContext::outcome_after()`
+  and `Board::outcome_after()` now document that `None` means *illegal* **or**
+  *undecided*, and point at the queries that separate the two. The previous
+  text mentioned only the illegal case, which was a correctness trap for a
+  consumer that read `None` as “the child is decided”.
 
 ## [2.6.0] - 2026-11-13
 

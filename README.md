@@ -71,6 +71,11 @@ reference implementation.
   en-passant target, castling rights and half-move clock — with no board write
   and no rules verdict; `effect_and_post()` returns both values from one
   analysis pass
+- Classification without the legality ladder: `EffectContext::classification()`
+  returns a `MoveClassification` (`MoveEffect` minus `is_legal`) for a move the
+  caller already knows is legal, without re-running `is_attacked_by` for the
+  mover's commoner; `MoveEffect::classification()` gives the same value from a
+  full effect, from one shared derivation
 - Incremental Zobrist hashing (`Board::hash()`) and FSF-compatible FEN output
 - Canonical en-passant keys and FEN output: `Board::legal_ep_square()` and
   `EnPassantMode::Legal` via `hash_with()`, `fen_with()`, and
@@ -169,7 +174,7 @@ Add `atomic-movegen` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-atomic-movegen = "2.6.0"
+atomic-movegen = "2.7.0"
 ```
 
 ```rust
@@ -236,7 +241,9 @@ assert_eq!(terminal.outcome, Outcome::Loss);
 assert_eq!(terminal.reason, TerminalReason::NoMovesInCheck);
 
 // `None` = the child is not decided (never "the move is illegal").
-assert_eq!(ctx.terminal_after(&board, Move::from_uci("h1h2").unwrap()), None);
+let board = Board::new();
+let ctx = board.effect_context();
+assert_eq!(ctx.terminal_after(&board, Move::from_uci("e2e4").unwrap()), None);
 ```
 
 `outcome_after` returns `None` for an illegal **or** an undecided child; the
@@ -261,6 +268,45 @@ assert_eq!(ctx.child_outcome(&board, m), AfterState::Illegal);
 
 `child_outcome` returns `AfterState::Terminal(t)` when the child is decided, with
 `t` exactly the `Terminal` a cloned child's `Board::terminal()` reports.
+
+A search that already has the legal move list does not need the legality verdict
+a second time: `EffectContext::classification()` returns the same five rules
+fields as `effect()` without running the legality ladder.
+
+```rust
+use atomic_movegen::movegen::generate_legal;
+use atomic_movegen::{Board, MoveList};
+
+let board = Board::from_fen("4R1k1/8/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+let ctx = board.effect_context();
+let mut legal = MoveList::new();
+generate_legal(&board, &mut legal);
+
+let mut wins = 0usize;
+for &m in legal.as_slice() {
+    let classification = ctx.classification(&board, m);
+    assert_eq!(classification, ctx.effect(&board, m).classification());
+    if classification.explodes_enemy_commoner {
+        wins += 1;
+    }
+}
+assert!(wins >= 1);
+```
+
+A classification is not a legality claim: the self-explosion of the fixture
+above (`e1d1`) classifies as `leaves_own_commoner == false` and is illegal.
+Use `effect`, `is_legal` or `child_outcome` when the verdict is the question.
+
+What the effect path does and does not decide: it answers every *rules*
+question about a pseudo-legal move — legality, the child's terminal state, the
+child's placement and clock — from bitboards, with no board write and no
+allocation. It does not replace `Board::legal` or the generator on their own
+hot paths: the 2.5.0/2.7.0 measurements (`cargo run --release --example
+effect_bench`) put `Board::legal` at ~8–9 ns per candidate and `effect()` at
+~26–29 ns, because the effect path derives the child placement while
+`Board::legal` reads the parent's node-constant `StateInfo`. Use the effect
+path when you need the *effects* (captures, casualties, checks, explosions,
+child terminality, child facts) — not as a faster `legal()`.
 
 `PostMove` carries the child facts without a rules opinion — no legality, no
 terminality, no material shortcut:
