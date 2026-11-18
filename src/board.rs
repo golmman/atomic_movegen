@@ -95,6 +95,14 @@ impl ValidationErrors {
     pub const INVALID_CASTLING_RIGHTS: Self = Self(1 << 8);
     /// The material exceeds the conservative legal-start-plus-promotions bound.
     pub const TOO_MUCH_MATERIAL: Self = Self(1 << 9);
+    /// The side to move is in a check that the last move could not have given.
+    ///
+    /// This mirrors the shakmaty/`Setup` impossible-check class used by
+    /// [`FenPolicy::Lichess`]. The atomic rules make most configurations that
+    /// would be impossible in standard chess reachable after an explosion, so
+    /// this flag is only raised when a stored en-passant target makes the
+    /// double-push history explicit.
+    pub const IMPOSSIBLE_CHECK: Self = Self(1 << 10);
 
     /// Return an empty error set.
     #[must_use]
@@ -163,7 +171,7 @@ impl BitAndAssign for ValidationErrors {
 
 impl fmt::Display for ValidationErrors {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        const NAMES: [(ValidationErrors, &str); 10] = [
+        const NAMES: [(ValidationErrors, &str); 11] = [
             (ValidationErrors::EMPTY_BOARD, "EMPTY_BOARD"),
             (
                 ValidationErrors::MISSING_COMMONER_WHITE,
@@ -189,6 +197,7 @@ impl fmt::Display for ValidationErrors {
                 "INVALID_CASTLING_RIGHTS",
             ),
             (ValidationErrors::TOO_MUCH_MATERIAL, "TOO_MUCH_MATERIAL"),
+            (ValidationErrors::IMPOSSIBLE_CHECK, "IMPOSSIBLE_CHECK"),
         ];
 
         if self.is_empty() {
@@ -231,6 +240,26 @@ pub enum FenPolicy {
     AllowImpossibleCheck,
     /// Syntax only, exactly like [`Board::from_fen`].
     Permissive,
+    /// Mirror the shakmaty/`Setup` acceptance used by the downstream's
+    /// `parity` predicate.
+    ///
+    /// Unlike the other policies, this policy both **drops** and **rejects**:
+    ///
+    /// - a castling right not backed by the required commoner and rook on its
+    ///   home square is dropped, keeping every other valid right;
+    /// - an en-passant target not consistent with a double push is dropped;
+    /// - the conservative material bound is not a rejection;
+    /// - an empty board, a missing or extra commoner that the atomic
+    ///   `Setup` constructor rejects, a pawn on the back ranks, the side that
+    ///   just moved being in check, and the atomic impossible-check class are
+    ///   rejected.
+    ///
+    /// The name refers to the downstream parity predicate, not to every
+    /// behavior of the Lichess site. Syntax errors are still reported as
+    /// [`FenError`], and the parser keeps the crate's standard FEN grammar
+    /// (4 or 6 fields, `KQkq` castling letters, `K`/`k` commoners). Use
+    /// [`Board::from_fen`] for the permissive parser.
+    Lichess,
 }
 
 /// Error returned by [`Board::from_fen_with`].
@@ -286,6 +315,380 @@ fn char_to_piece(c: char) -> Option<Piece> {
         'k' => Some(B_COMMONER),
         _ => None,
     }
+}
+
+/// The syntax-only result of parsing a FEN string.
+///
+/// Castling rights and the en passant target are stored raw: the parser does
+/// not require them to be backed by pieces on the board or by a double push.
+/// [`Board::from_fen`] applies those structural checks itself, and
+/// [`FenPolicy::Lichess`] sanitizes the raw values instead.
+struct ParsedFen {
+    squares: [Piece; 64],
+    side_to_move: Color,
+    castling_rights: u8,
+    ep_square: Option<Square>,
+    rule50: u16,
+    game_ply: u16,
+}
+
+/// Parse the field count, placement, side, castling characters, and the
+/// en-passant token syntax.
+///
+/// Clocks are left at their defaults; call [`parse_fen_clocks`] once the
+/// caller has finished its structural checks so that the existing
+/// [`Board::from_fen`] error precedence is preserved.
+fn parse_fen_prefix(fen: &str) -> Result<ParsedFen, FenError> {
+    let parts: Vec<&str> = fen.split_whitespace().collect();
+    if parts.len() < 4 {
+        return Err(FenError::TooShort { parts: parts.len() });
+    }
+    if parts.len() != 4 && parts.len() != 6 {
+        return Err(FenError::InvalidFieldCount { got: parts.len() });
+    }
+
+    let mut parsed = ParsedFen {
+        squares: [NO_PIECE; 64],
+        side_to_move: Color::White,
+        castling_rights: 0,
+        ep_square: None,
+        rule50: 0,
+        game_ply: 1,
+    };
+
+    // FEN piece placement: rank 8 to rank 1, left to right
+    // Our board indices: rank 1 = 0-7, rank 2 = 8-15, ..., rank 8 = 56-63
+    let rows: Vec<&str> = parts[0].split('/').collect();
+    if rows.len() != 8 {
+        return Err(FenError::WrongRankCount {
+            expected: 8,
+            got: rows.len(),
+        });
+    }
+    for (ri, row) in rows.iter().enumerate() {
+        let rank_idx = 7 - ri; // rank 0 (index 7) = rank 8 in FEN
+        let fen_rank = 8 - ri; // FEN rank number for error messages
+        let mut col = 0usize;
+        for c in row.chars() {
+            if c == '0' {
+                return Err(FenError::InvalidPlacement(format!(
+                    "'0' is not a valid empty-square count at rank {fen_rank}, col {col}"
+                )));
+            }
+            if c.is_ascii_digit() {
+                let digit = c.to_digit(10).unwrap() as usize;
+                if col + digit > 8 {
+                    return Err(FenError::InvalidPlacement(format!(
+                        "digit {c} at rank {fen_rank}, col {col} would exceed 8 columns"
+                    )));
+                }
+                col += digit;
+            } else if let Some(piece) = char_to_piece(c) {
+                if col >= 8 {
+                    return Err(FenError::InvalidPlacement(format!(
+                        "piece '{c}' at rank {fen_rank} is placed past column 8"
+                    )));
+                }
+                parsed.squares[rank_idx * 8 + col] = piece;
+                col += 1;
+            } else {
+                return Err(FenError::InvalidPlacement(format!(
+                    "invalid character '{c}' at rank {fen_rank}, col {col}"
+                )));
+            }
+        }
+        if col != 8 {
+            return Err(FenError::InvalidPlacement(format!(
+                "rank {fen_rank} has {col} columns, expected 8"
+            )));
+        }
+    }
+
+    parsed.side_to_move = match parts[1] {
+        "w" => Color::White,
+        "b" => Color::Black,
+        _ => {
+            return Err(FenError::InvalidSideToMove(parts[1].to_string()));
+        }
+    };
+
+    for c in parts[2].chars() {
+        match c {
+            'K' => parsed.castling_rights |= WK_CASTLE,
+            'Q' => parsed.castling_rights |= WQ_CASTLE,
+            'k' => parsed.castling_rights |= BK_CASTLE,
+            'q' => parsed.castling_rights |= BQ_CASTLE,
+            '-' => break,
+            _ => {
+                return Err(FenError::InvalidCastling(c.to_string()));
+            }
+        }
+    }
+
+    parsed.ep_square = if parts[3] == "-" {
+        None
+    } else {
+        Some(
+            crate::types::parse_sq(parts[3])
+                .ok_or_else(|| FenError::InvalidEpSquare(parts[3].to_string()))?,
+        )
+    };
+
+    Ok(parsed)
+}
+
+/// Parse the half-move clock and full-move number.
+///
+/// The field count is expected to have been validated by
+/// [`parse_fen_prefix`]. Keeping the clocks out of that function preserves
+/// [`Board::from_fen`]'s existing error order: castling and en-passant
+/// geometry errors are reported before clock errors.
+fn parse_fen_clocks(fen: &str, side_to_move: Color) -> Result<(u16, u16), FenError> {
+    let parts: Vec<&str> = fen.split_whitespace().collect();
+
+    let rule50 = if parts.len() > 4 {
+        parts[4]
+            .parse::<u16>()
+            .map_err(|e| FenError::ParseInt(e.to_string()))?
+    } else {
+        0
+    };
+
+    let game_ply = if parts.len() > 5 {
+        let fm = parts[5]
+            .parse::<u16>()
+            .map_err(|e| FenError::ParseInt(e.to_string()))?;
+        if fm == 0 {
+            return Err(FenError::ParseInt(parts[5].to_string()));
+        }
+        2 * (fm - 1) + if side_to_move == Color::White { 1 } else { 2 }
+    } else if side_to_move == Color::White {
+        1
+    } else {
+        2
+    };
+
+    Ok((rule50, game_ply))
+}
+
+/// Parse a FEN string including its clocks, without applying castling-backing
+/// or en-passant geometry checks.
+fn parse_fen_syntax(fen: &str) -> Result<ParsedFen, FenError> {
+    let mut parsed = parse_fen_prefix(fen)?;
+    let (rule50, game_ply) = parse_fen_clocks(fen, parsed.side_to_move)?;
+    parsed.rule50 = rule50;
+    parsed.game_ply = game_ply;
+    Ok(parsed)
+}
+
+/// Return `true` when `sq` is consistent with a double push by the side that
+/// just moved.
+///
+/// This is the full structural predicate: target on rank 6/3, target empty,
+/// the enemy pawn on the victim square behind it, and the double-push origin
+/// empty.
+fn ep_geometry_is_consistent(squares: &[Piece; 64], side_to_move: Color, sq: Square) -> bool {
+    let expected_rank = match side_to_move {
+        Color::White => Rank::R6,
+        Color::Black => Rank::R3,
+    };
+    if rank_of(sq) != expected_rank {
+        return false;
+    }
+    let them = side_to_move.flip();
+    let (pawn_sq, origin_sq) = match side_to_move {
+        Color::White => (
+            Square::from_index(sq as i8 - 8),
+            Square::from_index(sq as i8 + 8),
+        ),
+        Color::Black => (
+            Square::from_index(sq as i8 + 8),
+            Square::from_index(sq as i8 - 8),
+        ),
+    };
+    squares[pawn_sq as usize] == make_piece(them, PieceType::Pawn)
+        && squares[origin_sq as usize] == NO_PIECE
+        && squares[sq as usize] == NO_PIECE
+}
+
+/// Drop castling rights and an en-passant target that the Lichess/`parity`
+/// predicate would discard instead of rejecting.
+fn sanitize_lichess(parsed: &mut ParsedFen) {
+    let white_commoner =
+        parsed.squares[Square::E1 as usize] == make_piece(Color::White, PieceType::Commoner);
+    let white_rook = make_piece(Color::White, PieceType::Rook);
+    if parsed.castling_rights & WK_CASTLE != 0
+        && !(white_commoner && parsed.squares[Square::H1 as usize] == white_rook)
+    {
+        parsed.castling_rights &= !WK_CASTLE;
+    }
+    if parsed.castling_rights & WQ_CASTLE != 0
+        && !(white_commoner && parsed.squares[Square::A1 as usize] == white_rook)
+    {
+        parsed.castling_rights &= !WQ_CASTLE;
+    }
+
+    let black_commoner =
+        parsed.squares[Square::E8 as usize] == make_piece(Color::Black, PieceType::Commoner);
+    let black_rook = make_piece(Color::Black, PieceType::Rook);
+    if parsed.castling_rights & BK_CASTLE != 0
+        && !(black_commoner && parsed.squares[Square::H8 as usize] == black_rook)
+    {
+        parsed.castling_rights &= !BK_CASTLE;
+    }
+    if parsed.castling_rights & BQ_CASTLE != 0
+        && !(black_commoner && parsed.squares[Square::A8 as usize] == black_rook)
+    {
+        parsed.castling_rights &= !BQ_CASTLE;
+    }
+
+    if let Some(sq) = parsed.ep_square
+        && !ep_geometry_is_consistent(&parsed.squares, parsed.side_to_move, sq)
+    {
+        parsed.ep_square = None;
+    }
+}
+
+/// Return the attackers of `square` under the atomic validation rule.
+///
+/// This mirrors shakmaty's atomic `king_attackers`: a side without a commoner
+/// gives no check, and two touching commoners make the target immune to every
+/// attack from that side.
+fn atomic_validation_attackers(
+    board: &Board,
+    square: Square,
+    attacker: Color,
+    occupied: Bitboard,
+) -> Bitboard {
+    let attacker_commoners = board.commoners(attacker);
+    if attacker_commoners.is_empty()
+        || !(attacks::king_attacks(square) & attacker_commoners).is_empty()
+    {
+        Bitboard::EMPTY
+    } else {
+        board.attackers_to_color(square, attacker, occupied)
+    }
+}
+
+/// Return the validation flags for the Lichess/`parity` predicate on an
+/// already-sanitized board.
+///
+/// This mirrors the atomic `Setup` constructor with the recoverable
+/// `INVALID_CASTLING_RIGHTS`, `INVALID_EP_SQUARE`, and `TOO_MUCH_MATERIAL`
+/// classes discarded. Castling and en passant have already been sanitized by
+/// [`sanitize_lichess`], so this function only reports the classes that the
+/// constructor rejects.
+fn lichess_validation_errors(board: &Board) -> ValidationErrors {
+    let mut errors = ValidationErrors::empty();
+
+    if board.occupied().is_empty() {
+        errors |= ValidationErrors::EMPTY_BOARD;
+    }
+
+    const RANK_1: Bitboard = Bitboard(0x0000_0000_0000_00FF);
+    const RANK_8: Bitboard = Bitboard(0xFF00_0000_0000_0000);
+    if !(board.pieces_pt(PieceType::Pawn) & (RANK_1 | RANK_8)).is_empty() {
+        errors |= ValidationErrors::PAWNS_ON_BACKRANK;
+    }
+
+    let us = board.side_to_move();
+    let them = us.flip();
+    let us_commoners = board.commoners(us);
+    let them_commoners = board.commoners(them);
+
+    // The atomic constructor removes MISSING_KING when the opponent still has
+    // a commoner: the side to move may legitimately have just exploded. Only
+    // the opponent's missing commoner is fatal, and both missing is fatal too.
+    if them_commoners.is_empty() {
+        errors |= match them {
+            Color::White => ValidationErrors::MISSING_COMMONER_WHITE,
+            Color::Black => ValidationErrors::MISSING_COMMONER_BLACK,
+        };
+        if us_commoners.is_empty() {
+            errors |= match us {
+                Color::White => ValidationErrors::MISSING_COMMONER_WHITE,
+                Color::Black => ValidationErrors::MISSING_COMMONER_BLACK,
+            };
+        }
+    }
+    if us_commoners.count() > 1 {
+        errors |= match us {
+            Color::White => ValidationErrors::TOO_MANY_COMMONERS_WHITE,
+            Color::Black => ValidationErrors::TOO_MANY_COMMONERS_BLACK,
+        };
+    }
+    if them_commoners.count() > 1 {
+        errors |= match them {
+            Color::White => ValidationErrors::TOO_MANY_COMMONERS_WHITE,
+            Color::Black => ValidationErrors::TOO_MANY_COMMONERS_BLACK,
+        };
+    }
+
+    // The side that just moved must not be attacked by the side to move.
+    if them_commoners.count() == 1 {
+        let their_commoner = them_commoners.lsb();
+        if !atomic_validation_attackers(board, their_commoner, us, board.occupied()).is_empty() {
+            errors |= ValidationErrors::OPPOSITE_CHECK;
+        }
+    }
+
+    // Sanitization makes this unreachable on the FEN path. It matters for
+    // `from_setup_with(Lichess)`, where `from_setup` only checks the ep rank
+    // and the victim pawn, not whether the target or the double-push origin is
+    // empty.
+    let stored_ep = board.ep_square();
+    let valid_ep = stored_ep.filter(|&sq| ep_geometry_is_consistent(&board.squares, us, sq));
+    if stored_ep.is_some() && valid_ep.is_none() {
+        errors |= ValidationErrors::INVALID_EP_SQUARE;
+    }
+
+    // The atomic constructor only retains the impossible-check class when a
+    // valid en-passant target makes the last double push explicit.
+    if let Some(ep) = valid_ep
+        && us_commoners.count() == 1
+    {
+        let our_commoner = us_commoners.lsb();
+        let checkers = atomic_validation_attackers(board, our_commoner, them, board.occupied());
+        if !checkers.is_empty() {
+            let (pushed_to, pushed_from) = match us {
+                Color::White => (
+                    Square::from_index(ep as i8 - 8),
+                    Square::from_index(ep as i8 + 8),
+                ),
+                Color::Black => (
+                    Square::from_index(ep as i8 + 8),
+                    Square::from_index(ep as i8 - 8),
+                ),
+            };
+
+            let mut impossible = checkers.count() > 1;
+            if !impossible {
+                let checker = checkers.lsb();
+                if checker != pushed_to {
+                    // Rebuild occupancy as it was before the double push.
+                    let occupied = (board.occupied() & !Bitboard::square_bb(pushed_to))
+                        | Bitboard::square_bb(pushed_from);
+                    if !atomic_validation_attackers(board, our_commoner, them, occupied).is_empty()
+                    {
+                        impossible = true;
+                    }
+                }
+            }
+
+            let steppers = board.pieces_pt(PieceType::Pawn)
+                | board.pieces_pt(PieceType::Knight)
+                | board.pieces_pt(PieceType::Commoner);
+            if (checkers & steppers).count() > 1 {
+                impossible = true;
+            }
+
+            if impossible {
+                errors |= ValidationErrors::IMPOSSIBLE_CHECK;
+            }
+        }
+    }
+
+    errors
 }
 
 /// Cached state for a position, used during move generation and legality checks.
@@ -463,8 +866,10 @@ impl Board {
     /// atomic positions even though this parser accepts them.
     ///
     /// For untrusted input, use [`Board::from_fen_with`] with
-    /// [`FenPolicy::Strict`], or call [`Board::validate`] after parsing. This
-    /// method's behavior is unchanged and remains permissive.
+    /// [`FenPolicy::Strict`], or call [`Board::validate`] after parsing. For
+    /// the sanitizing Lichess/`parity` acceptance predicate use
+    /// `from_fen_with(..., FenPolicy::Lichess)`; the default parser's answer is
+    /// unchanged.
     ///
     /// # Errors
     ///
@@ -483,153 +888,66 @@ impl Board {
     /// - `ParseInt` — the half-move clock or full-move number is not a valid
     ///   integer.
     pub fn from_fen(fen: &str) -> Result<Self, FenError> {
-        let parts: Vec<&str> = fen.split_whitespace().collect();
-        if parts.len() < 4 {
-            return Err(FenError::TooShort { parts: parts.len() });
-        }
-        if parts.len() != 4 && parts.len() != 6 {
-            return Err(FenError::InvalidFieldCount { got: parts.len() });
-        }
-
-        let mut squares = [NO_PIECE; 64];
-        let mut by_color = [Bitboard::EMPTY; 2];
-        let mut by_type = [Bitboard::EMPTY; 6];
-
-        // FEN piece placement: rank 8 to rank 1, left to right
-        // Our board indices: rank 1 = 0-7, rank 2 = 8-15, ..., rank 8 = 56-63
-        let rows: Vec<&str> = parts[0].split('/').collect();
-        if rows.len() != 8 {
-            return Err(FenError::WrongRankCount {
-                expected: 8,
-                got: rows.len(),
-            });
-        }
-        for (ri, row) in rows.iter().enumerate() {
-            let rank_idx = 7 - ri; // rank 0 (index 7) = rank 8 in FEN
-            let fen_rank = 8 - ri; // FEN rank number for error messages
-            let mut col = 0usize;
-            for c in row.chars() {
-                if c == '0' {
-                    return Err(FenError::InvalidPlacement(format!(
-                        "'0' is not a valid empty-square count at rank {fen_rank}, col {col}"
-                    )));
-                }
-                if c.is_ascii_digit() {
-                    let digit = c.to_digit(10).unwrap() as usize;
-                    if col + digit > 8 {
-                        return Err(FenError::InvalidPlacement(format!(
-                            "digit {c} at rank {fen_rank}, col {col} would exceed 8 columns"
-                        )));
-                    }
-                    col += digit;
-                } else if let Some(piece) = char_to_piece(c) {
-                    if col >= 8 {
-                        return Err(FenError::InvalidPlacement(format!(
-                            "piece '{c}' at rank {fen_rank} is placed past column 8"
-                        )));
-                    }
-                    let sq_idx = rank_idx * 8 + col;
-                    let sq = Square::from_u8(sq_idx as u8);
-                    squares[sq_idx] = piece;
-                    let bb = Bitboard::square_bb(sq);
-                    by_color[piece.color().unwrap() as usize] =
-                        by_color[piece.color().unwrap() as usize] | bb;
-                    by_type[piece.type_of().unwrap() as usize] =
-                        by_type[piece.type_of().unwrap() as usize] | bb;
-                    col += 1;
-                } else {
-                    return Err(FenError::InvalidPlacement(format!(
-                        "invalid character '{c}' at rank {fen_rank}, col {col}"
-                    )));
-                }
-            }
-            if col != 8 {
-                return Err(FenError::InvalidPlacement(format!(
-                    "rank {fen_rank} has {col} columns, expected 8"
-                )));
-            }
-        }
-
-        let side_to_move = match parts[1] {
-            "w" => Color::White,
-            "b" => Color::Black,
-            _ => {
-                return Err(FenError::InvalidSideToMove(parts[1].to_string()));
-            }
-        };
-
-        let mut castling_rights = 0u8;
-        for c in parts[2].chars() {
-            match c {
-                'K' => castling_rights |= WK_CASTLE,
-                'Q' => castling_rights |= WQ_CASTLE,
-                'k' => castling_rights |= BK_CASTLE,
-                'q' => castling_rights |= BQ_CASTLE,
-                '-' => break,
-                _ => {
-                    return Err(FenError::InvalidCastling(c.to_string()));
-                }
-            }
-        }
+        let mut parsed = parse_fen_prefix(fen)?;
 
         // Validate castling rights against the actual king/commoner and rook squares.
-        if castling_rights & WK_CASTLE != 0
-            && (squares[Square::E1 as usize] != make_piece(Color::White, PieceType::Commoner)
-                || squares[Square::H1 as usize] != make_piece(Color::White, PieceType::Rook))
+        if parsed.castling_rights & WK_CASTLE != 0
+            && (parsed.squares[Square::E1 as usize]
+                != make_piece(Color::White, PieceType::Commoner)
+                || parsed.squares[Square::H1 as usize] != make_piece(Color::White, PieceType::Rook))
         {
             return Err(FenError::InvalidCastling(
                 "white king-side castling rights without required pieces".to_string(),
             ));
         }
-        if castling_rights & WQ_CASTLE != 0
-            && (squares[Square::E1 as usize] != make_piece(Color::White, PieceType::Commoner)
-                || squares[Square::A1 as usize] != make_piece(Color::White, PieceType::Rook))
+        if parsed.castling_rights & WQ_CASTLE != 0
+            && (parsed.squares[Square::E1 as usize]
+                != make_piece(Color::White, PieceType::Commoner)
+                || parsed.squares[Square::A1 as usize] != make_piece(Color::White, PieceType::Rook))
         {
             return Err(FenError::InvalidCastling(
                 "white queen-side castling rights without required pieces".to_string(),
             ));
         }
-        if castling_rights & BK_CASTLE != 0
-            && (squares[Square::E8 as usize] != make_piece(Color::Black, PieceType::Commoner)
-                || squares[Square::H8 as usize] != make_piece(Color::Black, PieceType::Rook))
+        if parsed.castling_rights & BK_CASTLE != 0
+            && (parsed.squares[Square::E8 as usize]
+                != make_piece(Color::Black, PieceType::Commoner)
+                || parsed.squares[Square::H8 as usize] != make_piece(Color::Black, PieceType::Rook))
         {
             return Err(FenError::InvalidCastling(
                 "black king-side castling rights without required pieces".to_string(),
             ));
         }
-        if castling_rights & BQ_CASTLE != 0
-            && (squares[Square::E8 as usize] != make_piece(Color::Black, PieceType::Commoner)
-                || squares[Square::A8 as usize] != make_piece(Color::Black, PieceType::Rook))
+        if parsed.castling_rights & BQ_CASTLE != 0
+            && (parsed.squares[Square::E8 as usize]
+                != make_piece(Color::Black, PieceType::Commoner)
+                || parsed.squares[Square::A8 as usize] != make_piece(Color::Black, PieceType::Rook))
         {
             return Err(FenError::InvalidCastling(
                 "black queen-side castling rights without required pieces".to_string(),
             ));
         }
 
-        let ep_square = if parts[3] == "-" {
-            None
-        } else {
-            let sq = crate::types::parse_sq(parts[3])
-                .ok_or_else(|| FenError::InvalidEpSquare(parts[3].to_string()))?;
-            let expected_rank = match side_to_move {
+        if let Some(sq) = parsed.ep_square {
+            let expected_rank = match parsed.side_to_move {
                 Color::White => Rank::R6,
                 Color::Black => Rank::R3,
             };
             if rank_of(sq) != expected_rank {
                 return Err(FenError::InvalidEpSquare(format!(
                     "{} on rank {:?} is not a valid en-passant square for {:?}",
-                    parts[3],
+                    sq_str(sq).unwrap_or("??"),
                     rank_of(sq),
-                    side_to_move
+                    parsed.side_to_move
                 )));
             }
-            let ep_cap_idx = match side_to_move {
+            let ep_cap_idx = match parsed.side_to_move {
                 Color::White => sq as i8 - 8,
                 Color::Black => sq as i8 + 8,
             };
             let ep_cap = Square::from_index(ep_cap_idx);
-            let them = side_to_move.flip();
-            if squares[ep_cap as usize] != make_piece(them, PieceType::Pawn) {
+            let them = parsed.side_to_move.flip();
+            if parsed.squares[ep_cap as usize] != make_piece(them, PieceType::Pawn) {
                 return Err(FenError::InvalidEpSquare(format!(
                     "no {} pawn on the square behind {} for en-passant",
                     if them == Color::White {
@@ -637,47 +955,23 @@ impl Board {
                     } else {
                         "black"
                     },
-                    parts[3]
+                    sq_str(sq).unwrap_or("??")
                 )));
             }
-            Some(sq)
-        };
+        }
 
-        let rule50 = if parts.len() > 4 {
-            parts[4]
-                .parse::<u16>()
-                .map_err(|e| FenError::ParseInt(e.to_string()))?
-        } else {
-            0
-        };
+        let (rule50, game_ply) = parse_fen_clocks(fen, parsed.side_to_move)?;
+        parsed.rule50 = rule50;
+        parsed.game_ply = game_ply;
 
-        let game_ply = if parts.len() > 5 {
-            let fm = parts[5]
-                .parse::<u16>()
-                .map_err(|e| FenError::ParseInt(e.to_string()))?;
-            if fm == 0 {
-                return Err(FenError::ParseInt(parts[5].to_string()));
-            }
-            2 * (fm - 1) + if side_to_move == Color::White { 1 } else { 2 }
-        } else {
-            if side_to_move == Color::White { 1 } else { 2 }
-        };
-
-        let mut board = Board {
-            squares,
-            position: PositionView::from_parts(
-                by_color,
-                by_type,
-                side_to_move,
-                ep_square,
-                castling_rights,
-                rule50,
-            ),
-            game_ply,
-            hash: 0,
-        };
-        board.recompute_hash();
-        Ok(board)
+        Ok(Board::from_setup_parts(
+            parsed.squares,
+            parsed.side_to_move,
+            parsed.castling_rights,
+            parsed.ep_square,
+            parsed.rule50,
+            parsed.game_ply,
+        ))
     }
 
     /// Parse a FEN string and apply the given semantic validation policy.
@@ -687,8 +981,15 @@ impl Board {
     /// is checked according to `policy`. Use [`FenPolicy::Strict`] for
     /// untrusted input, [`FenPolicy::AllowTerminal`] for artificial terminal
     /// fixtures, [`FenPolicy::AllowImpossibleCheck`] to skip only the
-    /// side-not-to-move check, or [`FenPolicy::Permissive`] for behavior
-    /// identical to [`Board::from_fen`].
+    /// side-not-to-move check, [`FenPolicy::Permissive`] for behavior
+    /// identical to [`Board::from_fen`], or [`FenPolicy::Lichess`] for the
+    /// sanitizing Lichess/`parity` acceptance predicate.
+    ///
+    /// [`FenPolicy::Lichess`] is the only policy that drops data: it discards
+    /// castling rights that are not backed by the required commoner and rook,
+    /// and an en-passant target that is not consistent with a double push.
+    /// Every other policy keeps the behavior it had before this variant was
+    /// added.
     ///
     /// # Errors
     ///
@@ -696,7 +997,20 @@ impl Board {
     /// [`FenLoadError::InvalidPosition`] when the parsed position fails the
     /// selected policy.
     pub fn from_fen_with(fen: &str, policy: FenPolicy) -> Result<Self, FenLoadError> {
-        let board = Board::from_fen(fen).map_err(FenLoadError::Syntax)?;
+        let board = if policy == FenPolicy::Lichess {
+            let mut parsed = parse_fen_syntax(fen).map_err(FenLoadError::Syntax)?;
+            sanitize_lichess(&mut parsed);
+            Board::from_setup_parts(
+                parsed.squares,
+                parsed.side_to_move,
+                parsed.castling_rights,
+                parsed.ep_square,
+                parsed.rule50,
+                parsed.game_ply,
+            )
+        } else {
+            Board::from_fen(fen).map_err(FenLoadError::Syntax)?
+        };
         let errors = board.validation_errors(policy);
         if errors.is_empty() {
             Ok(board)
@@ -730,6 +1044,9 @@ impl Board {
     /// Crate-internal so that [`Board::from_setup_with`](crate::Board::from_setup_with)
     /// can reuse the FEN validation vocabulary for piece-set construction.
     pub(crate) fn validation_errors(&self, policy: FenPolicy) -> ValidationErrors {
+        if policy == FenPolicy::Lichess {
+            return lichess_validation_errors(self);
+        }
         if policy == FenPolicy::Permissive {
             return ValidationErrors::empty();
         }
@@ -763,7 +1080,7 @@ impl Board {
                     errors |= ValidationErrors::TOO_MANY_COMMONERS_BLACK;
                 }
             }
-            FenPolicy::Permissive => unreachable!(),
+            FenPolicy::Permissive | FenPolicy::Lichess => unreachable!(),
         }
 
         // 2. Pawns on the back ranks.
@@ -3722,6 +4039,43 @@ mod tests {
                 "expected non-standard FEN {fen:?} to be rejected"
             );
         }
+    }
+
+    #[test]
+    fn test_lichess_sanitizes_castling_rights_individually() {
+        let mut parsed =
+            parse_fen_syntax("4k3/8/8/8/8/8/8/4K2R w KQkq - 0 1").expect("valid syntax");
+        sanitize_lichess(&mut parsed);
+        assert_eq!(parsed.castling_rights, WK_CASTLE);
+
+        let mut parsed = parse_fen_syntax("4k3/8/8/8/8/8/8/R3K3 w KQ - 0 1").expect("valid syntax");
+        sanitize_lichess(&mut parsed);
+        assert_eq!(parsed.castling_rights, WQ_CASTLE);
+    }
+
+    #[test]
+    fn test_lichess_sanitizes_ep_geometry() {
+        let mut parsed =
+            parse_fen_syntax("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1").expect("valid syntax");
+        sanitize_lichess(&mut parsed);
+        assert_eq!(parsed.ep_square, Some(Square::D6));
+
+        for fen in [
+            "4k3/8/8/3pP3/8/8/8/4K3 w - d3 0 1",
+            "4k3/8/8/3pP3/8/8/8/4K3 w - c6 0 1",
+            "4k3/8/3R4/3pP3/8/8/8/4K3 w - d6 0 1",
+            "4k3/3R4/8/3pP3/8/8/8/4K3 w - d6 0 1",
+        ] {
+            let mut parsed = parse_fen_syntax(fen).expect("valid syntax");
+            sanitize_lichess(&mut parsed);
+            assert_eq!(parsed.ep_square, None, "{fen}");
+        }
+    }
+
+    #[test]
+    fn test_lichess_terminal_missing_side_to_move_is_accepted() {
+        assert!(Board::from_fen_with("4k3/8/8/8/8/8/8/8 w - - 0 1", FenPolicy::Lichess).is_ok());
+        assert!(Board::from_fen_with("8/8/8/8/8/8/8/4K3 w - - 0 1", FenPolicy::Lichess).is_err());
     }
 
     #[test]

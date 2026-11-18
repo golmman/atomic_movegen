@@ -30,7 +30,11 @@ reference implementation.
   placement in ascending square order without allocating
 - Opt-in semantic validation for untrusted FENs: `Board::validate()`,
   `Board::from_fen_with()`, `FenPolicy`, and `ValidationErrors`. The default
-  `Board::from_fen()` stays permissive and unchanged.
+  `Board::from_fen()` stays permissive and unchanged. `FenPolicy::Lichess`
+  additionally sanitizes unbacked castling rights and impossible en-passant
+  targets to mirror the downstream `parity`/shakmaty `Setup` acceptance; the
+  frozen fixture data was produced with an external shakmaty 0.30.2 run and no
+  shakmaty code or dependency is present at build or test time.
 - Perft (performance test) recursion
 - Blast-on-capture, commoner royalty (one commoner per side, no promotion to
   commoner), pawn blast immunity (except for the capturing pawn at the blast
@@ -215,6 +219,22 @@ assert!(board.validate().is_ok());
 
 let bad = Board::from_fen_with("8/8/8/8/8/8/8/8 w - - 0 1", FenPolicy::Strict);
 assert!(matches!(bad, Err(FenLoadError::InvalidPosition(_))));
+```
+
+`FenPolicy::Lichess` is the opt-in sanitizing predicate used by the downstream
+`parity` check. It mirrors shakmaty's atomic `Setup` acceptance: unbacked
+castling rights and an impossible en-passant target are dropped, excess
+material is accepted, and the structural illegal-position class is rejected.
+The default `Board::from_fen()` parser is unchanged and still rejects the first
+two as syntax errors:
+
+```rust
+use atomic_movegen::{Board, FenPolicy};
+
+let fen = "4k3/8/8/8/8/8/8/4K2R w KQ - 0 1";
+assert!(Board::from_fen(fen).is_err());
+let board = Board::from_fen_with(fen, FenPolicy::Lichess).unwrap();
+assert_eq!(board.fen(), "4k3/8/8/8/8/8/8/4K2R w K - 0 1");
 ```
 
 For move-effect classification without a child board:

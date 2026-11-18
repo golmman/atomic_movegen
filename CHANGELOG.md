@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `FenPolicy::Lichess`, an opt-in sanitizing FEN acceptance policy for the
+  downstream `parity` check. Through the existing
+  `Board::from_fen_with(fen, policy)` entry point it drops castling rights that
+  are not backed by the required commoner and rook, drops an en-passant target
+  that is not consistent with a double push, accepts excess material, and
+  rejects the atomic `Setup` illegal-position class (empty board, the rejected
+  missing/extra commoner configurations, back-rank pawns, opposite check, and
+  the impossible-check class). `ValidationErrors::IMPOSSIBLE_CHECK` is added
+  for the last class. `Board::from_fen` and every existing `FenPolicy` variant
+  keep their exact previous answers and error precedence. The parser was split
+  into a syntax-only phase and the existing structural checks; the frozen
+  disposition data comes from an external shakmaty 0.30.2 run, with no new
+  dependency, GPL code/data, or build-time network access.
 - The child's Zobrist key under the selected en-passant policy.
   `EffectContext::post_move_and_key_with(board, m, mode)` returns the
   `PostMove` summary and the child key from one derivation.

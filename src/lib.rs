@@ -53,6 +53,17 @@
 //! [`Board::is_legal_with_state`]; [`Board::is_pseudo_legal`] mirrors the
 //! pseudo-legal generator. None of these builds a [`MoveList`].
 //!
+//! # FEN loading policies
+//!
+//! [`Board::from_fen`] is the permissive FEN parser. For untrusted input use
+//! [`Board::from_fen_with`] with [`FenPolicy::Strict`] (or
+//! [`FenPolicy::AllowTerminal`] / [`FenPolicy::AllowImpossibleCheck`] for
+//! artificial fixtures). [`FenPolicy::Lichess`] is the opt-in sanitizing
+//! predicate that mirrors shakmaty's atomic `Setup` acceptance: it drops
+//! unbacked castling rights and an impossible en-passant target, accepts
+//! excess material, and rejects the structural illegal-position class. It is
+//! the only policy that drops data; the default parser is unchanged.
+//!
 //! # Hot-path helpers
 //!
 //! [`StateInfo`] is re-exported at the crate root for callers that cache

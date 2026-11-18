@@ -336,6 +336,16 @@ impl Board {
     /// reported as [`FenLoadError::Syntax`] and policy failures as
     /// [`FenLoadError::InvalidPosition`].
     ///
+    /// [`FenPolicy::Lichess`] applies only its validation half here. A
+    /// [`Setup`] cannot express an unbacked castling right, and
+    /// [`from_setup`](Self::from_setup) rejects the wrong-rank and
+    /// missing-victim en-passant cases structurally, so there is nothing to
+    /// sanitize. A retained target whose square or double-push origin is
+    /// occupied is reported as
+    /// [`ValidationErrors::INVALID_EP_SQUARE`](crate::ValidationErrors::INVALID_EP_SQUARE)
+    /// by the validation half. Use [`Board::from_fen_with`] when the FEN
+    /// parser's drop behavior is needed.
+    ///
     /// # Errors
     ///
     /// Returns [`FenLoadError::Syntax`] for a structurally invalid setup and
