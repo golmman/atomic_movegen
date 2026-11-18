@@ -10,7 +10,8 @@ numbered plan follows `AGENTS.md` and ends with an implementation report
 The wishlist is an upstream request list written against `atomic-movegen
 2.8.0`. This tree is that baseline. The four asks are additive or opt-in; none
 of them changes move order, perft values, FEN output, existing keys, or
-`Outcome`/`Terminal` semantics.
+`Outcome`/`Terminal` semantics. Plan 5 is not a fifth wishlist ask: it is the
+final hardening, clean-code and publish gate for whatever of plans 1–4 landed.
 
 | # | Ask | Type | Priority | Plan |
 | --- | --- | --- | --- | --- |
@@ -18,6 +19,7 @@ of them changes move order, perft values, FEN output, existing keys, or
 | W2 | Lichess-style FEN acceptance | parser parity | P2 | 2 |
 | W3 | Immediate-explosion query on a child | one-ply fact | P2/P3 | 3 |
 | W4 | Node-constant analysis view | guide geometry | P3 | 4 (measurement-gated) |
+| — | Hardening, clean code and publish gate | release gate | final | 5 |
 
 ## Current-tree assessment (2.8.0)
 
@@ -27,6 +29,7 @@ of them changes move order, perft values, FEN output, existing keys, or
 | W2 | `Board::from_fen` is syntax-only except that it rejects castling rights not backed by pieces and an en-passant target not consistent with a double push. `FenPolicy` has `Strict`, `AllowTerminal`, `AllowImpossibleCheck`, and `Permissive`; `Strict` is not the shakmaty/Lichess acceptance predicate. There is no policy that *drops* invalid castling rights or an impossible ep target. | 2 |
 | W3 | `EffectContext` can derive a child (`post_move`), classify it (`effect`, `classification`), and answer terminality and existence questions. There is no read-only "can the child side to move immediately explode the mover's commoner?" query. The prover therefore keeps its own `Mover::exposes`/`exploding_capture` logic. | 3 |
 | W4 | `Board` exposes `checkers`, `pinned`, `attackers_to`, and the attack tables. `StateInfo` stores `checkers` and `pinned`. The internal legality ladders (`TrivialLegality`, `WidenedLegality`, `FastLegality`) already derive per-node masks, but there is no stable public analysis view over those facts. | 4 |
+| H | The default build claims to be safe Rust but `board.rs::piece_key_raw` uses an unconditional `get_unchecked`; clock arithmetic can overflow in debug builds; structural castling/ep checks are duplicated; `cargo publish` content is implicit and includes examples the earlier publish decision excluded. | 5 |
 
 ## What each plan does
 
@@ -63,18 +66,29 @@ of them changes move order, perft values, FEN output, existing keys, or
    arrive first. If the share is small, the plan closes as a watchlist entry
    with no code, exactly as the wishlist permits.
 
+5. **`plan_wishlist1_5.md` — hardening, clean code and publish gate.**
+   Make the default build safe Rust, remove clock/FEN overflow panics, give
+   the structural castling/en-passant checks one source of truth, align the
+   public docs/lints/API pin, add no-panic robustness tests, freeze the
+   package content, and prepare the CHANGELOG/README/version for the release.
+   It adds no wishlist feature and performs no publish; it produces the final
+   report and the owner's publish checklist.
+
 ## Dependency order
 
 ```text
 plan 1 (W1: keyed child summary) --------+
                                          |
-plan 3 (W3: explosion query) ------------+--> release 2.9.0
+plan 3 (W3: explosion query) ------------+--> 2.9.0 feature window
                                          |
 plan 2 (W2: Lichess FEN policy) ---------+--> 2.9.0 if ready, else 2.10.0
                                          |    (independent; parser may stay
                                          |     outside the downstream)
 plan 4 (W4: analysis view) --------------+--> only after the measurement gate;
-                                              otherwise watchlist, no release
+                                         |    otherwise watchlist, no release
+                                         |
+plan 5 (hardening + publish gate) -------+--> exactly one release of what landed
+                                              (no feature of its own)
 ```
 
 - Plan 1 is self-contained and lands first. Plan 3 can reuse its child-view
@@ -87,13 +101,17 @@ plan 4 (W4: analysis view) --------------+--> only after the measurement gate;
   parser-parity release, not a blocker for plans 1 and 3.
 - Plan 4 is not a normal implementation plan. It is a measurement-and-mapping
   plan whose first gate may close it without code.
+- Plan 5 runs last and is the only plan that changes the release version. It
+  must not start until the implementation reports for the landed plans exist;
+  it hardens and packages exactly that tree.
 
 ## Release strategy
 
-- **2.9.0:** plans 1 and 3. Both add child-query API and share one measurement
-  harness. No existing answer, key, move order, perft value, or FEN changes.
-  Plan 2 may join 2.9.0 if its frozen parity table and parser split are green
-  before the release window; otherwise it is the next release.
+- **2.9.0:** plans 1 and 3, hardened and packaged by plan 5. Both add
+  child-query API and share one measurement harness. No existing answer, key,
+  move order, perft value, or FEN changes. Plan 2 may join 2.9.0 if its frozen
+  parity table and parser split are green before the release window; otherwise
+  it is the next release.
 - **2.10.0:** plan 2, if it did not ship in 2.9.0. It only adds an opt-in FEN
   policy; the default parser and every existing policy keep their answers. Its
   priority is P2, but it is independent and the wishlist explicitly permits the
@@ -101,6 +119,11 @@ plan 4 (W4: analysis view) --------------+--> only after the measurement gate;
 - **No release for plan 4 unless its gate passes.** If it does, it is a later
   minor release; if it does not, the report records the measurement and the
   watchlist verdict.
+- **Plan 5 finalizes the release.** It chooses the version from what actually
+  landed (2.9.0 for the additive child-query work; plan 2 follows the split
+  above), runs the hardening and package gates, and updates `Cargo.toml`,
+  `CHANGELOG.md`, the README dependency snippet and the public-API pin. It
+  does not publish; the owner commits, tags and publishes.
 - **No promise.** The plans may publish measured costs for the new queries, but
   they make no claim about any downstream search tree or wall clock.
 
@@ -126,6 +149,10 @@ plan 4 (W4: analysis view) --------------+--> only after the measurement gate;
 - No new dependency, no new `unsafe`, no GPL interop, no search/evaluation/
   tablebase/threading API, no second public position representation, and no
   API that exists only to serve one downstream's search design.
+- Plan 5 adds: `cargo test --all-features`, `cargo test --release`,
+  `RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps`, the
+  safe-default perft/bench comparison, `cargo package --list` and
+  `cargo publish --dry-run`.
 
 ## Non-goals (wishlist 1, handoff 3 §4, handoff 1 R9)
 
@@ -145,4 +172,7 @@ and the ratios that plan defines), changed files, problems encountered,
 deviations from the plan with the measurement that motivated them, unresolved
 parts, missing tests and next steps. Plan 4's report must also state the
 measurement-gate verdict and either the implemented API or the watchlist
-decision.
+decision. Plan 5's report must state the final release version, the landed
+plans, the safety/overflow audit, the package diff and the extracted-package
+and `cargo publish --dry-run` results, and the owner's manual publish
+checklist.
