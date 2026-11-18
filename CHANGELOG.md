@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- The child's Zobrist key under the selected en-passant policy.
+  `EffectContext::post_move_and_key_with(board, m, mode)` returns the
+  `PostMove` summary and the child key from one derivation.
+  `EnPassantMode::Always` is exactly the existing
+  `EffectContext::post_move_and_key()` and exactly `Board::hash_after()`.
+  `EnPassantMode::Legal` is the same key as a cloned child's
+  `hash_with(EnPassantMode::Legal)` and as `Board::hash_after_with(m, Legal)`:
+  it removes the child's ep-file key when no fully legal en-passant capture
+  exists. The legal-EP test runs on the already-derived child view, so a
+  non-double-push move does no extra work and a double push is not cloned or
+  re-derived. This is a canonicalization on the stable key table: no key,
+  `ZOBRIST_VERSION`, move order, perft value, FEN output or terminality answer
+  changes.
+
 ## [2.8.0] - 2026-11-13
 
 The child's terminal state on an already derived summary, the child key next to

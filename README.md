@@ -79,6 +79,14 @@ reference implementation.
   `EffectContext::terminal_after()`, so the child is derived once), and
   `EffectContext::post_move_and_key()` returns the summary together with the
   child's Zobrist key — exactly `Board::hash_after()` — from one derivation
+- Child key by en-passant policy: `EffectContext::post_move_and_key_with(board,
+  m, mode)` returns the same summary and the child key under
+  `EnPassantMode::Always` (identical to `post_move_and_key()`) or
+  `EnPassantMode::Legal`. The `Legal` key removes the child's ep-file key when
+  no fully legal en-passant capture exists, using the already-derived child view
+  — no board clone and no `StateInfo` population for a double push. It is the
+  same canonicalization as `Board::hash_with(Legal)` on the same key table:
+  `ZOBRIST_VERSION` is unchanged
 - Classification without the legality ladder: `EffectContext::classification()`
   returns a `MoveClassification` (`MoveEffect` minus `is_legal`) for a move the
   caller already knows is legal, without re-running `is_attacked_by` for the
@@ -354,6 +362,12 @@ assert_eq!(post.terminal(), None);
 let (post, key) = ctx.post_move_and_key(&board, m).unwrap();
 assert_eq!(key, board.hash_after(m));
 assert_eq!(post.terminal(), None);
+
+// The same derivation can select the canonicalized en-passant policy.
+let (_, legal_key) = ctx
+    .post_move_and_key_with(&board, m, atomic_movegen::EnPassantMode::Legal)
+    .unwrap();
+assert_eq!(legal_key, board.hash_after_with(m, atomic_movegen::EnPassantMode::Legal));
 ```
 
 The composite a consumer wants when the child board is *not* needed — key plus

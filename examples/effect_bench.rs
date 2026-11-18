@@ -49,7 +49,7 @@ use atomic_movegen::movegen::{
     has_legal_move_with_state,
 };
 use atomic_movegen::types::MoveType;
-use atomic_movegen::{Board, EffectContext, Move, MoveList, PieceType, StateInfo};
+use atomic_movegen::{Board, EffectContext, EnPassantMode, Move, MoveList, PieceType, StateInfo};
 use std::fs;
 use std::hint::black_box;
 use std::time::Instant;
@@ -179,6 +179,16 @@ fn class_mask(board: &Board, m: Move) -> u8 {
     if mask == 0 { CLASS_QUIET } else { mask }
 }
 
+/// `true` when `m` is the normal double pawn push that stores an ep target.
+fn is_double_push(board: &Board, m: Move) -> bool {
+    m.move_type() == MoveType::Normal
+        && (m.to_sq() as i8 - m.from_sq() as i8).abs() == 16
+        && board
+            .piece_on(m.from_sq())
+            .type_of()
+            .is_some_and(|pt| pt == PieceType::Pawn)
+}
+
 /// One visited position with its effect context and every pseudo-legal child,
 /// classified once so the benchmark loop does no classification work.
 struct NodeEntry {
@@ -264,18 +274,26 @@ enum Row {
     Summary,
     Mg19,
     Stack,
+    Key,
+    KeyAlways,
+    KeyLegal,
+    CloneHashLegal,
     Exist,
     TwoLevel,
 }
 
 impl Row {
-    const ALL: [Row; 8] = [
+    const ALL: [Row; 12] = [
         Row::Today,
         Row::Build,
         Row::Mg15,
         Row::Summary,
         Row::Mg19,
         Row::Stack,
+        Row::Key,
+        Row::KeyAlways,
+        Row::KeyLegal,
+        Row::CloneHashLegal,
         Row::Exist,
         Row::TwoLevel,
     ];
@@ -289,6 +307,10 @@ impl Row {
             Row::Summary => "summary",
             Row::Mg19 => "mg19",
             Row::Stack => "stack",
+            Row::Key => "key",
+            Row::KeyAlways => "key-always",
+            Row::KeyLegal => "key-legal",
+            Row::CloneHashLegal => "clone-hash-legal",
             Row::Exist => "exist",
             Row::TwoLevel => "two-level",
         }
@@ -334,6 +356,38 @@ impl Row {
                 if let Some((post, key)) = ctx.post_move_and_key(board, m) {
                     black_box((post.terminal(), key));
                 }
+            }
+            // The existing keyed summary alone, as the baseline for the
+            // mode-aware rows.
+            Row::Key => {
+                if let Some((post, key)) = ctx.post_move_and_key(board, m) {
+                    black_box((post.rule50(), key));
+                }
+            }
+            // The mode-aware query's `Always` spelling: the same key and
+            // summary from the same one derivation.
+            Row::KeyAlways => {
+                if let Some((post, key)) =
+                    ctx.post_move_and_key_with(board, m, EnPassantMode::Always)
+                {
+                    black_box((post.rule50(), key));
+                }
+            }
+            // The canonicalized child key from the child view.
+            Row::KeyLegal => {
+                if let Some((post, key)) =
+                    ctx.post_move_and_key_with(board, m, EnPassantMode::Legal)
+                {
+                    black_box((post.rule50(), key));
+                }
+            }
+            // The clone oracle the Legal row is compared against on double
+            // pushes.
+            Row::CloneHashLegal => {
+                let mut child = board.clone();
+                let mut st = StateInfo::new();
+                child.do_move(m, &mut st);
+                black_box((child.rule50(), child.hash_with(EnPassantMode::Legal)));
             }
             // MG20: the child's existence question alone.
             Row::Exist => {
@@ -438,10 +492,107 @@ impl Row {
             Row::Summary => "post_move",
             Row::Mg19 => "post_move+PostMove::terminal()",
             Row::Stack => "post_move_and_key+terminal()",
+            Row::Key => "post_move_and_key",
+            Row::KeyAlways => "post_move_and_key_with(Always)",
+            Row::KeyLegal => "post_move_and_key_with(Legal)",
+            Row::CloneHashLegal => "clone+do_move+hash_with(Legal)",
             Row::Exist => "has_legal_move_after",
             Row::TwoLevel => "child_outcome",
         }
     }
+}
+
+/// The double-push share of the child corpus and the same rows restricted to
+/// double pushes.
+///
+/// The counts are the wishlist's decisive experiment: how often a child can
+/// carry an ep target, and how often `EnPassantMode::Legal` actually removes
+/// the ep-file key because no fully legal capture exists.
+fn double_push_table(nodes: &[NodeEntry], repeats: usize, iterations: usize) {
+    let total_children: usize = nodes.iter().map(|n| n.children.len()).sum();
+    let mut entries: Vec<(usize, Move)> = Vec::new();
+    let mut stored = 0u64;
+    let mut legal = 0u64;
+    let mut removed = 0u64;
+    for (ni, node) in nodes.iter().enumerate() {
+        for &(m, _) in &node.children {
+            if !is_double_push(&node.board, m) {
+                continue;
+            }
+            entries.push((ni, m));
+            let mut child = node.board.clone();
+            let mut st = StateInfo::new();
+            child.do_move(m, &mut st);
+            if child.ep_square().is_some() {
+                stored += 1;
+                if child.legal_ep_square().is_some() {
+                    legal += 1;
+                } else {
+                    removed += 1;
+                }
+            }
+        }
+    }
+
+    let pct = |part: u64| {
+        if total_children == 0 {
+            0.0
+        } else {
+            100.0 * part as f64 / total_children as f64
+        }
+    };
+    println!(
+        "double pushes: {} of {} children ({:.2} %); {} store an ep target \
+         ({} legal, {} removed)",
+        entries.len(),
+        total_children,
+        pct(entries.len() as u64),
+        stored,
+        legal,
+        removed
+    );
+    if entries.is_empty() {
+        println!();
+        return;
+    }
+
+    let rows = [
+        Row::Build,
+        Row::Key,
+        Row::KeyAlways,
+        Row::KeyLegal,
+        Row::CloneHashLegal,
+    ];
+    let iters = iterations.clamp(200, 200_000);
+    let mut samples: Vec<Vec<f64>> = vec![Vec::with_capacity(repeats); rows.len()];
+    for _ in 0..repeats {
+        for (ri, row) in rows.iter().enumerate() {
+            samples[ri].push(batch_row(*row, nodes, &entries, iters));
+        }
+    }
+    let times: Vec<f64> = samples
+        .iter_mut()
+        .map(|s| {
+            s.sort_by(f64::total_cmp);
+            s[s.len() / 2]
+        })
+        .collect();
+    let key = times[rows.iter().position(|&r| r == Row::Key).unwrap()];
+    let build = times[rows.iter().position(|&r| r == Row::Build).unwrap()];
+    println!(
+        "double-push children only: {} entries, {repeats} rounds x {iters} iterations per row",
+        entries.len()
+    );
+    for (row, ns) in rows.iter().zip(&times) {
+        println!(
+            "    {:<18} {:<38} {ns:>7.1} ns  ({:.2}x key, {:.2}x build)",
+            row.label(),
+            row.description(),
+            ns / key,
+            ns / build
+        );
+    }
+    println!();
 }
 
 /// The share of children answered `Some` by `terminal_after` over seeded random
@@ -753,6 +904,47 @@ fn main() {
             iterations,
         );
         let mut i = 0usize;
+        let post_key_always_ns = bench(
+            || {
+                let m = pseudo[i % pseudo.len()];
+                i += 1;
+                if let Some((post, key)) =
+                    ctx.post_move_and_key_with(&board, m, EnPassantMode::Always)
+                {
+                    black_box((post.rule50(), key));
+                }
+            },
+            repeats,
+            iterations,
+        );
+        let mut i = 0usize;
+        let post_key_legal_ns = bench(
+            || {
+                let m = pseudo[i % pseudo.len()];
+                i += 1;
+                if let Some((post, key)) =
+                    ctx.post_move_and_key_with(&board, m, EnPassantMode::Legal)
+                {
+                    black_box((post.rule50(), key));
+                }
+            },
+            repeats,
+            iterations,
+        );
+        let mut i = 0usize;
+        let clone_hash_legal_ns = bench(
+            || {
+                let m = pseudo[i % pseudo.len()];
+                i += 1;
+                let mut child = board.clone();
+                let mut st = StateInfo::new();
+                child.do_move(m, &mut st);
+                black_box((child.rule50(), child.hash_with(EnPassantMode::Legal)));
+            },
+            repeats,
+            iterations,
+        );
+        let mut i = 0usize;
         let post_and_key_separate_ns = bench(
             || {
                 let m = pseudo[i % pseudo.len()];
@@ -925,6 +1117,11 @@ fn main() {
              hash_after {hash_after_ns:>9.1}"
         );
         println!(
+            "  key by ep mode:        with(Always) {post_key_always_ns:>9.1}  \
+             with(Legal) {post_key_legal_ns:>9.1}  \
+             clone+do_move+hash_with(Legal) {clone_hash_legal_ns:>9.1}"
+        );
+        println!(
             "  per node:              generate_legal {generate_legal_ns:>9.1}  \
              for_each_legal {stream_legal_ns:>9.1}  has_legal_move {has_legal_ns:>9.1}"
         );
@@ -986,4 +1183,5 @@ fn main() {
     class_fens.extend(POSITIONS.iter().map(|(_, fen)| (*fen).to_string()));
     let nodes = collect_nodes(&class_fens, 2, 24);
     per_class_table(&nodes, repeats, iterations, budget_ms);
+    double_push_table(&nodes, repeats, iterations);
 }

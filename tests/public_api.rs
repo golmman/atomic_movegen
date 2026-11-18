@@ -11,8 +11,8 @@
 use atomic_movegen::movegen::{generate_legal_with_state, generate_pseudo_legal};
 use atomic_movegen::{
     AfterState, BlastCasualties, Board, Board as BoardRoot, CONFORMANCE_CASES, Color,
-    EffectContext, Move, MoveClassification, MoveEffect, MoveList, Outcome, PostMove, StateInfo,
-    Terminal, TerminalReason, conformance,
+    EffectContext, EnPassantMode, Move, MoveClassification, MoveEffect, MoveList, Outcome,
+    PostMove, StateInfo, Terminal, TerminalReason, conformance,
 };
 
 #[test]
@@ -45,6 +45,17 @@ fn crate_root_reexports_resolve() {
     let (keyed_post, key) = keyed.expect("pseudo-legal move");
     assert_eq!(keyed_post, post);
     assert_eq!(key, board.hash_after(m));
+
+    // The mode-aware spelling of the same query.
+    let mode_keyed: Option<(PostMove, u64)> =
+        ctx.post_move_and_key_with(&board, m, EnPassantMode::Always);
+    assert_eq!(mode_keyed, Some((post, key)));
+    let legal_keyed: Option<(PostMove, u64)> =
+        ctx.post_move_and_key_with(&board, m, EnPassantMode::Legal);
+    assert_eq!(
+        legal_keyed.map(|(_, key)| key),
+        Some(board.hash_after_with(m, EnPassantMode::Legal))
+    );
 
     // The conformance corpora.
     assert!(!CONFORMANCE_CASES.is_empty());

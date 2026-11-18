@@ -108,6 +108,15 @@
 //! for the child derivation once. [`EffectContext::post_move_and_key`] returns
 //! the summary together with the child's Zobrist key (exactly
 //! [`Board::hash_after`]) from that same derivation.
+//! [`EffectContext::post_move_and_key_with`] selects the en-passant policy:
+//! [`EnPassantMode::Always`] is the existing query unchanged, and
+//! [`EnPassantMode::Legal`] canonically drops the child's ep-file key when no
+//! fully legal en-passant capture exists. The legal-EP question is answered
+//! from the already-derived child view, so a non-double-push move does no extra
+//! work and a double push is not cloned. This is the same composition as
+//! [`Board::hash_with`] and [`Board::hash_after_with`]: it is a
+//! canonicalization on the stable key table, not a new table and not a
+//! [`ZOBRIST_VERSION`] change.
 //!
 //! Cost is measured, not promised: `cargo run --release --example effect_bench`
 //! prints the child rows and, per child class (`quiet`, `capture`, `promotion`,
@@ -207,6 +216,7 @@
 //!   [`EffectContext::classification`], [`MoveEffect::classification`],
 //!   [`EffectContext::post_move`], [`PostMove::terminal`],
 //!   [`EffectContext::post_move_and_key`],
+//!   [`EffectContext::post_move_and_key_with`],
 //!   [`EffectContext::is_legal`],
 //!   [`EffectContext::terminal_after`], [`EffectContext::child_outcome`],
 //!   [`EffectContext::outcome_after`],

@@ -502,13 +502,13 @@ impl EffectContext {
 
     /// The child summary and the child's Zobrist key, from one derivation.
     ///
-    /// The key is exactly [`Board::hash_after`] and exactly the
-    /// [`hash`](Board::hash) of a cloned board after `do_move(m)`: same key
-    /// table and same composition (`EnPassantMode::Always`), so the stability
-    /// contract on [`Board::hash`] and [`ZOBRIST_VERSION`](crate::ZOBRIST_VERSION)
-    /// apply unchanged. Combined with [`PostMove::terminal`] and
-    /// [`PostMove::rule50`], one derivation answers "summary + key +
-    /// terminality".
+    /// This is [`post_move_and_key_with`](Self::post_move_and_key_with) with
+    /// [`EnPassantMode::Always`]; the key is exactly [`Board::hash_after`] and
+    /// exactly the [`hash`](Board::hash) of a cloned board after `do_move(m)`.
+    /// The stability contract on [`Board::hash`] and
+    /// [`ZOBRIST_VERSION`](crate::ZOBRIST_VERSION) applies unchanged. Combined
+    /// with [`PostMove::terminal`] and [`PostMove::rule50`], one derivation
+    /// answers "summary + key + terminality".
     ///
     /// Returns `None` for malformed input only ([`Move::NONE`], an empty origin
     /// square, an origin without a piece of the side to move), like
@@ -529,8 +529,60 @@ impl EffectContext {
     /// ```
     #[must_use]
     pub fn post_move_and_key(&self, board: &Board, m: Move) -> Option<(PostMove, u64)> {
+        self.post_move_and_key_with(board, m, EnPassantMode::Always)
+    }
+
+    /// The child summary and the child's Zobrist key under `mode`, from one
+    /// derivation.
+    ///
+    /// The key is exactly [`Board::hash_after_with`] and exactly the
+    /// [`hash_with`](Board::hash_with) of a cloned board after `do_move(m)`.
+    /// With [`EnPassantMode::Always`] this is the existing
+    /// [`post_move_and_key`](Self::post_move_and_key), unchanged.
+    ///
+    /// [`EnPassantMode::Legal`] removes the child's en-passant file key when no
+    /// fully legal en-passant capture exists in the child. The legal-EP
+    /// question is answered from the already-derived child view, so a
+    /// non-double-push move does no extra work and a double push is not cloned.
+    /// The `Legal` policy is a canonicalization layered on the stable base
+    /// keys: no key table or [`ZOBRIST_VERSION`](crate::ZOBRIST_VERSION)
+    /// change. The cost contract is: non-double pushes never call the legal-EP
+    /// helper; double pushes derive the child once and may ask one view-side
+    /// legal-EP question; `Always` is the unchanged fast path.
+    ///
+    /// Returns `None` for malformed input only ([`Move::NONE`], an empty origin
+    /// square, an origin without a piece of the side to move), like
+    /// [`post_move`](Self::post_move). Defined for illegal moves: the key is the
+    /// one a `do_move` child would carry.
+    ///
+    /// ```
+    /// use atomic_movegen::{Board, EnPassantMode, Move, Square};
+    ///
+    /// let board = Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+    ///     .unwrap();
+    /// let ctx = board.effect_context();
+    /// let m = Move::from_uci("e2e4").unwrap();
+    ///
+    /// let (post, always) = ctx
+    ///     .post_move_and_key_with(&board, m, EnPassantMode::Always)
+    ///     .unwrap();
+    /// let (_, legal) = ctx
+    ///     .post_move_and_key_with(&board, m, EnPassantMode::Legal)
+    ///     .unwrap();
+    /// assert_eq!(post.ep_square(), Some(Square::E3));
+    /// assert_ne!(always, legal); // no black pawn can capture on e3
+    /// assert_eq!(always, board.hash_after_with(m, EnPassantMode::Always));
+    /// assert_eq!(legal, board.hash_after_with(m, EnPassantMode::Legal));
+    /// ```
+    #[must_use]
+    pub fn post_move_and_key_with(
+        &self,
+        board: &Board,
+        m: Move,
+        mode: EnPassantMode,
+    ) -> Option<(PostMove, u64)> {
         let post = self.analyze(board, m)?;
-        Some((post, child_key(board, &self.view, &post, m)))
+        Some((post, child_key_with(board, &self.view, &post, m, mode)))
     }
 
     /// Fast legality query for the pseudo-legal move `m`.
@@ -1012,6 +1064,31 @@ fn child_key(board: &Board, parent: &PositionView, post: &PostMove, m: Move) -> 
     h
 }
 
+/// The child key under `mode`: the incremental [`child_key`] plus the optional
+/// `Legal` en-passant canonicalization.
+///
+/// The existing incremental delta already XORs the child ep-file key when the
+/// child stores an ep target. `EnPassantMode::Legal` removes that same key when
+/// the view-side legal-EP test says there is no legal capture in the child.
+fn child_key_with(
+    board: &Board,
+    parent: &PositionView,
+    post: &PostMove,
+    m: Move,
+    mode: EnPassantMode,
+) -> u64 {
+    let always = child_key(board, parent, post, m);
+    match mode {
+        EnPassantMode::Always => always,
+        EnPassantMode::Legal => match post.ep_square() {
+            Some(ep) if crate::position::legal_ep_square_in_view(&post.view).is_none() => {
+                always ^ crate::zobrist::ZOBRIST.ep[file_of(ep) as usize]
+            }
+            _ => always,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1407,14 +1484,121 @@ mod tests {
     fn post_move_and_key_rejects_malformed_moves() {
         let board = Board::new();
         let ctx = board.effect_context();
-        assert_eq!(ctx.post_move_and_key(&board, Move::NONE), None);
-        assert_eq!(
-            ctx.post_move_and_key(&board, Move::make_move(Square::E4, Square::E5)),
-            None
-        );
-        assert_eq!(
-            ctx.post_move_and_key(&board, Move::make_move(Square::A7, Square::A6)),
-            None
-        );
+        for mode in [EnPassantMode::Always, EnPassantMode::Legal] {
+            assert_eq!(ctx.post_move_and_key_with(&board, Move::NONE, mode), None);
+            assert_eq!(
+                ctx.post_move_and_key_with(&board, Move::make_move(Square::E4, Square::E5), mode),
+                None
+            );
+            assert_eq!(
+                ctx.post_move_and_key_with(&board, Move::make_move(Square::A7, Square::A6), mode),
+                None
+            );
+        }
+    }
+
+    /// The explicit en-passant key rows: a double push that leaves a legal
+    /// capture, one whose capture is impossible, two whose capture is illegal
+    /// because of a pin or the mover's own blast, an ep capture, castling and a
+    /// promotion.
+    #[test]
+    fn post_move_and_key_with_matches_cloned_child() {
+        let pseudo = |board: &Board, uci: &str| {
+            board.move_from_uci(uci).unwrap_or_else(|| {
+                let parsed = Move::from_uci(uci).expect("UCI must parse");
+                let mut pseudo = MoveList::new();
+                generate_pseudo_legal(board, &mut pseudo);
+                pseudo
+                    .as_slice()
+                    .iter()
+                    .copied()
+                    .find(|m| m.from_sq() == parsed.from_sq() && m.to_sq() == parsed.to_sq())
+                    .unwrap_or_else(|| panic!("{uci} is not pseudo-legal"))
+            })
+        };
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "double push with a legal ep capture",
+                "4k3/8/8/8/3p4/8/4P3/4K3 w - - 0 1",
+                "e2e4",
+            ),
+            (
+                "double push without an adjacent enemy pawn",
+                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                "e2e4",
+            ),
+            (
+                "double push whose ep capture is pinned",
+                "4r2k/3p4/8/4P3/8/8/8/4K3 b - - 0 1",
+                "d7d5",
+            ),
+            (
+                "double push whose ep capture self-explodes",
+                "7k/3pK3/8/4P3/8/8/8/8 b - - 0 1",
+                "d7d5",
+            ),
+            (
+                "en-passant capture",
+                "8/8/8/8/k2Pp2Q/8/8/3K4 b - d3 0 1",
+                "e4d3",
+            ),
+            ("castling", "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", "e1g1"),
+            (
+                "promotion",
+                "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1",
+                "b7b8q",
+            ),
+        ];
+
+        for &(name, fen, uci) in cases {
+            let board = Board::from_fen(fen).expect("fixture FEN must parse");
+            let ctx = board.effect_context();
+            let m = pseudo(&board, uci);
+            let mut child = board.clone();
+            let mut state = StateInfo::new();
+            child.do_move(m, &mut state);
+
+            let (always_post, always) = ctx
+                .post_move_and_key_with(&board, m, EnPassantMode::Always)
+                .unwrap_or_else(|| panic!("{name}: keyed summary"));
+            let (legal_post, legal) = ctx
+                .post_move_and_key_with(&board, m, EnPassantMode::Legal)
+                .unwrap_or_else(|| panic!("{name}: keyed summary"));
+            assert_eq!(always_post, legal_post, "{name}: summary");
+            assert_eq!(always_post.rule50(), child.rule50(), "{name}: clock");
+            assert_eq!(always, child.hash_with(EnPassantMode::Always), "{name}");
+            assert_eq!(legal, child.hash_with(EnPassantMode::Legal), "{name}");
+            assert_eq!(
+                always,
+                board.hash_after_with(m, EnPassantMode::Always),
+                "{name}"
+            );
+            assert_eq!(
+                legal,
+                board.hash_after_with(m, EnPassantMode::Legal),
+                "{name}"
+            );
+            assert_eq!(
+                ctx.post_move_and_key_with(&board, m, EnPassantMode::Always),
+                ctx.post_move_and_key(&board, m),
+                "{name}: Always is the existing query"
+            );
+
+            let view_ep = crate::position::legal_ep_square_in_view(&always_post.view);
+            assert_eq!(
+                view_ep,
+                child.legal_ep_square(),
+                "{name}: view-side legal ep"
+            );
+            if let Some(ep) = always_post.ep_square().filter(|_| view_ep.is_none()) {
+                assert_eq!(
+                    always ^ legal,
+                    crate::zobrist::ZOBRIST.ep[file_of(ep) as usize],
+                    "{name}: Legal removes exactly the ep file key"
+                );
+            } else {
+                assert_eq!(always, legal, "{name}: modes agree");
+            }
+        }
     }
 }

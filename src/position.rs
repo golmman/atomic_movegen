@@ -636,6 +636,40 @@ pub(crate) fn legal_with_counts(view: &PositionView, m: Move) -> bool {
     !square_attacked_by(view, ksq, occupied, view.pieces_color(them) & occupied)
 }
 
+/// The stored en-passant target, but only when the side to move has at least
+/// one fully legal en-passant capture in this view.
+///
+/// Equal to [`Board::legal_ep_square`] for the equivalent board, without a
+/// [`StateInfo`] and without a board write. Returns `None` when either side has
+/// no commoner.
+pub(crate) fn legal_ep_square_in_view(view: &PositionView) -> Option<Square> {
+    let ep = view.ep_square()?;
+    let us = view.side_to_move();
+    let them = us.flip();
+    if view.commoners(us).is_empty() || view.commoners(them).is_empty() {
+        return None;
+    }
+
+    // Attack tables are symmetric, so this is the set of squares from which
+    // one of our pawns attacks the ep target.
+    let victim = match us {
+        Color::White => Square::from_index(ep as i8 - 8),
+        Color::Black => Square::from_index(ep as i8 + 8),
+    };
+    if view.piece_on(victim) != make_piece(them, PieceType::Pawn) {
+        return None;
+    }
+
+    let mut origins = attacks::pawn_attacks(them, ep) & view.pieces_color_pt(us, PieceType::Pawn);
+    while !origins.is_empty() {
+        let from = origins.pop_lsb();
+        if legal_with_counts(view, Move::make_enpassant(from, ep)) {
+            return Some(ep);
+        }
+    }
+    None
+}
+
 /// [`Board::legal`] over a view: rejects every move when the game is over.
 pub(crate) fn legal_in_view(view: &PositionView, m: Move, state: &StateInfo) -> bool {
     // A board with only one commoner is terminal.
@@ -944,6 +978,106 @@ mod tests {
                 assert_eq!(child.rule50(), played.rule50(), "{fen} {m}: rule50");
             }
         }
+    }
+
+    /// The view-side legal-EP answer is the board-side answer, for the parent
+    /// and for every child.
+    #[test]
+    fn legal_ep_square_in_view_matches_board() {
+        let mut stored = 0u64;
+        let mut legal = 0u64;
+        let mut removed = 0u64;
+        let fixtures = [
+            "4r2k/3p4/8/4P3/8/8/8/4K3 b - - 0 1",
+            "7k/3pK3/8/4P3/8/8/8/8 b - - 0 1",
+            "4k3/8/8/8/3p4/8/4P3/4K3 w - - 0 1",
+            "8/8/8/8/k2Pp2Q/8/8/3K4 b - d3 0 1",
+        ];
+        for fen in view_corpus().iter().map(String::as_str).chain(fixtures) {
+            let board = Board::from_fen(fen).expect("corpus FEN must parse");
+            let view = PositionView::of(&board);
+            let expected = board.legal_ep_square();
+            assert_eq!(
+                legal_ep_square_in_view(&view),
+                expected,
+                "{fen}: parent legal ep"
+            );
+            if view.ep_square().is_some() {
+                stored += 1;
+                if expected.is_some() {
+                    legal += 1;
+                } else {
+                    removed += 1;
+                }
+            }
+
+            let mut pseudo = MoveList::new();
+            generate_pseudo_legal(&board, &mut pseudo);
+            for &m in pseudo.as_slice() {
+                let child = child_view(&view, m, board.rule50_after(m))
+                    .unwrap_or_else(|| panic!("{fen} {m}: child"))
+                    .view;
+                let mut played = board.clone();
+                let mut state = StateInfo::new();
+                played.do_move(m, &mut state);
+                let expected = played.legal_ep_square();
+                assert_eq!(
+                    legal_ep_square_in_view(&child),
+                    expected,
+                    "{fen} {m}: child legal ep"
+                );
+                if child.ep_square().is_some() {
+                    stored += 1;
+                    if expected.is_some() {
+                        legal += 1;
+                    } else {
+                        removed += 1;
+                    }
+                }
+            }
+        }
+        assert!(stored > 20, "expected stored ep targets, got {stored}");
+        assert!(legal > 0, "expected a legal ep capture");
+        assert!(removed > 0, "expected non-capturable stored targets");
+    }
+
+    /// Seeded play-outs, including the random clock: the view answer stays the
+    /// board answer at every node.
+    #[test]
+    fn legal_ep_square_in_view_matches_board_playouts() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut visited = 0u64;
+        for fen in [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        ] {
+            let mut board = Board::from_fen(fen).expect("FEN must parse");
+            let mut state = StateInfo::new();
+            for _ in 0..200 {
+                board.populate_state(&mut state);
+                let view = board.position_view();
+                assert_eq!(
+                    legal_ep_square_in_view(view),
+                    board.legal_ep_square(),
+                    "{}: legal ep",
+                    board.fen()
+                );
+                visited += 1;
+
+                let mut legal = MoveList::new();
+                generate_legal_with_state(&board, &state, &mut legal);
+                if legal.is_empty() {
+                    break;
+                }
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let m = legal.as_slice()[(seed % legal.len() as u64) as usize];
+                board.do_move(m, &mut state);
+            }
+        }
+        assert!(visited > 100, "expected a real walk, got {visited}");
     }
 
     fn view_of(fen: &str) -> PositionView {
