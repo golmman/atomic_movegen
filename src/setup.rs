@@ -21,7 +21,8 @@
 //! ```
 
 use crate::board::{
-    BK_CASTLE, BQ_CASTLE, Board, FenError, FenLoadError, FenPolicy, WK_CASTLE, WQ_CASTLE,
+    Board, FenError, FenLoadError, FenPolicy, castling_rights_backed_by_pieces,
+    ep_victim_pawn_present,
 };
 use crate::types::*;
 use std::error::Error;
@@ -270,33 +271,7 @@ impl Board {
         }
 
         let squares = setup.squares;
-        let rights = setup.castling_rights;
-        let white_commoner = make_piece(Color::White, PieceType::Commoner);
-        let white_rook = make_piece(Color::White, PieceType::Rook);
-        let black_commoner = make_piece(Color::Black, PieceType::Commoner);
-        let black_rook = make_piece(Color::Black, PieceType::Rook);
-        if rights & WK_CASTLE != 0
-            && (squares[Square::E1 as usize] != white_commoner
-                || squares[Square::H1 as usize] != white_rook)
-        {
-            return Err(SetupError::InvalidCastlingRight);
-        }
-        if rights & WQ_CASTLE != 0
-            && (squares[Square::E1 as usize] != white_commoner
-                || squares[Square::A1 as usize] != white_rook)
-        {
-            return Err(SetupError::InvalidCastlingRight);
-        }
-        if rights & BK_CASTLE != 0
-            && (squares[Square::E8 as usize] != black_commoner
-                || squares[Square::H8 as usize] != black_rook)
-        {
-            return Err(SetupError::InvalidCastlingRight);
-        }
-        if rights & BQ_CASTLE != 0
-            && (squares[Square::E8 as usize] != black_commoner
-                || squares[Square::A8 as usize] != black_rook)
-        {
+        if !castling_rights_backed_by_pieces(setup.castling_rights, &squares) {
             return Err(SetupError::InvalidCastlingRight);
         }
 
@@ -305,14 +280,9 @@ impl Board {
                 Color::White => Rank::R6,
                 Color::Black => Rank::R3,
             };
-            if rank_of(ep) != expected_rank {
-                return Err(SetupError::InvalidEnPassant);
-            }
-            let victim = match setup.side_to_move {
-                Color::White => Square::from_index(ep as i8 - 8),
-                Color::Black => Square::from_index(ep as i8 + 8),
-            };
-            if squares[victim as usize] != make_piece(setup.side_to_move.flip(), PieceType::Pawn) {
+            if rank_of(ep) != expected_rank
+                || !ep_victim_pawn_present(&squares, setup.side_to_move, ep)
+            {
                 return Err(SetupError::InvalidEnPassant);
             }
         }
@@ -323,7 +293,7 @@ impl Board {
             setup.castling_rights,
             setup.ep_square,
             setup.rule50,
-            setup.game_ply,
+            u32::from(setup.game_ply),
         ))
     }
 

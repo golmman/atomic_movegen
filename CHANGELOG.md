@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.9.0] - 2026-11-18
 
 ### Added
 
@@ -44,6 +44,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-derived. This is a canonicalization on the stable key table: no key,
   `ZOBRIST_VERSION`, move order, perft value, FEN output or terminality answer
   changes.
+
+### Changed
+
+- The default build is now genuinely safe Rust: `piece_key_raw` uses an
+  ordinary indexed Zobrist load and the crate declares
+  `forbid(unsafe_code)` unless `unsafe-optimizations` is enabled. The feature
+  now removes the bounds checks from the Zobrist piece-key lookup and the
+  magic-bitboard lookups; no public API or move-generation semantics change.
+- Clock arithmetic is hardened without changing accepted positions: the
+  internal game-ply counter is wider, `do_move`/`undo_move` restore it exactly
+  across the old `u16` boundary, and the half-move clock saturates at
+  `u16::MAX` instead of panicking in debug builds. The public `game_ply()` and
+  `fullmove_number()` getters document their saturation.
+- The structural castling and en-passant checks have one source of truth per
+  predicate, shared by `from_fen`, `from_setup`, and `validate()`. Each caller
+  keeps its documented permissiveness, so parser acceptance is unchanged for
+  every previously valid input.
+- The package is explicit: `Cargo.toml` uses an `include` list (no example
+  binaries, docs, or repository artifacts), adds `categories`, `documentation`
+  and `[package.metadata.docs.rs]`, and the published README says the examples
+  live in the repository.
+- `FenError` and `FenLoadError` now implement `Clone`, `PartialEq`, and `Eq`.
+  They remain exhaustive (not `#[non_exhaustive]`) in this minor release.
+- Raw attack-table helpers document their `Square::NONE` panic;
+  `Board::blast_zone(Square::NONE)` is total and returns an empty bitboard.
+
+### Fixed
+
+- `Board::from_fen` no longer overflows in debug builds for a legal FEN whose
+  fullmove number is large but fits in `u16` (for example `65535`). A
+  fullmove field that does not fit `u16` remains `FenError::ParseInt`.
+- `do_move`/`undo_move` no longer overflow at the old `u16` game-ply boundary,
+  and quiet moves at `rule50 == u16::MAX` saturate instead of panicking in
+  debug builds. Hashes and FEN output for ordinary positions are unchanged.
 
 ## [2.8.0] - 2026-11-13
 

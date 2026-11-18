@@ -399,11 +399,12 @@ impl ops::Shr<usize> for Bitboard {
 /// This enum is `#[non_exhaustive]`: a new variant is a minor release, so
 /// downstream `match` expressions must include a wildcard arm. Removing or
 /// renaming a variant is a major release.
-#[allow(missing_docs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Color {
+    /// The side that moves first and promotes toward rank 8.
     White = 0,
+    /// The side that moves second and promotes toward rank 1.
     Black = 1,
 }
 
@@ -444,12 +445,14 @@ pub enum CastlingSide {
 /// This enum is `#[non_exhaustive]`: a new variant is a minor release, so
 /// downstream `match` expressions must include a wildcard arm. Removing or
 /// renaming a variant is a major release.
-#[allow(missing_docs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Outcome {
+    /// The side to move wins.
     Win,
+    /// The side to move loses.
     Loss,
+    /// The position is drawn for the side to move.
     Draw,
 }
 
@@ -696,13 +699,16 @@ pub const PROMOTION_PIECES: [PieceType; 4] = [
 /// This enum is `#[non_exhaustive]`: a new variant is a minor release, so
 /// downstream `match` expressions must include a wildcard arm. Removing or
 /// renaming a variant is a major release.
-#[allow(missing_docs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum MoveType {
+    /// An ordinary move or capture.
     Normal = 0,
+    /// A pawn promotion; the promotion piece is in the move's promotion bits.
     Promotion = 1,
+    /// An en-passant capture, encoded with the capture target square.
     EnPassant = 2,
+    /// A castling move, encoded as commoner origin to rook origin.
     Castling = 3,
 }
 

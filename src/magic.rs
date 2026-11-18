@@ -480,6 +480,10 @@ static ROOK_TABLE: [Bitboard; ROOK_TABLE_SIZE] = build_rook_table();
 static BISHOP_TABLE: [Bitboard; BISHOP_TABLE_SIZE] = build_bishop_table();
 
 /// Return the attack set for a bishop on `sq` given the `occupied` board.
+///
+/// # Panics
+///
+/// Panics for [`Square::NONE`], which cannot index the precomputed entries.
 #[inline(always)]
 pub fn bishop_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
     let e = &BISHOP_ENTRIES[sq as usize];
@@ -499,6 +503,10 @@ pub fn bishop_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
 }
 
 /// Return the attack set for a rook on `sq` given the `occupied` board.
+///
+/// # Panics
+///
+/// Panics for [`Square::NONE`]; see [`bishop_attacks`].
 #[inline(always)]
 pub fn rook_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
     let e = &ROOK_ENTRIES[sq as usize];
@@ -516,6 +524,10 @@ pub fn rook_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
 }
 
 /// Return the attack set for a queen (bishop + rook).
+///
+/// # Panics
+///
+/// Panics for [`Square::NONE`]; see [`bishop_attacks`].
 #[inline(always)]
 pub fn queen_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
     bishop_attacks(sq, occupied) | rook_attacks(sq, occupied)

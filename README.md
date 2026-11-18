@@ -124,9 +124,10 @@ reference implementation.
   two commoners remaining is a WDL draw. There is deliberately no
   insufficient-material table (K+B/K+N/K+R vs K can be an immediate win), and
   touching commoners are not automatically drawn when other pieces remain.
-- Pure safe Rust by default, zero dependencies. The opt-in
-  `unsafe-optimizations` feature removes bounds checks from the magic
-  bitboard lookup; see [Feature flags](#feature-flags).
+- Pure safe Rust by default, zero dependencies. The default build forbids
+  `unsafe`; the opt-in `unsafe-optimizations` feature removes bounds checks
+  from the Zobrist piece-key and magic-bitboard lookups; see
+  [Feature flags](#feature-flags).
 
 ## Contracts
 
@@ -153,8 +154,9 @@ reference implementation.
   convenience methods that return `String`.
 - **Semver:** `#[non_exhaustive]` enums may gain variants in a minor release;
   consumers must use a wildcard arm. Removing or renaming a variant is a major
-  release. The crate is zero-dependency and safe-Rust-by-default; the only
-  opt-in `unsafe` is the `unsafe-optimizations` magic-table lookup.
+  release. The crate is zero-dependency and safe-Rust-by-default; the default
+  build forbids `unsafe`, and the only opt-in `unsafe` is behind
+  `unsafe-optimizations`.
 
 ## Conformance corpus
 
@@ -200,7 +202,7 @@ Add `atomic-movegen` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-atomic-movegen = "2.8.0"
+atomic-movegen = "2.9.0"
 ```
 
 ```rust
@@ -480,7 +482,7 @@ timely result at that depth.
 
 ## Other CLI tools
 
-All example binaries ship with the repo:
+All example binaries live in the repository, not in the crates.io package:
 
 ```sh
 cargo run --example perft_divide "FEN" DEPTH   # per-move perft breakdown
@@ -502,9 +504,10 @@ if everything passes and 1 otherwise.
 
 ## Feature flags
 
-- `unsafe-optimizations` (off by default): removes the bounds check from the
-  magic-bitboard table lookup. All indices remain provably in bounds under
-  the magic-table construction invariants; enable it only if you audit that
+- `unsafe-optimizations` (off by default): removes the bounds checks from the
+  Zobrist piece-key table load and the magic-bitboard table lookups. Every
+  index remains provably in bounds under the table construction invariants and
+  the `Square`/piece-encoding invariants; enable it only if you audit that
   argument. It does not change any public API or move-generation semantics.
 
 The combined child-key accessor `Board::hash_and_rule50_after(m)` returns

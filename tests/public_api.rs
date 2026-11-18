@@ -1,6 +1,6 @@
 //! The released public API surface, pinned by name.
 //!
-//! Every item the 2.8.0 release notes name must exist and resolve from the
+//! Every item the 2.9.0 release notes name must exist and resolve from the
 //! crate root, so the notes cannot drift from the code. This test says nothing
 //! about behaviour — the differential suites do that; it only fails when an
 //! item promised in `CHANGELOG.md` / `README.md` is missing, renamed, or no
@@ -8,16 +8,17 @@
 //! advertises (summary + key + terminality from one derivation), so that
 //! snippet cannot rot.
 
+use atomic_movegen::board::FenError;
 use atomic_movegen::movegen::{generate_legal_with_state, generate_pseudo_legal};
 use atomic_movegen::{
-    AfterState, BlastCasualties, Board, Board as BoardRoot, CONFORMANCE_CASES, Color,
-    EffectContext, EnPassantMode, Move, MoveClassification, MoveEffect, MoveList, Outcome,
-    PostMove, StateInfo, Terminal, TerminalReason, conformance,
+    AfterState, Bitboard, BlastCasualties, Board, Board as BoardRoot, CONFORMANCE_CASES, Color,
+    EffectContext, EnPassantMode, FenLoadError, FenPolicy, Move, MoveClassification, MoveEffect,
+    MoveList, Outcome, PostMove, Square, StateInfo, Terminal, TerminalReason, conformance,
 };
 
 #[test]
 fn crate_root_reexports_resolve() {
-    // Types named in the 2.8.0 notes.
+    // Types named in the 2.9.0 notes.
     let _: fn(&Board) -> Color = BoardRoot::side_to_move;
     let _: EffectContext = Board::new().effect_context();
     let _: Outcome = Outcome::Draw;
@@ -28,6 +29,14 @@ fn crate_root_reexports_resolve() {
     };
     let _: AfterState = AfterState::Undecided;
     let _: BlastCasualties = BlastCasualties::default();
+    let _: FenPolicy = FenPolicy::Lichess;
+    let _: Bitboard = Board::blast_zone(Square::NONE);
+    // The release adds additive traits to the two FEN error types.
+    fn clone_eq<T: Clone + PartialEq + Eq + std::fmt::Debug>(_: &T) {}
+    clone_eq(&FenError::TooShort { parts: 0 });
+    clone_eq(&FenLoadError::InvalidPosition(
+        atomic_movegen::ValidationErrors::EMPTY_BOARD,
+    ));
 
     // The classification type and its two entry points.
     let board = Board::new();

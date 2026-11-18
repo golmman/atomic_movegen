@@ -11,7 +11,7 @@ use std::fmt;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
 
 /// Errors that can occur when parsing a FEN string.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FenError {
     /// Fewer than 4 space-separated fields.
     TooShort {
@@ -267,7 +267,7 @@ pub enum FenPolicy {
 /// Syntax errors keep the existing [`FenError`] type; semantic failures are
 /// reported separately so downstream code can distinguish malformed FEN text
 /// from a well-formed but invalid position.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FenLoadError {
     /// The FEN text is malformed.
     Syntax(FenError),
@@ -329,7 +329,7 @@ struct ParsedFen {
     castling_rights: u8,
     ep_square: Option<Square>,
     rule50: u16,
-    game_ply: u16,
+    game_ply: u32,
 }
 
 /// Parse the field count, placement, side, castling characters, and the
@@ -443,7 +443,7 @@ fn parse_fen_prefix(fen: &str) -> Result<ParsedFen, FenError> {
 /// [`parse_fen_prefix`]. Keeping the clocks out of that function preserves
 /// [`Board::from_fen`]'s existing error order: castling and en-passant
 /// geometry errors are reported before clock errors.
-fn parse_fen_clocks(fen: &str, side_to_move: Color) -> Result<(u16, u16), FenError> {
+fn parse_fen_clocks(fen: &str, side_to_move: Color) -> Result<(u16, u32), FenError> {
     let parts: Vec<&str> = fen.split_whitespace().collect();
 
     let rule50 = if parts.len() > 4 {
@@ -461,7 +461,7 @@ fn parse_fen_clocks(fen: &str, side_to_move: Color) -> Result<(u16, u16), FenErr
         if fm == 0 {
             return Err(FenError::ParseInt(parts[5].to_string()));
         }
-        2 * (fm - 1) + if side_to_move == Color::White { 1 } else { 2 }
+        2 * u32::from(fm - 1) + if side_to_move == Color::White { 1 } else { 2 }
     } else if side_to_move == Color::White {
         1
     } else {
@@ -481,6 +481,52 @@ fn parse_fen_syntax(fen: &str) -> Result<ParsedFen, FenError> {
     Ok(parsed)
 }
 
+/// Return `true` when every castling right in `rights` is backed by the
+/// required commoner and rook on their home squares.
+///
+/// This is the single source of truth for the structural castling predicate
+/// shared by [`Board::from_fen`], [`Board::from_setup`](crate::Board::from_setup)
+/// and [`Board::validation_errors`]. It says nothing about whether the side
+/// may actually castle (the path must also be clear and safe).
+pub(crate) fn castling_rights_backed_by_pieces(rights: u8, squares: &[Piece; 64]) -> bool {
+    let white_commoner = make_piece(Color::White, PieceType::Commoner);
+    let white_rook = make_piece(Color::White, PieceType::Rook);
+    let black_commoner = make_piece(Color::Black, PieceType::Commoner);
+    let black_rook = make_piece(Color::Black, PieceType::Rook);
+
+    (rights & WK_CASTLE == 0
+        || (squares[Square::E1 as usize] == white_commoner
+            && squares[Square::H1 as usize] == white_rook))
+        && (rights & WQ_CASTLE == 0
+            || (squares[Square::E1 as usize] == white_commoner
+                && squares[Square::A1 as usize] == white_rook))
+        && (rights & BK_CASTLE == 0
+            || (squares[Square::E8 as usize] == black_commoner
+                && squares[Square::H8 as usize] == black_rook))
+        && (rights & BQ_CASTLE == 0
+            || (squares[Square::E8 as usize] == black_commoner
+                && squares[Square::A8 as usize] == black_rook))
+}
+
+/// Return `true` when the side that just moved has a pawn on the en-passant
+/// victim square for the stored target.
+///
+/// This is the permissive parser/setup predicate. It deliberately does not
+/// require the target or the double-push origin to be empty; the stricter
+/// [`ep_geometry_is_consistent`] is used by `validate()` and by the Lichess
+/// sanitizer.
+pub(crate) fn ep_victim_pawn_present(
+    squares: &[Piece; 64],
+    side_to_move: Color,
+    sq: Square,
+) -> bool {
+    let victim = match side_to_move {
+        Color::White => Square::from_index(sq as i8 - 8),
+        Color::Black => Square::from_index(sq as i8 + 8),
+    };
+    squares[victim as usize] == make_piece(side_to_move.flip(), PieceType::Pawn)
+}
+
 /// Return `true` when `sq` is consistent with a double push by the side that
 /// just moved.
 ///
@@ -495,18 +541,11 @@ fn ep_geometry_is_consistent(squares: &[Piece; 64], side_to_move: Color, sq: Squ
     if rank_of(sq) != expected_rank {
         return false;
     }
-    let them = side_to_move.flip();
-    let (pawn_sq, origin_sq) = match side_to_move {
-        Color::White => (
-            Square::from_index(sq as i8 - 8),
-            Square::from_index(sq as i8 + 8),
-        ),
-        Color::Black => (
-            Square::from_index(sq as i8 + 8),
-            Square::from_index(sq as i8 - 8),
-        ),
+    let origin_sq = match side_to_move {
+        Color::White => Square::from_index(sq as i8 + 8),
+        Color::Black => Square::from_index(sq as i8 - 8),
     };
-    squares[pawn_sq as usize] == make_piece(them, PieceType::Pawn)
+    ep_victim_pawn_present(squares, side_to_move, sq)
         && squares[origin_sq as usize] == NO_PIECE
         && squares[sq as usize] == NO_PIECE
 }
@@ -770,7 +809,7 @@ pub struct Board {
     /// it; the fields are kept in lock-step with `squares` by the crate's own
     /// mutators.
     position: PositionView,
-    game_ply: u16,
+    game_ply: u32,
     hash: u64,
 }
 
@@ -890,42 +929,33 @@ impl Board {
     pub fn from_fen(fen: &str) -> Result<Self, FenError> {
         let mut parsed = parse_fen_prefix(fen)?;
 
-        // Validate castling rights against the actual king/commoner and rook squares.
-        if parsed.castling_rights & WK_CASTLE != 0
-            && (parsed.squares[Square::E1 as usize]
-                != make_piece(Color::White, PieceType::Commoner)
-                || parsed.squares[Square::H1 as usize] != make_piece(Color::White, PieceType::Rook))
-        {
-            return Err(FenError::InvalidCastling(
-                "white king-side castling rights without required pieces".to_string(),
-            ));
-        }
-        if parsed.castling_rights & WQ_CASTLE != 0
-            && (parsed.squares[Square::E1 as usize]
-                != make_piece(Color::White, PieceType::Commoner)
-                || parsed.squares[Square::A1 as usize] != make_piece(Color::White, PieceType::Rook))
-        {
-            return Err(FenError::InvalidCastling(
-                "white queen-side castling rights without required pieces".to_string(),
-            ));
-        }
-        if parsed.castling_rights & BK_CASTLE != 0
-            && (parsed.squares[Square::E8 as usize]
-                != make_piece(Color::Black, PieceType::Commoner)
-                || parsed.squares[Square::H8 as usize] != make_piece(Color::Black, PieceType::Rook))
-        {
-            return Err(FenError::InvalidCastling(
-                "black king-side castling rights without required pieces".to_string(),
-            ));
-        }
-        if parsed.castling_rights & BQ_CASTLE != 0
-            && (parsed.squares[Square::E8 as usize]
-                != make_piece(Color::Black, PieceType::Commoner)
-                || parsed.squares[Square::A8 as usize] != make_piece(Color::Black, PieceType::Rook))
-        {
-            return Err(FenError::InvalidCastling(
-                "black queen-side castling rights without required pieces".to_string(),
-            ));
+        // Validate castling rights against the actual commoner and rook
+        // squares. The shared predicate is the one `from_setup` and
+        // `validate()` use; checking one right at a time preserves the
+        // existing per-side error text.
+        for (bit, message) in [
+            (
+                WK_CASTLE,
+                "white king-side castling rights without required pieces",
+            ),
+            (
+                WQ_CASTLE,
+                "white queen-side castling rights without required pieces",
+            ),
+            (
+                BK_CASTLE,
+                "black king-side castling rights without required pieces",
+            ),
+            (
+                BQ_CASTLE,
+                "black queen-side castling rights without required pieces",
+            ),
+        ] {
+            if parsed.castling_rights & bit != 0
+                && !castling_rights_backed_by_pieces(bit, &parsed.squares)
+            {
+                return Err(FenError::InvalidCastling(message.to_string()));
+            }
         }
 
         if let Some(sq) = parsed.ep_square {
@@ -941,13 +971,8 @@ impl Board {
                     parsed.side_to_move
                 )));
             }
-            let ep_cap_idx = match parsed.side_to_move {
-                Color::White => sq as i8 - 8,
-                Color::Black => sq as i8 + 8,
-            };
-            let ep_cap = Square::from_index(ep_cap_idx);
             let them = parsed.side_to_move.flip();
-            if parsed.squares[ep_cap as usize] != make_piece(them, PieceType::Pawn) {
+            if !ep_victim_pawn_present(&parsed.squares, parsed.side_to_move, sq) {
                 return Err(FenError::InvalidEpSquare(format!(
                     "no {} pawn on the square behind {} for en-passant",
                     if them == Color::White {
@@ -1091,32 +1116,7 @@ impl Board {
         }
 
         // 3. Castling rights must have the required commoner and rook.
-        let white_commoner = make_piece(Color::White, PieceType::Commoner);
-        let white_rook = make_piece(Color::White, PieceType::Rook);
-        let black_commoner = make_piece(Color::Black, PieceType::Commoner);
-        let black_rook = make_piece(Color::Black, PieceType::Rook);
-        if self.position.castling_rights & WK_CASTLE != 0
-            && (self.squares[Square::E1 as usize] != white_commoner
-                || self.squares[Square::H1 as usize] != white_rook)
-        {
-            errors |= ValidationErrors::INVALID_CASTLING_RIGHTS;
-        }
-        if self.position.castling_rights & WQ_CASTLE != 0
-            && (self.squares[Square::E1 as usize] != white_commoner
-                || self.squares[Square::A1 as usize] != white_rook)
-        {
-            errors |= ValidationErrors::INVALID_CASTLING_RIGHTS;
-        }
-        if self.position.castling_rights & BK_CASTLE != 0
-            && (self.squares[Square::E8 as usize] != black_commoner
-                || self.squares[Square::H8 as usize] != black_rook)
-        {
-            errors |= ValidationErrors::INVALID_CASTLING_RIGHTS;
-        }
-        if self.position.castling_rights & BQ_CASTLE != 0
-            && (self.squares[Square::E8 as usize] != black_commoner
-                || self.squares[Square::A8 as usize] != black_rook)
-        {
+        if !castling_rights_backed_by_pieces(self.position.castling_rights, &self.squares) {
             errors |= ValidationErrors::INVALID_CASTLING_RIGHTS;
         }
 
@@ -1145,36 +1145,10 @@ impl Board {
         // 5. En-passant geometry must be consistent with a double push. A
         // legal ep capture is deliberately not required: FSF records the
         // target after every double push.
-        if let Some(sq) = self.position.ep_square {
-            let mut valid = true;
-            let expected_rank = match self.position.side_to_move {
-                Color::White => Rank::R6,
-                Color::Black => Rank::R3,
-            };
-            if rank_of(sq) != expected_rank {
-                valid = false;
-            } else {
-                let them = self.position.side_to_move.flip();
-                let (pawn_sq, origin_sq) = match self.position.side_to_move {
-                    Color::White => (
-                        Square::from_index(sq as i8 - 8),
-                        Square::from_index(sq as i8 + 8),
-                    ),
-                    Color::Black => (
-                        Square::from_index(sq as i8 + 8),
-                        Square::from_index(sq as i8 - 8),
-                    ),
-                };
-                if self.squares[pawn_sq as usize] != make_piece(them, PieceType::Pawn)
-                    || self.squares[origin_sq as usize] != NO_PIECE
-                    || self.squares[sq as usize] != NO_PIECE
-                {
-                    valid = false;
-                }
-            }
-            if !valid {
-                errors |= ValidationErrors::INVALID_EP_SQUARE;
-            }
+        if let Some(sq) = self.position.ep_square
+            && !ep_geometry_is_consistent(&self.squares, self.position.side_to_move, sq)
+        {
+            errors |= ValidationErrors::INVALID_EP_SQUARE;
         }
 
         // 6. The side that just moved must not be in check.
@@ -1320,7 +1294,7 @@ impl Board {
         castling_rights: u8,
         ep_square: Option<Square>,
         rule50: u16,
-        game_ply: u16,
+        game_ply: u32,
     ) -> Board {
         let mut by_color = [Bitboard::EMPTY; 2];
         let mut by_type = [Bitboard::EMPTY; 6];
@@ -1511,18 +1485,28 @@ impl Board {
         self.position.rule50
     }
 
-    /// Return the raw per-ply move counter (1-based).
+    /// Return the raw per-ply move counter (1-based), saturating at
+    /// [`u16::MAX`].
+    ///
+    /// The internal counter is wider so that a FEN with a large (but
+    /// `u16`-representable) fullmove number cannot overflow on
+    /// [`do_move`](Self::do_move) or [`undo_move`](Self::undo_move).
     #[inline]
     #[must_use]
     pub fn game_ply(&self) -> u16 {
-        self.game_ply
+        u16::try_from(self.game_ply).unwrap_or(u16::MAX)
     }
 
     /// Return the fullmove number as it appears in FEN output.
+    ///
+    /// The value saturates at [`u16::MAX`], which only happens for an internal
+    /// game ply beyond `2 * u16::MAX`; a parsed FEN cannot reach it because its
+    /// fullmove field is itself a `u16`.
     #[inline]
     #[must_use]
     pub fn fullmove_number(&self) -> u16 {
-        1 + (self.game_ply.saturating_sub(1)) / 2
+        let fullmove = 1 + self.game_ply.saturating_sub(1) / 2;
+        u16::try_from(fullmove).unwrap_or(u16::MAX)
     }
 
     /// The null counterpart of this position: same pieces and castling rights,
@@ -1542,11 +1526,11 @@ impl Board {
         board.position.side_to_move = attacker;
         board.position.ep_square = None;
         // Match the FEN round-trip: the fullmove number is preserved and the
-        // game ply is derived from the new side to move. Saturating arithmetic
-        // keeps an extreme fullmove number from overflowing in debug builds.
+        // game ply is derived from the new side to move. The internal counter
+        // is wide enough for every parsed fullmove number, so the same
+        // saturating arithmetic as the FEN path is exact here.
         let fullmove = self.fullmove_number();
-        board.game_ply = fullmove
-            .saturating_sub(1)
+        board.game_ply = u32::from(fullmove.saturating_sub(1))
             .saturating_mul(2)
             .saturating_add(if attacker == Color::White { 1 } else { 2 });
         board.recompute_hash();
@@ -1642,7 +1626,10 @@ impl Board {
     #[must_use]
     pub fn hash_and_rule50_after(&self, m: Move) -> (u64, u16) {
         if m.move_type() == MoveType::Castling {
-            return (self.hash_after_castling(m), self.position.rule50 + 1);
+            return (
+                self.hash_after_castling(m),
+                self.position.rule50.saturating_add(1),
+            );
         }
         let class = self.classify_move(m);
         (
@@ -1924,7 +1911,7 @@ impl Board {
     #[must_use]
     pub fn rule50_after(&self, m: Move) -> u16 {
         if m.move_type() == MoveType::Castling {
-            return self.position.rule50 + 1;
+            return self.position.rule50.saturating_add(1);
         }
         self.rule50_after_classified(self.classify_move(m))
     }
@@ -1935,7 +1922,7 @@ impl Board {
         if class.is_pawn || class.is_capture {
             0
         } else {
-            self.position.rule50 + 1
+            self.position.rule50.saturating_add(1)
         }
     }
 
@@ -2224,9 +2211,13 @@ impl Board {
     /// pawn squares. Atomic rules make pawns immune to the blast except at
     /// ground zero, so [`blast_casualties`](Self::blast_casualties) and
     /// [`do_move`](Self::do_move) mask out pawns before removing pieces.
+    /// [`Square::NONE`] is total here and returns [`Bitboard::EMPTY`].
     #[inline]
     #[must_use]
     pub fn blast_zone(sq: Square) -> Bitboard {
+        if sq == Square::NONE {
+            return Bitboard::EMPTY;
+        }
         attacks::king_attacks(sq) | Bitboard::square_bb(sq)
     }
 
@@ -2395,6 +2386,16 @@ impl Board {
     /// themselves before calling [`legal`](Self::legal), or use
     /// [`generate_legal`](crate::movegen::generate_legal) which creates its own
     /// populated `StateInfo`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `m` is malformed for this board: a [`Move::NONE`] sentinel,
+    /// an empty origin square, a move whose origin holds no piece of the side
+    /// to move, or a move type that does not match the placement (for example
+    /// a castling encoding without the commoner). These are caller
+    /// preconditions; untrusted move input must be checked first with
+    /// [`is_legal`](Self::is_legal), [`is_pseudo_legal`](Self::is_pseudo_legal)
+    /// or [`move_from_uci`](Self::move_from_uci).
     pub fn do_move(&mut self, m: Move, state: &mut StateInfo) {
         state.hash = self.hash;
         state.castling_rights = self.position.castling_rights;
@@ -2434,7 +2435,7 @@ impl Board {
                 Color::Black => !(BK_CASTLE | BQ_CASTLE),
             };
             self.position.ep_square = None;
-            self.position.rule50 += 1;
+            self.position.rule50 = self.position.rule50.saturating_add(1);
             self.position.side_to_move = them;
             self.game_ply += 1;
             self.update_hash_state_transition(state);
@@ -2525,7 +2526,7 @@ impl Board {
         if pt == PieceType::Pawn || is_capture {
             self.position.rule50 = 0;
         } else {
-            self.position.rule50 += 1;
+            self.position.rule50 = self.position.rule50.saturating_add(1);
         }
 
         self.position.side_to_move = them;
@@ -2537,6 +2538,13 @@ impl Board {
     ///
     /// `state` must be the same [`StateInfo`] that was passed to `do_move`. It
     /// is used only for undo data; cached attack fields are not restored.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `m` is not the move that produced `state` on this board, or
+    /// if `state` is stale or was populated by a different board. The board is
+    /// left inconsistent in that case; this is a caller precondition, not a
+    /// recoverable error.
     pub fn undo_move(&mut self, m: Move, state: &StateInfo) {
         self.position.castling_rights = state.castling_rights;
         self.position.ep_square = state.ep_square;
@@ -3451,23 +3459,30 @@ struct MoveClass {
 }
 
 /// Return the Zobrist piece key for the piece with raw encoding `raw`
-/// standing on `sq`, skipping the bounds checks the compiler cannot elide.
+/// standing on `sq`.
 ///
-/// `ZOBRIST.piece` is `[[-u64; 16]; 64]`. Every `Square` used as a board
-/// index is `< 64` and every piece raw encoding is `< 16` by construction
-/// (see `types.rs`); debug builds assert both, release builds rely on the
-/// invariants. This is confined to `hash_after`, where the extra compare-
-/// and-panic plumbing per table load was a measurable share of the runtime.
+/// `ZOBRIST.piece` is `[[u64; 16]; 64]`. Every `Square` used as a board index
+/// is `< 64` and every piece raw encoding is `< 16` by construction (see
+/// `types.rs`); debug builds assert both. The default build performs ordinary
+/// indexed loads (safe Rust). With `unsafe-optimizations` the loads skip their
+/// bounds checks, which was a measurable share of `hash_after`'s runtime.
 #[inline(always)]
 fn piece_key_raw(sq: Square, raw: u8) -> u64 {
     debug_assert!((sq as usize) < 64);
     debug_assert!((raw as usize) < 16);
-    // SAFETY: in-bounds per the invariants above (debug-asserted).
-    unsafe {
-        *crate::zobrist::ZOBRIST
-            .piece
-            .get_unchecked(sq as usize)
-            .get_unchecked(raw as usize)
+    #[cfg(feature = "unsafe-optimizations")]
+    {
+        // SAFETY: in-bounds per the invariants above (debug-asserted).
+        unsafe {
+            *crate::zobrist::ZOBRIST
+                .piece
+                .get_unchecked(sq as usize)
+                .get_unchecked(raw as usize)
+        }
+    }
+    #[cfg(not(feature = "unsafe-optimizations"))]
+    {
+        crate::zobrist::ZOBRIST.piece[sq as usize][raw as usize]
     }
 }
 
@@ -7131,5 +7146,252 @@ mod tests {
         // The commoner is `K` in SAN as in FEN.
         assert_san("4k3/8/8/8/8/8/8/4K3 w - - 0 1", "e1e2", "Ke2");
         assert_san("4k3/8/8/8/8/8/8/4K3 b - - 0 1", "e8e7", "Ke7");
+    }
+
+    #[test]
+    fn clock_boundaries_saturate_and_undo_exactly() {
+        // fullmove 32768 makes the old u16 game-ply boundary (65535) reachable
+        // on the next move. The internal counter is wider, so do/undo is exact;
+        // the public getter saturates.
+        let fen = "4k3/8/8/8/8/8/8/4K2R w - - 65535 32768";
+        let mut board = Board::from_fen(fen).unwrap();
+        assert_eq!(board.position.rule50, u16::MAX);
+        assert_eq!(board.game_ply, 65535);
+        assert_eq!(board.game_ply(), u16::MAX);
+        assert_eq!(board.fullmove_number(), 32768);
+
+        let before_fen = board.fen();
+        let before_hash = board.hash();
+        let m = Move::make_move(Square::H1, Square::H2);
+        assert_eq!(board.rule50_after(m), u16::MAX);
+        assert_eq!(
+            board.hash_and_rule50_after(m),
+            (board.hash_after(m), u16::MAX)
+        );
+
+        let mut state = StateInfo::new();
+        board.do_move(m, &mut state);
+        assert_eq!(board.rule50(), u16::MAX);
+        assert_eq!(board.game_ply, 65536);
+        assert_eq!(board.game_ply(), u16::MAX);
+        assert_eq!(board.fullmove_number(), 32768);
+
+        board.undo_move(m, &state);
+        assert_eq!(board.rule50(), u16::MAX);
+        assert_eq!(board.game_ply, 65535);
+        assert_eq!(board.game_ply(), u16::MAX);
+        assert_eq!(board.fullmove_number(), 32768);
+        assert_eq!(board.hash(), before_hash);
+        assert_eq!(board.fen(), before_fen);
+
+        // The largest representable fullmove number parses and does not
+        // overflow, while a field that does not fit u16 is still an error.
+        let max = Board::from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 65535").unwrap();
+        assert_eq!(max.game_ply, 131_069);
+        assert_eq!(max.game_ply(), u16::MAX);
+        assert_eq!(max.fullmove_number(), 65535);
+        let max_black = Board::from_fen("4k3/8/8/8/8/8/8/4K3 b - - 0 65535").unwrap();
+        assert_eq!(max_black.game_ply, 131_070);
+        assert_eq!(max_black.fullmove_number(), 65535);
+        assert!(matches!(
+            Board::from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 65536"),
+            Err(FenError::ParseInt(_))
+        ));
+    }
+
+    #[test]
+    fn long_do_undo_crosses_the_old_clock_boundary_exactly() {
+        let mut board = Board::from_fen("4k3/8/8/8/8/8/8/4K2R w - - 0 32768").unwrap();
+        let start_fen = board.fen();
+        let start_hash = board.hash();
+        let start_ply = board.game_ply;
+        let mut state_out = StateInfo::new();
+        let mut state_back = StateInfo::new();
+        let out = Move::make_move(Square::H1, Square::H2);
+        let back = Move::make_move(Square::H2, Square::H1);
+
+        for _ in 0..8 {
+            board.do_move(out, &mut state_out);
+            board.do_move(back, &mut state_back);
+            board.undo_move(back, &state_back);
+            board.undo_move(out, &state_out);
+            assert_eq!(board.game_ply, start_ply);
+            assert_eq!(board.hash(), start_hash);
+            assert_eq!(board.fen(), start_fen);
+        }
+    }
+
+    fn castling_token(rights: u8) -> String {
+        if rights == 0 {
+            return "-".to_owned();
+        }
+        let mut token = String::new();
+        for (bit, ch) in [
+            (WK_CASTLE, 'K'),
+            (WQ_CASTLE, 'Q'),
+            (BK_CASTLE, 'k'),
+            (BQ_CASTLE, 'q'),
+        ] {
+            if rights & bit != 0 {
+                token.push(ch);
+            }
+        }
+        token
+    }
+
+    #[test]
+    fn structural_castling_predicate_agrees_across_constructors() {
+        // Each placement exercises a different subset of the backing pieces.
+        const PLACEMENTS: &[&str] = &[
+            "4k2r/8/8/8/8/8/8/R3K2R", // all four rights backed
+            "4k3/8/8/8/8/8/8/4K3",    // no rooks
+            "4k2r/8/8/8/8/8/8/4K2R",  // king-side rooks only
+            "4k3/8/8/8/8/8/8/R3K3",   // queen-side rooks only
+            "3k4/8/8/8/8/8/8/3K4",    // commoners off their home squares
+        ];
+
+        for placement in PLACEMENTS {
+            let base = Board::from_fen(&format!("{placement} w - - 0 1")).unwrap();
+            let mut setup = crate::setup::Setup::new();
+            for (sq, piece) in base.pieces() {
+                setup.place(sq, piece);
+            }
+            setup.set_side_to_move(Color::White);
+
+            for rights in 0u8..16 {
+                let expected = castling_rights_backed_by_pieces(rights, &base.squares);
+                setup.set_castling_rights(rights);
+                assert_eq!(
+                    Board::from_setup(&setup).is_ok(),
+                    expected,
+                    "{placement}: from_setup rights {rights:#x}"
+                );
+
+                let fen = format!("{placement} w {} - 0 1", castling_token(rights));
+                let parsed = Board::from_fen(&fen);
+                assert_eq!(
+                    parsed.is_ok(),
+                    expected,
+                    "{placement}: from_fen rights {rights:#x} ({fen})"
+                );
+                if !expected {
+                    assert!(matches!(parsed, Err(FenError::InvalidCastling(_))));
+                }
+
+                let built = Board::from_setup_parts(base.squares, Color::White, rights, None, 0, 1);
+                assert_eq!(
+                    built
+                        .validation_errors(FenPolicy::Strict)
+                        .contains(ValidationErrors::INVALID_CASTLING_RIGHTS),
+                    !expected,
+                    "{placement}: validate rights {rights:#x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn structural_ep_predicates_preserve_each_caller_contract() {
+        struct Case {
+            name: &'static str,
+            placement: &'static str,
+            ep: Square,
+            parser_ok: bool,
+            setup_ok: bool,
+            strict_ok: bool,
+        }
+
+        let cases = [
+            Case {
+                name: "valid",
+                placement: "4k3/8/8/3p4/8/8/8/4K3",
+                ep: Square::D6,
+                parser_ok: true,
+                setup_ok: true,
+                strict_ok: true,
+            },
+            Case {
+                name: "missing victim",
+                placement: "4k3/8/8/8/8/8/8/4K3",
+                ep: Square::D6,
+                parser_ok: false,
+                setup_ok: false,
+                strict_ok: false,
+            },
+            Case {
+                name: "occupied origin",
+                placement: "4k3/3R4/8/3p4/8/8/8/4K3",
+                ep: Square::D6,
+                parser_ok: true,
+                setup_ok: true,
+                strict_ok: false,
+            },
+            Case {
+                name: "occupied target",
+                placement: "4k3/8/3R4/3p4/8/8/8/4K3",
+                ep: Square::D6,
+                parser_ok: true,
+                setup_ok: true,
+                strict_ok: false,
+            },
+            Case {
+                name: "wrong rank",
+                placement: "4k3/8/8/8/3p4/8/8/4K3",
+                ep: Square::D4,
+                parser_ok: false,
+                setup_ok: false,
+                strict_ok: false,
+            },
+        ];
+
+        for case in cases {
+            let fen = format!("{} w - {} 0 1", case.placement, sq_str(case.ep).unwrap());
+            let parsed = Board::from_fen(&fen);
+            assert_eq!(parsed.is_ok(), case.parser_ok, "{}: from_fen", case.name);
+            if !case.parser_ok {
+                assert!(matches!(parsed, Err(FenError::InvalidEpSquare(_))));
+            }
+
+            let base = Board::from_fen(&format!("{} w - - 0 1", case.placement)).unwrap();
+            let mut setup = crate::setup::Setup::new();
+            for (sq, piece) in base.pieces() {
+                setup.place(sq, piece);
+            }
+            setup
+                .set_side_to_move(Color::White)
+                .set_ep_square(Some(case.ep));
+            assert_eq!(
+                Board::from_setup(&setup).is_ok(),
+                case.setup_ok,
+                "{}: from_setup",
+                case.name
+            );
+
+            assert_eq!(
+                Board::from_fen_with(&fen, FenPolicy::Strict).is_ok(),
+                case.strict_ok,
+                "{}: Strict",
+                case.name
+            );
+
+            let built = Board::from_setup_parts(base.squares, Color::White, 0, Some(case.ep), 0, 1);
+            assert_eq!(
+                built
+                    .validation_errors(FenPolicy::Strict)
+                    .contains(ValidationErrors::INVALID_EP_SQUARE),
+                !case.strict_ok,
+                "{}: validate",
+                case.name
+            );
+        }
+    }
+
+    #[test]
+    fn blast_zone_none_is_total() {
+        assert_eq!(Board::blast_zone(Square::NONE), Bitboard::EMPTY);
+        assert_eq!(
+            Board::blast_zone(Square::E4),
+            attacks::king_attacks(Square::E4) | Bitboard::square_bb(Square::E4)
+        );
     }
 }

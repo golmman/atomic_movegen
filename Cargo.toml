@@ -1,14 +1,29 @@
 [package]
 name = "atomic-movegen"
-version = "2.8.0"
+version = "2.9.0"
 edition = "2024"
 description = "Legal move generation for atomic chess."
 readme = "README.md"
 keywords = ["chess", "movegen", "perft"]
 license = "MIT"
 repository = "https://github.com/golmman/atomic_movegen"
+documentation = "https://docs.rs/atomic-movegen"
+categories = ["game-development", "games"]
 rust-version = "1.85"
-exclude = ["Fairy-Stockfish/**", "docs/**", "AGENTS.md", ".gitignore", ".gitmodules", "tests/gen_moves.py", "perft_profile.txt"]
+include = [
+    "/src/**/*.rs",
+    "/tests/**/*.rs",
+    "/tests/*.md",
+    "/tests/data/*.tsv",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [features]
 default = []

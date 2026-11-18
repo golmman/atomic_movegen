@@ -281,18 +281,32 @@ pub(crate) static BETWEEN_BB: [[Bitboard; 64]; 64] = compute_between_bb();
 pub(crate) static LINE_BB: [[Bitboard; 64]; 64] = compute_line_bb();
 
 /// Return the attack bitboard for a king on the given square.
+///
+/// # Panics
+///
+/// Panics for [`Square::NONE`], which is not a board index. This raw table
+/// helper deliberately keeps its branch-free hot path; callers that may hold
+/// `NONE` must handle it themselves.
 #[inline(always)]
 pub fn king_attacks(sq: Square) -> Bitboard {
     KING_ATTACKS[sq as usize]
 }
 
 /// Return the attack bitboard for a knight on the given square.
+///
+/// # Panics
+///
+/// Panics for [`Square::NONE`]; see [`king_attacks`].
 #[inline(always)]
 pub fn knight_attacks(sq: Square) -> Bitboard {
     KNIGHT_ATTACKS[sq as usize]
 }
 
 /// Return the attack bitboard for a pawn of the given color on the given square.
+///
+/// # Panics
+///
+/// Panics for [`Square::NONE`]; see [`king_attacks`].
 #[inline(always)]
 pub fn pawn_attacks(c: Color, sq: Square) -> Bitboard {
     PAWN_ATTACKS[sq as usize][c as usize]
@@ -336,6 +350,10 @@ pub fn attacks_from(pt: PieceType, color: Color, sq: Square, occupied: Bitboard)
 
 /// Return the squares strictly between `s1` and `s2`, or empty when the
 /// squares are not on the same rank, file, or diagonal.
+///
+/// # Panics
+///
+/// Panics if either square is [`Square::NONE`].
 #[inline(always)]
 pub fn between(s1: Square, s2: Square) -> Bitboard {
     crate::bitboard::between_bb(s1, s2)

@@ -247,16 +247,20 @@
 //! - `#[non_exhaustive]` enums may gain variants in a minor release; consumers
 //!   must use a wildcard arm. Removing or renaming a variant is a major
 //!   release.
-//! - The crate is zero-dependency and safe-Rust-by-default; the only opt-in
-//!   `unsafe` is the `unsafe-optimizations` magic-table lookup.
+//! - The crate is zero-dependency and safe-Rust-by-default. The default build
+//!   forbids `unsafe`; enabling `unsafe-optimizations` removes the bounds
+//!   checks from the Zobrist piece-key lookup and the magic-bitboard table
+//!   lookups.
 //!
 //! # Feature flags
 //!
-//! - `unsafe-optimizations` (off by default): removes the bounds check from
-//!   the magic-bitboard table lookup. Every index stays provably in bounds by
-//!   the magic-table construction invariants (see the `magic` module safety
-//!   note); enable it only if you are willing to audit that argument. It
-//!   changes no public API and no move-generation semantics.
+//! - `unsafe-optimizations` (off by default): removes the bounds checks from
+//!   the Zobrist piece-key table load and the magic-bitboard table lookups.
+//!   Every index stays provably in bounds by the table construction
+//!   invariants and the `Square`/piece-encoding invariants (see the `magic`
+//!   module safety note and the `SAFETY` comments on the blocks); enable it
+//!   only if you are willing to audit those arguments. It changes no public
+//!   API and no move-generation semantics.
 //!
 //! # Example
 //!
@@ -269,7 +273,10 @@
 //! assert_eq!(nodes, 8902);
 //! ```
 
+#![cfg_attr(not(feature = "unsafe-optimizations"), forbid(unsafe_code))]
+#![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
+#![warn(clippy::undocumented_unsafe_blocks)]
 
 pub mod attacks;
 pub(crate) mod bitboard;
