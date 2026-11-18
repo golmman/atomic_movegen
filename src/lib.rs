@@ -129,6 +129,13 @@
 //! canonicalization on the stable key table, not a new table and not a
 //! [`ZOBRIST_VERSION`] change.
 //!
+//! [`EffectContext::exploding_capture_after`] answers a one-ply threat in the
+//! child: after the pseudo-legal move `m`, it returns the first legal capture by
+//! the child's side to move whose blast removes the commoner of the side that
+//! played `m`, or `None`. It is a child query, not a [`MoveClassification`]
+//! field, and it reuses the already-derived child view: no clone, no board
+//! write, and no `StateInfo`.
+//!
 //! Cost is measured, not promised: `cargo run --release --example effect_bench`
 //! prints the child rows and, per child class (`quiet`, `capture`, `promotion`,
 //! `en-passant`, `castling`, `commoner-move`, the aggregate `built-ish` and
@@ -228,6 +235,7 @@
 //!   [`EffectContext::post_move`], [`PostMove::terminal`],
 //!   [`EffectContext::post_move_and_key`],
 //!   [`EffectContext::post_move_and_key_with`],
+//!   [`EffectContext::exploding_capture_after`],
 //!   [`EffectContext::is_legal`],
 //!   [`EffectContext::terminal_after`], [`EffectContext::child_outcome`],
 //!   [`EffectContext::outcome_after`],

@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `EffectContext::exploding_capture_after(board, m)`, a read-only one-ply child
+  query: the first legal capture by the child's side to move whose blast
+  removes the commoner of the side that played `m`, or `None`. It is defined
+  for pseudo-legal `m` (including illegal `m`), reuses the already-derived
+  child view, and never clones or writes the parent board or populates a
+  `StateInfo`. The returned move is the first hit in the child's pseudo-legal
+  generation order; this is an existence/one-witness query, not a
+  "best capture" query. No existing answer, key, move order, perft value, FEN
+  output or `Outcome`/`Terminal` semantics change.
 - `FenPolicy::Lichess`, an opt-in sanitizing FEN acceptance policy for the
   downstream `parity` check. Through the existing
   `Board::from_fen_with(fen, policy)` entry point it drops castling rights that

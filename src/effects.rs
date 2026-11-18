@@ -106,6 +106,40 @@
 //! assert_eq!(post.terminal(), None);
 //! ```
 //!
+//! # Immediate explosion in the child
+//!
+//! [`EffectContext::exploding_capture_after`] answers one one-ply threat: after
+//! the pseudo-legal move `m`, is there a legal capture by the child's side to
+//! move whose blast removes the **commoner of the side that played `m`**? The
+//! result is the first such capture in the child's pseudo-legal generation
+//! order, or `None` when no such capture exists (including a decided child, a
+//! malformed `m`, or an exploded target commoner). It is a child query, not a
+//! field of [`MoveClassification`]: the move that was just played is not the
+//! move being described.
+//!
+//! ```
+//! use atomic_movegen::types::MoveType;
+//! use atomic_movegen::{Board, Move, Square};
+//!
+//! // After the double push, Black's en-passant capture on e3 explodes the
+//! // white commoner on f4; the black commoner on a8 is far away.
+//! let board = Board::from_fen("k7/8/8/8/3p1K2/8/4P3/8 w - - 0 1").unwrap();
+//! let ctx = board.effect_context();
+//! let capture = ctx
+//!     .exploding_capture_after(&board, Move::from_uci("e2e4").unwrap())
+//!     .expect("the child can explode the mover's commoner");
+//! assert_eq!((capture.from_sq(), capture.to_sq()), (Square::D4, Square::E3));
+//! assert_eq!(capture.move_type(), MoveType::EnPassant);
+//!
+//! // From the initial position no black capture comes near e1.
+//! let board = Board::new();
+//! let ctx = board.effect_context();
+//! assert_eq!(
+//!     ctx.exploding_capture_after(&board, Move::from_uci("e2e4").unwrap()),
+//!     None
+//! );
+//! ```
+//!
 //! # Effect
 //!
 //! [`EffectContext::effect`] is the full answer: the classification plus the
@@ -733,6 +767,38 @@ impl EffectContext {
         ))
     }
 
+    /// The first legal capture in the child after `m` whose blast removes the
+    /// commoner of the side that played `m`.
+    ///
+    /// The returned move belongs to the child's side to move. It is the first
+    /// such capture in the child's pseudo-legal generation order; this is an
+    /// existence/one-witness query, not a "best capture" query.
+    ///
+    /// Returns `None` when:
+    ///
+    /// - `m` is malformed ([`Move::NONE`], an empty origin square, or an origin
+    ///   that does not hold a piece of the parent side to move);
+    /// - the child has no commoner for the side that played `m` (for example
+    ///   `m` exploded it);
+    /// - the child has no commoner for the child side to move (the child is
+    ///   already decided);
+    /// - no legal capture removes the target commoner.
+    ///
+    /// Defined for **pseudo-legal** `m`, including illegal `m`: the unreachable
+    /// child is described exactly as `do_move` would build it. The parent board
+    /// is never written and no [`StateInfo`] is populated.
+    ///
+    /// Touching commoners do not make the child immune to a blast: the capture
+    /// must be legal, so a blast that destroys the child side's own commoner is
+    /// rejected; a blast that removes only the target commoner is a win and may
+    /// be returned.
+    #[must_use]
+    pub fn exploding_capture_after(&self, board: &Board, m: Move) -> Option<Move> {
+        let child = self.analyze(board, m)?;
+        let target = child.view.commoners(self.us());
+        exploding_capture_in_view(&child.view, target)
+    }
+
     /// The opponent's commoners in the context position.
     #[inline]
     fn their_commoners(&self) -> Bitboard {
@@ -973,6 +1039,47 @@ impl PostMove {
     pub fn terminal(&self) -> Option<Terminal> {
         crate::position::terminal_in_view_light(&self.view)
     }
+}
+
+/// The first legal capture in `view` whose blast removes one of `target`.
+///
+/// `view` is the child position and `target` the commoners of the side that
+/// played the move that produced it. Both commoners must exist in `view`: a
+/// side without a commoner has no legal moves, and [`legal_with_counts`](crate::position::legal_with_counts)
+/// expects the side to move's commoner to be live.
+///
+/// The destination-zone test is a cheap prefilter only; the decisive test is
+/// the blast-casualty intersection with `target`.
+fn exploding_capture_in_view(view: &PositionView, target: Bitboard) -> Option<Move> {
+    let us = view.side_to_move();
+    let them = us.flip();
+    if view.commoners(us).is_empty() || view.commoners(them).is_empty() {
+        return None;
+    }
+    if target.is_empty() {
+        return None;
+    }
+    let target_sq = target.lsb();
+    let target_zone = target | attacks::king_attacks(target_sq);
+
+    let mut found = None;
+    let _ = crate::movegen::for_each_pseudo_legal_in_view::<()>(view, &mut |c| {
+        if !view.is_capture(c) {
+            return std::ops::ControlFlow::Continue(());
+        }
+        if !target_zone.contains(c.to_sq() as usize) {
+            return std::ops::ControlFlow::Continue(());
+        }
+        if (view.blast_casualties(c).all() & target).is_empty() {
+            return std::ops::ControlFlow::Continue(());
+        }
+        if crate::position::legal_with_counts(view, c) {
+            found = Some(c);
+            return std::ops::ControlFlow::Break(());
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+    found
 }
 
 /// The Zobrist key of `post`, `board` being the parent position.
@@ -1599,6 +1706,57 @@ mod tests {
             } else {
                 assert_eq!(always, legal, "{name}: modes agree");
             }
+        }
+    }
+
+    /// The child-view fixtures of the explosion query: each row builds the
+    /// *child* position, so the target is the commoner of the side that is not
+    /// to move.
+    #[test]
+    fn exploding_capture_in_view_fixtures() {
+        let cases: &[(&str, &str, Option<&str>)] = &[
+            (
+                "direct commoner capture",
+                "4k3/4r3/8/8/8/8/8/4K3 b - - 0 1",
+                Some("e7e1"),
+            ),
+            (
+                "capture beside the commoner",
+                "5r2/8/8/8/3kK3/5R2/8/8 b - - 0 1",
+                Some("f8f3"),
+            ),
+            (
+                "touching commoners, only a self-exploding candidate",
+                "8/8/8/8/3kK3/3q4/8/8 b - - 0 1",
+                None,
+            ),
+            (
+                "a pawn is not a target",
+                "5r2/8/8/8/3k4/5P1K/8/8 b - - 0 1",
+                None,
+            ),
+        ];
+
+        for &(name, fen, expected) in cases {
+            let board = Board::from_fen(fen).expect("fixture FEN must parse");
+            let view = PositionView::of(&board);
+            let target = view.commoners(view.side_to_move().flip());
+            let actual = exploding_capture_in_view(&view, target);
+
+            let mut state = StateInfo::new();
+            board.populate_state(&mut state);
+            let mut legal = MoveList::new();
+            generate_legal_with_state(&board, &state, &mut legal);
+            let oracle = legal.as_slice().iter().copied().find(|&c| {
+                board.is_capture(c) && !(board.blast_casualties(c).all() & target).is_empty()
+            });
+
+            assert_eq!(actual, oracle, "{name}: first legal hit");
+            assert_eq!(
+                actual,
+                expected.map(|uci| Move::from_uci(uci).expect("UCI must parse")),
+                "{name}"
+            );
         }
     }
 }

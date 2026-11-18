@@ -265,6 +265,28 @@ fn perft_corpus_fens(path: &str) -> Vec<String> {
     fens
 }
 
+/// The exhaustive oracle the explosion query is measured against: build the
+/// child, generate its legal list, and return the first legal capture whose
+/// blast removes the commoner of the side that played `m`.
+fn explosion_oracle(board: &Board, m: Move) -> Option<Move> {
+    let mover = board.side_to_move();
+    let mut child = board.clone();
+    let mut st = StateInfo::new();
+    child.do_move(m, &mut st);
+    let target = child.commoners(mover);
+    if target.is_empty() || child.commoners(child.side_to_move()).is_empty() {
+        return None;
+    }
+    child.populate_state(&mut st);
+    let mut legal = MoveList::new();
+    generate_legal_with_state(&child, &st, &mut legal);
+    legal
+        .as_slice()
+        .iter()
+        .copied()
+        .find(|&c| child.is_capture(c) && !(child.blast_casualties(c).all() & target).is_empty())
+}
+
 /// The child rows of the handoff 3 table, in reported order.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Row {
@@ -478,6 +500,176 @@ fn per_class_table(nodes: &[NodeEntry], repeats: usize, iterations: usize, budge
         .fold((usize::MAX, 0usize), |(lo, hi), &i| (lo.min(i), hi.max(i)));
     println!(
         "  class rows: {repeats} rounds x {min_iters}..={max_iters} iterations per row, \
+         {spent:.0} ms spent (budget {budget_ms:.0} ms)\n"
+    );
+}
+
+/// The rows of the dedicated W3 explosion table.
+///
+/// A separate enum (rather than more [`Row`] variants) keeps the existing
+/// per-class row implementations byte-for-byte unchanged, so the established
+/// child-path measurements are not perturbed by code layout or by extra match
+/// arms in the same function.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExplosionRow {
+    /// The ratio divisor: the child build with nothing read.
+    Build,
+    /// The W3 query.
+    Query,
+    /// The built-child legal-list oracle.
+    Oracle,
+}
+
+impl ExplosionRow {
+    const ALL: [ExplosionRow; 3] = [
+        ExplosionRow::Build,
+        ExplosionRow::Query,
+        ExplosionRow::Oracle,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            ExplosionRow::Build => "build",
+            ExplosionRow::Query => "explode",
+            ExplosionRow::Oracle => "explode-oracle",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            ExplosionRow::Build => "clone+do_move",
+            ExplosionRow::Query => "exploding_capture_after",
+            ExplosionRow::Oracle => "clone+do_move+legal+blast filter",
+        }
+    }
+
+    fn run(self, node: &NodeEntry, m: Move) {
+        match self {
+            ExplosionRow::Build => {
+                let mut child = node.board.clone();
+                let mut st = StateInfo::new();
+                child.do_move(m, &mut st);
+                black_box(&child);
+            }
+            ExplosionRow::Query => {
+                black_box(node.ctx.exploding_capture_after(&node.board, m));
+            }
+            ExplosionRow::Oracle => {
+                black_box(explosion_oracle(&node.board, m));
+            }
+        }
+    }
+}
+
+/// Run one explosion row over `entries` in one batch.
+fn batch_explosion_row(
+    row: ExplosionRow,
+    nodes: &[NodeEntry],
+    entries: &[(usize, Move)],
+    iterations: usize,
+) -> f64 {
+    let start = Instant::now();
+    for i in 0..iterations {
+        let (ni, m) = entries[i % entries.len()];
+        row.run(&nodes[ni], m);
+    }
+    start.elapsed().as_nanos() as f64 / iterations as f64
+}
+
+/// Print the W3 explosion table: the child query, the built-child legal-list
+/// oracle, and the hit rate, per child class.
+///
+/// This is a separate table on purpose: adding these rows to the existing
+/// per-class table would interleave a much heavier row with the established
+/// rows and change their measured cache behaviour. The existing child-path
+/// rows above are therefore measured exactly as before.
+fn explosion_table(nodes: &[NodeEntry], repeats: usize, iterations: usize, budget_ms: f64) {
+    let total_children: usize = nodes.iter().map(|n| n.children.len()).sum();
+    println!(
+        "explosion query, by class ({} children over {} nodes; empty classes are skipped):",
+        total_children,
+        nodes.len()
+    );
+    let rows = ExplosionRow::ALL;
+    let per_class_budget_ns = budget_ms * 1e6 / CHILD_CLASSES.len() as f64;
+    let mut spent = 0.0f64;
+    let mut used_iterations = Vec::new();
+    for (name, class) in CHILD_CLASSES {
+        let mut entries: Vec<(usize, Move)> = Vec::new();
+        for (ni, node) in nodes.iter().enumerate() {
+            for &(m, mask) in &node.children {
+                if mask & class != 0 {
+                    entries.push((ni, m));
+                }
+            }
+        }
+        if entries.is_empty() {
+            println!("  {name}: no children");
+            continue;
+        }
+        let hits = entries
+            .iter()
+            .filter(|&&(ni, m)| {
+                nodes[ni]
+                    .ctx
+                    .exploding_capture_after(&nodes[ni].board, m)
+                    .is_some()
+            })
+            .count();
+
+        let calibration = batch_explosion_row(ExplosionRow::Build, nodes, &entries, 50).max(0.1);
+        let iters = ((per_class_budget_ns / (repeats as f64 * rows.len() as f64 * calibration))
+            as usize)
+            .clamp(100, iterations.min(200_000));
+        used_iterations.push(iters);
+        let start = Instant::now();
+        let mut samples: Vec<Vec<f64>> = vec![Vec::with_capacity(repeats); rows.len()];
+        for _ in 0..repeats {
+            for (ri, row) in rows.iter().enumerate() {
+                samples[ri].push(batch_explosion_row(*row, nodes, &entries, iters));
+            }
+        }
+        spent += start.elapsed().as_secs_f64() * 1e3;
+        let times: Vec<f64> = samples
+            .iter_mut()
+            .map(|s| {
+                s.sort_by(f64::total_cmp);
+                s[s.len() / 2]
+            })
+            .collect();
+        let build = times[0];
+        let query = times[1];
+        let oracle = times[2];
+        println!(
+            "  {name}: children {} ({} explosions, {:.1} %)",
+            entries.len(),
+            hits,
+            100.0 * hits as f64 / entries.len() as f64
+        );
+        println!(
+            "    {:<9} {:<42} {build:>7.1}",
+            ExplosionRow::Build.label(),
+            ExplosionRow::Build.description()
+        );
+        println!(
+            "    {:<9} {:<42} {query:>7.1}  ({:.2}x build, {:.2}x oracle)",
+            ExplosionRow::Query.label(),
+            ExplosionRow::Query.description(),
+            query / build,
+            query / oracle
+        );
+        println!(
+            "    {:<9} {:<42} {oracle:>7.1}  ({:.2}x build)",
+            ExplosionRow::Oracle.label(),
+            ExplosionRow::Oracle.description(),
+            oracle / build
+        );
+    }
+    let (min_iters, max_iters) = used_iterations
+        .iter()
+        .fold((usize::MAX, 0usize), |(lo, hi), &i| (lo.min(i), hi.max(i)));
+    println!(
+        "  explosion rows: {repeats} rounds x {min_iters}..={max_iters} iterations per row, \
          {spent:.0} ms spent (budget {budget_ms:.0} ms)\n"
     );
 }
@@ -1183,5 +1375,6 @@ fn main() {
     class_fens.extend(POSITIONS.iter().map(|(_, fen)| (*fen).to_string()));
     let nodes = collect_nodes(&class_fens, 2, 24);
     per_class_table(&nodes, repeats, iterations, budget_ms);
+    explosion_table(&nodes, repeats, iterations, budget_ms);
     double_push_table(&nodes, repeats, iterations);
 }

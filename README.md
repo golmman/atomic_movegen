@@ -91,6 +91,12 @@ reference implementation.
   — no board clone and no `StateInfo` population for a double push. It is the
   same canonicalization as `Board::hash_with(Legal)` on the same key table:
   `ZOBRIST_VERSION` is unchanged
+- One-ply child threat: `EffectContext::exploding_capture_after(board, m)`
+  returns the first legal capture by the child's side to move whose blast
+  removes the commoner of the side that played `m`, or `None`. It reads the
+  already-derived child view (no clone, no board write, no `StateInfo`), so the
+  "can the other side explode the mover at once?" question is answered by the
+  crate's single rules implementation
 - Classification without the legality ladder: `EffectContext::classification()`
   returns a `MoveClassification` (`MoveEffect` minus `is_legal`) for a move the
   caller already knows is legal, without re-running `is_attacked_by` for the

@@ -57,6 +57,10 @@ fn crate_root_reexports_resolve() {
         Some(board.hash_after_with(m, EnPassantMode::Legal))
     );
 
+    // The one-ply child explosion query.
+    let explosion: Option<Move> = ctx.exploding_capture_after(&board, m);
+    assert_eq!(explosion, None);
+
     // The conformance corpora.
     assert!(!CONFORMANCE_CASES.is_empty());
     assert_eq!(CONFORMANCE_CASES.len(), conformance::CASES.len());
