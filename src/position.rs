@@ -538,10 +538,7 @@ pub(crate) fn child_view(view: &PositionView, m: Move, rule50: u16) -> Option<Ch
         );
 
         if moving_type == PieceType::Pawn && (to as i8 - from as i8).abs() == 16 {
-            child.ep_square = Some(match us {
-                Color::White => Square::from_index(from as i8 + 8),
-                Color::Black => Square::from_index(from as i8 - 8),
-            });
+            child.ep_square = Some(double_push_ep(us, from));
         }
     }
 
@@ -669,8 +666,9 @@ impl LegalNode {
     ///
     /// This is the single rules body behind [`Board::legal`](crate::Board::legal)
     /// and [`LegalityContext::legal`](crate::LegalityContext::legal). It does
-    /// not apply the game-over guard; the two callers do that from their own
-    /// commoner counts.
+    /// not apply the callers' game-over guard from the two commoner counts;
+    /// a side with no commoner still answers `false` on its own. `m` must be
+    /// pseudo-legal; a move whose origin is empty returns `false`.
     #[inline]
     pub(crate) fn legal(&self, m: Move) -> bool {
         legal_in(self, m)
@@ -711,10 +709,11 @@ impl LegalData for LegalNode {
 
 /// The single legality body over placement data.
 ///
-/// It does not apply the game-over guard; [`legal_in_view`] reads the counts
-/// from a [`StateInfo`], and [`LegalityContext::legal`](crate::LegalityContext::legal)
-/// reads its stored snapshot. `m` must be pseudo-legal; a move whose origin is
-/// empty returns `false`.
+/// It does not apply the callers' game-over guard from the two commoner
+/// counts; [`legal_in_view`] reads the counts from a [`StateInfo`], and
+/// [`LegalityContext::legal`](crate::LegalityContext::legal) reads its stored
+/// snapshot. `m` must be pseudo-legal; a move whose origin is empty returns
+/// `false`, and so does a move by a side that has no commoner.
 #[inline]
 fn legal_in<D: LegalData + ?Sized>(data: &D, m: Move) -> bool {
     let from = m.from_sq();
@@ -787,6 +786,13 @@ fn legal_in<D: LegalData + ?Sized>(data: &D, m: Move) -> bool {
         return false;
     }
 
+    // A side without a commoner has no legal moves. This also keeps the body
+    // total for an inconsistent cached state: `lsb()` of an empty set is
+    // `Square::NONE`, which is not a valid attack-table index.
+    if our_commoners.is_empty() {
+        return false;
+    }
+
     // Capturing the enemy's only commoner wins immediately; the mover's
     // own commoner cannot be in check after the game has ended.
     let enemy_commoners = data.their_commoners() & occupied;
@@ -812,10 +818,39 @@ fn legal_in<D: LegalData + ?Sized>(data: &D, m: Move) -> bool {
 /// its own snapshot of the same counts.
 ///
 /// `m` must be pseudo-legal (the generator's precondition); a move whose origin
-/// is empty returns `false`.
+/// is empty returns `false`, as does a move by a side that has no commoner.
 #[inline]
 pub(crate) fn legal_with_counts(view: &PositionView, m: Move) -> bool {
     legal_in(view, m)
+}
+
+/// The en-passant target a two-rank pawn move from `from` records.
+///
+/// The target is the square the pawn crossed. This is the single source for
+/// the placement-dependent half of [`Board::do_move`], the view-side child
+/// derivation, and [`Board::child_effect`]. It does **not** validate the start
+/// rank; callers first test the move's two-rank shape and pawn type.
+#[inline]
+pub(crate) fn double_push_ep(us: Color, from: Square) -> Square {
+    match us {
+        Color::White => Square::from_index(from as i8 + 8),
+        Color::Black => Square::from_index(from as i8 - 8),
+    }
+}
+
+/// Whether `ep` is a structurally valid en-passant target for `us` to move.
+///
+/// A stored target is the empty square a pawn just crossed: rank 6 when White
+/// is to move, rank 3 when Black is to move. [`Square::NONE`] and a target on
+/// any other rank are not attack-table inputs; callers must reject them before
+/// calling [`attacks::pawn_attacks`].
+#[inline]
+pub(crate) fn is_valid_ep_target(us: Color, ep: Square) -> bool {
+    let expected = match us {
+        Color::White => Rank::R6,
+        Color::Black => Rank::R3,
+    };
+    ep != Square::NONE && rank_of(ep) == expected
 }
 
 /// The stored en-passant target, but only when the side to move has at least
@@ -828,6 +863,9 @@ pub(crate) fn legal_ep_square_in_view(view: &PositionView) -> Option<Square> {
     let ep = view.ep_square()?;
     let us = view.side_to_move();
     let them = us.flip();
+    if !is_valid_ep_target(us, ep) {
+        return None;
+    }
     if view.commoners(us).is_empty() || view.commoners(them).is_empty() {
         return None;
     }

@@ -57,6 +57,25 @@ makes no claim about a downstream search tree or another machine's wall clock.
   unchanged. No key composition, `ZOBRIST_VERSION`, perft, move-order, FEN or
   terminality answer changes.
 
+### Fixed
+
+- `Board::child_effect()` / `child_effect_with_occupancy()` no longer feed an
+  impossible double-push ep target to the attack tables. A pawn two ranks from
+  its own back rank is not reachable in play, but the encoding is well-formed;
+  the `EnPassantMode::Legal` branch used to panic on the derived
+  `Square::NONE` target. The legal-EP helper now validates the stored target
+  (side-to-move rank, non-`NONE`) before any attack lookup, and the shared
+  child derivation matches a cloned `do_move` child field for field for that
+  input. `Board::legal_ep_square()` applies the same structural check.
+- The shared legality body now returns `false` for a side with no commoner
+  instead of indexing the attack table with `Square::NONE`. This only affects
+  callers handing in an inconsistent hand-written `StateInfo` (the documented
+  contract still requires current counts); a correctly populated terminal state
+  already rejected every move. `Board::legal`, `is_legal_with_state` and
+  `LegalityContext::legal` are now total for arbitrary 16-bit move encodings
+  and stale counts; an exhaustive new test in `tests/robustness.rs` covers the
+  wishlist-2 predicates.
+
 ## [2.9.0] - 2026-11-18
 
 ### Added

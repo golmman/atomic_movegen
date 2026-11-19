@@ -1175,10 +1175,7 @@ impl Board {
 
         let child_ep =
             if !castling && moving_type == PieceType::Pawn && (to as i8 - from as i8).abs() == 16 {
-                Some(match us {
-                    Color::White => Square::from_index(from as i8 + 8),
-                    Color::Black => Square::from_index(from as i8 - 8),
-                })
+                Some(position::double_push_ep(us, from))
             } else {
                 None
             };

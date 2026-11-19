@@ -21,6 +21,53 @@ fn robustness_boards() -> Vec<Board> {
         .collect()
 }
 
+/// Boards spanning the wishlist-2 edge shapes: both colors, castling, a live
+/// en-passant target, terminal boards, and deliberately impossible placements
+/// (pawns on the back ranks) that the permissive parser still accepts.
+fn wishlist2_robustness_boards() -> Vec<Board> {
+    [
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        "8/8/8/8/k2Pp2Q/8/8/3K4 b - d3 0 1",
+        "4k3/8/8/8/8/8/8/4K3 w - - 0 1",
+        "8/8/8/8/8/8/8/8 w - - 0 1",
+        "p3k3/8/8/8/8/8/8/p6K b - - 0 1",
+        "P3K3/8/8/8/8/8/8/P6k w - - 0 1",
+        "4k3/8/8/8/8/8/8/R7 w - - 0 1",
+    ]
+    .into_iter()
+    .map(|fen| Board::from_fen(fen).expect("robustness FEN must parse"))
+    .collect()
+}
+
+#[test]
+fn wishlist2_predicates_are_total_for_arbitrary_move_bits() {
+    for board in wishlist2_robustness_boards() {
+        let counts = board.counts();
+        let ctx = board.legality_context(counts);
+        std::hint::black_box(ctx.occupied());
+        for bits in 0..=u16::MAX {
+            let Some(m) = Move::from_bits(bits) else {
+                continue;
+            };
+            for mode in [EnPassantMode::Always, EnPassantMode::Legal] {
+                std::hint::black_box(board.child_effect(m, counts, mode));
+            }
+            std::hint::black_box(board.child_effect_with_occupancy(
+                m,
+                board.occupied(),
+                counts,
+                EnPassantMode::Legal,
+            ));
+            std::hint::black_box(ctx.legal(m));
+        }
+        for attacker in [Color::White, Color::Black] {
+            std::hint::black_box(board.null_for(attacker));
+            std::hint::black_box(board.null_for_advanced(attacker));
+        }
+    }
+}
+
 #[test]
 fn arbitrary_move_bits_never_panic_in_total_predicates() {
     for board in robustness_boards() {

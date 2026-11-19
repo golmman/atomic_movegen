@@ -426,6 +426,34 @@ fn child_effect_rejects_malformed_and_describes_illegal() {
 }
 
 #[test]
+fn child_effect_survives_an_impossible_double_push() {
+    // A pawn two ranks from its own back rank is not reachable in play, but the
+    // encoding is well-formed (the origin holds a piece of the side to move),
+    // so `child_effect` must describe the child `do_move` builds rather than
+    // feed `Square::NONE` to the attack tables of the legal-EP helper.
+    let board = Board::from_fen("p3k3/8/8/8/8/8/8/p6K b - - 0 1").expect("fixture parses");
+    let counts = board.counts();
+    assert_eq!((counts.commoners(), counts.them_commoners()), (1, 1));
+    let m = Move::make_move(Square::A1, Square::A3);
+
+    let mut child = board.clone();
+    let mut state = StateInfo::new();
+    child.do_move(m, &mut state);
+    assert_eq!(child.ep_square(), Some(Square::NONE));
+    assert_eq!(child.legal_ep_square(), None);
+
+    for mode in MODES {
+        let effect = board
+            .child_effect(m, counts, mode)
+            .expect("well-formed move has a child effect");
+        assert_eq!(effect.occupied, child.occupied(), "{mode:?}: occupied");
+        assert_eq!(effect.key, child.hash_with(mode), "{mode:?}: key");
+        assert_eq!(effect.rule50, child.rule50(), "{mode:?}: clock");
+        assert!(!effect.capture, "{mode:?}: capture");
+    }
+}
+
+#[test]
 fn child_effect_capture_flag_matches_move_type_and_victim() {
     let board = Board::from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1").expect("fixture parses");
     let counts = board.counts();

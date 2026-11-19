@@ -1543,13 +1543,16 @@ impl Board {
     #[must_use]
     pub fn legal_ep_square(&self) -> Option<Square> {
         let ep = self.position.ep_square?;
+        let us = self.position.side_to_move;
+        if !crate::position::is_valid_ep_target(us, ep) {
+            return None;
+        }
         let mut state = StateInfo::new();
         self.populate_state(&mut state);
         if state.commoners_count == 0 || state.them_commoners_count == 0 {
             return None;
         }
 
-        let us = self.position.side_to_move;
         let them = us.flip();
         // Attack tables are symmetric, so this is the set of squares from which
         // one of our pawns attacks the ep target.
@@ -2697,10 +2700,7 @@ impl Board {
         );
 
         if pt == PieceType::Pawn && (to as i8 - from as i8).abs() == 16 {
-            self.position.ep_square = Some(match us {
-                Color::White => Square::from_index(from as i8 + 8),
-                Color::Black => Square::from_index(from as i8 - 8),
-            });
+            self.position.ep_square = Some(crate::position::double_push_ep(us, from));
         } else {
             self.position.ep_square = None;
         }
@@ -7812,6 +7812,34 @@ mod tests {
             crate::movegen::has_legal_move_with_state(&board, &counts),
             "the checkmate fixture should expose the missing checkers"
         );
+    }
+
+    #[test]
+    fn inconsistent_counts_do_not_panic_and_reject_commoner_less_side() {
+        // A board whose side to move has no commoner cannot have a legal move,
+        // even if a hand-written `StateInfo` claims a nonzero count. The
+        // shared legality body must stay total for that stale-cache case
+        // instead of indexing the attack table with `Square::NONE`.
+        let board = Board::from_fen("4k3/8/8/8/8/8/8/R7 w - - 0 1").expect("FEN");
+        let mut real = StateInfo::new();
+        board.populate_state(&mut real);
+        assert_eq!(real.commoners_count, 0);
+        assert_eq!(real.them_commoners_count, 1);
+
+        let mut stale = StateInfo::new();
+        stale.commoners_count = 1;
+        stale.them_commoners_count = 1;
+
+        let mut pseudo = MoveList::new();
+        crate::movegen::generate_pseudo_legal(&board, &mut pseudo);
+        assert!(!pseudo.is_empty());
+        let ctx = board.legality_context(Counts::new(1, 1));
+        for &m in pseudo.as_slice() {
+            assert!(!board.legal(m, &real), "{m}: real counts");
+            assert!(!board.legal(m, &stale), "{m}: stale counts");
+            assert!(!board.is_legal_with_state(m, &stale), "{m}: stale counts");
+            assert!(!ctx.legal(m), "{m}: stale context");
+        }
     }
 
     #[test]
