@@ -54,3 +54,8 @@ Please draft one or multiple implementation plans to address the feedback.
 Last session we drafted the plans for `docs/plans/feedback/plan_handoff3_index.md`.
 Can we take inspiration from `https://github.com/niklasf/shakmaty` to increase performance?
 
+---
+
+A downstream user of the library provided a wishlist for changes: `docs/plans/feedback/wishlist2.md`.
+Please draft one or multiple implementation plans to address the feedback.
+
