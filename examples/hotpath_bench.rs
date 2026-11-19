@@ -19,8 +19,11 @@
 //!   `tests/common/mod.rs` (16 seeds, 300 plies from the six play-out starts,
 //!   plus a shorter walk from each corpus position).
 
-use atomic_movegen::movegen::generate_legal_with_state;
-use atomic_movegen::{Board, CONFORMANCE_CASES, MoveList, StateInfo};
+use atomic_movegen::movegen::{generate_legal_with_state, generate_pseudo_legal};
+use atomic_movegen::types::MoveType;
+use atomic_movegen::{
+    Board, CONFORMANCE_CASES, Counts, LegalityContext, Move, MoveList, PieceType, StateInfo,
+};
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -214,6 +217,215 @@ fn print_table(name: &str, boards: usize, rows: &Rows) {
     );
 }
 
+// --- candidate legality rows (plan 2, W7) -----------------------------------
+
+/// A quiet move: no capture, no castling or en passant, not a promotion, and
+/// the origin is not a commoner.
+const CLASS_QUIET: u8 = 1 << 0;
+/// A capture, including en passant.
+const CLASS_CAPTURE: u8 = 1 << 1;
+/// An en-passant capture.
+const CLASS_EN_PASSANT: u8 = 1 << 2;
+/// A castling move.
+const CLASS_CASTLING: u8 = 1 << 3;
+/// The origin square holds a commoner of the side to move.
+const CLASS_COMMONER: u8 = 1 << 4;
+/// Every candidate.
+const CLASS_ALL: u8 = u8::MAX;
+
+/// One node with its populated state, legality context, and all pseudo-legal
+/// candidates classified once. Nothing in a timed candidate row constructs a
+/// context or classifies a move.
+struct CandidateEntry {
+    board: Board,
+    state: StateInfo,
+    counts: Counts,
+    ctx: LegalityContext,
+    moves: Vec<(u8, Move)>,
+}
+
+fn class_mask(board: &Board, m: Move) -> u8 {
+    let mut mask = 0u8;
+    match m.move_type() {
+        MoveType::EnPassant => mask |= CLASS_CAPTURE | CLASS_EN_PASSANT,
+        MoveType::Castling => mask |= CLASS_CASTLING,
+        MoveType::Promotion => {}
+        MoveType::Normal if board.is_capture(m) => mask |= CLASS_CAPTURE,
+        _ => {}
+    }
+    let piece = board.piece_on(m.from_sq());
+    if piece.type_of() == Some(PieceType::Commoner) && piece.color() == Some(board.side_to_move()) {
+        mask |= CLASS_COMMONER;
+    }
+    if mask == 0 { CLASS_QUIET } else { mask }
+}
+
+fn candidate_entries(boards: &[Board]) -> Vec<CandidateEntry> {
+    let mut entries = Vec::new();
+    let mut state = StateInfo::new();
+    let mut pseudo = MoveList::new();
+    for board in boards {
+        board.populate_state(&mut state);
+        let counts = board.counts();
+        let ctx = board.legality_context(counts);
+        pseudo.clear();
+        generate_pseudo_legal(board, &mut pseudo);
+        if pseudo.is_empty() {
+            continue;
+        }
+        let moves = pseudo
+            .as_slice()
+            .iter()
+            .map(|&m| (class_mask(board, m), m))
+            .collect();
+        entries.push(CandidateEntry {
+            board: board.clone(),
+            state,
+            counts,
+            ctx,
+            moves,
+        });
+    }
+    entries
+}
+
+struct CandidateRows {
+    context: f64,
+    classes: [usize; 6],
+    board_legal: [f64; 6],
+    context_legal: [f64; 6],
+}
+
+const CANDIDATE_CLASSES: [(&str, u8); 6] = [
+    ("quiet", CLASS_QUIET),
+    ("capture", CLASS_CAPTURE),
+    ("en-passant", CLASS_EN_PASSANT),
+    ("castling", CLASS_CASTLING),
+    ("commoner-move", CLASS_COMMONER),
+    ("all", CLASS_ALL),
+];
+
+fn class_calls(entries: &[CandidateEntry], mask: u8) -> Vec<(usize, Move)> {
+    entries
+        .iter()
+        .enumerate()
+        .flat_map(|(index, entry)| {
+            entry
+                .moves
+                .iter()
+                .filter(|(class, _)| *class & mask != 0)
+                .map(move |&(_, m)| (index, m))
+        })
+        .collect()
+}
+
+/// Raise the pass count for a rare class so its row measures at least roughly
+/// 100k calls instead of a handful. The all-candidate row keeps the caller's
+/// passes.
+fn class_passes(calls: usize, repeats: usize, passes: usize) -> usize {
+    let target = 100_000 / repeats.max(1) / calls.max(1);
+    passes.max(target.max(1))
+}
+
+fn bench_class(
+    entries: &[CandidateEntry],
+    calls: &[(usize, Move)],
+    repeats: usize,
+    passes: usize,
+    context: bool,
+) -> f64 {
+    let passes = class_passes(calls.len(), repeats, passes);
+    bench(
+        || {
+            for &(index, m) in calls {
+                let entry = &entries[index];
+                let verdict = if context {
+                    entry.ctx.legal(black_box(m))
+                } else {
+                    entry.board.legal(black_box(m), &entry.state)
+                };
+                black_box(verdict);
+            }
+        },
+        calls.len(),
+        repeats,
+        passes,
+    )
+}
+
+fn measure_candidates(entries: &[CandidateEntry], repeats: usize, passes: usize) -> CandidateRows {
+    for entry in entries {
+        assert_eq!(entry.ctx.occupied(), entry.board.occupied());
+        assert_eq!(entry.ctx.legal(entry.moves[0].1), {
+            let m = entry.moves[0].1;
+            entry.board.legal(m, &entry.state)
+        });
+    }
+
+    let context = bench(
+        || {
+            for entry in entries {
+                black_box(entry.board.legality_context(black_box(entry.counts)));
+            }
+        },
+        entries.len(),
+        repeats,
+        passes,
+    );
+
+    let mut classes = [0usize; 6];
+    let mut board_legal = [0.0; 6];
+    let mut context_legal = [0.0; 6];
+    for (index, (_, mask)) in CANDIDATE_CLASSES.iter().enumerate() {
+        let calls = class_calls(entries, *mask);
+        classes[index] = calls.len();
+        if calls.is_empty() {
+            continue;
+        }
+        board_legal[index] = bench_class(entries, &calls, repeats, passes, false);
+        context_legal[index] = bench_class(entries, &calls, repeats, passes, true);
+    }
+
+    CandidateRows {
+        context,
+        classes,
+        board_legal,
+        context_legal,
+    }
+}
+
+fn print_candidates(name: &str, entries: &[CandidateEntry], rows: &CandidateRows) {
+    let candidates: usize = entries.iter().map(|entry| entry.moves.len()).sum();
+    println!();
+    println!(
+        "{name} candidates: {} nodes, {candidates} pseudo-legal candidates",
+        entries.len()
+    );
+    println!(
+        "  {:<20} {:>10.2} ns/node",
+        "legality_context", rows.context
+    );
+    println!(
+        "  {:<20} {:>10} {:>12} {:>12} {:>9}",
+        "class", "calls", "Board::legal", "ctx.legal", "ratio"
+    );
+    for (index, (label, _)) in CANDIDATE_CLASSES.iter().enumerate() {
+        let calls = rows.classes[index];
+        if calls == 0 {
+            println!("  {label:<20} {calls:>10}");
+            continue;
+        }
+        println!(
+            "  {:<20} {:>10} {:>10.2} ns {:>10.2} ns {:>8.3}x",
+            label,
+            calls,
+            rows.board_legal[index],
+            rows.context_legal[index],
+            rows.context_legal[index] / rows.board_legal[index]
+        );
+    }
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let repeats: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(9).max(3);
@@ -228,4 +440,12 @@ fn main() {
     let playouts = playout_boards();
     let playout_rows = measure(&playouts, repeats, passes);
     print_table("playouts", playouts.len(), &playout_rows);
+
+    let corpus_candidates = candidate_entries(&corpus);
+    let corpus_candidate_rows = measure_candidates(&corpus_candidates, repeats, passes);
+    print_candidates("corpus", &corpus_candidates, &corpus_candidate_rows);
+
+    let playout_candidates = candidate_entries(&playouts);
+    let playout_candidate_rows = measure_candidates(&playout_candidates, repeats, passes);
+    print_candidates("playouts", &playout_candidates, &playout_candidate_rows);
 }

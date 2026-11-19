@@ -3,7 +3,7 @@
 
 use crate::attacks;
 use crate::bitboard::*;
-use crate::position::PositionView;
+use crate::position::{LegalNode, PositionView};
 use crate::types::*;
 use std::cell::{Cell, OnceCell};
 use std::error::Error;
@@ -839,6 +839,50 @@ impl Counts {
 impl From<&StateInfo> for Counts {
     fn from(state: &StateInfo) -> Self {
         Self::new(state.commoners_count, state.them_commoners_count)
+    }
+}
+
+/// Node-local cached data for a candidate legality loop.
+///
+/// Build once per position with [`Board::legality_context`], then ask
+/// [`legal`](Self::legal) for every pseudo-legal candidate. The context is a
+/// snapshot: it stays valid while the board does not change and holds no
+/// reference to it. A stale context answers for the old placement, exactly as a
+/// stale [`StateInfo`] does.
+///
+/// This is not a position representation and does not generate moves. It needs
+/// only the placement and the two [`Counts`]; it reads no `checkers`/`pinned`
+/// fields and populates no [`StateInfo`]. The occupancy computed for the node
+/// is exposed by [`occupied`](Self::occupied) so a child/effect query can reuse
+/// it.
+#[derive(Debug, Clone, Copy)]
+pub struct LegalityContext {
+    /// The node-constant placement the rule body reads.
+    node: LegalNode,
+    /// Both sides still have a commoner; `false` is the game-over guard.
+    playable: bool,
+}
+
+impl LegalityContext {
+    /// The node's occupied squares.
+    #[inline]
+    #[must_use]
+    pub fn occupied(&self) -> Bitboard {
+        self.node.occupied()
+    }
+
+    /// Whether the pseudo-legal move `m` is legal in this node.
+    ///
+    /// Exactly [`Board::legal`] for the board and populated state this context
+    /// was built from. A terminal board (either count zero) rejects every
+    /// candidate, the same as [`Board::legal`].
+    ///
+    /// `m` must be pseudo-legal; malformed input is outside the contract, like
+    /// [`Board::legal`].
+    #[inline]
+    #[must_use]
+    pub fn legal(&self, m: Move) -> bool {
+        self.playable && self.node.legal(m)
     }
 }
 
@@ -2434,6 +2478,22 @@ impl Board {
     #[must_use]
     pub fn counts(&self) -> Counts {
         self.position_view().counts()
+    }
+
+    /// Build a node-local [`LegalityContext`] for a candidate loop.
+    ///
+    /// `counts` must be current for this board; use [`counts`](Self::counts) or
+    /// [`Counts::from`] over a populated [`StateInfo`]. The context reads no
+    /// `checkers`/`pinned` fields and populates no state. Its
+    /// [`legal`](LegalityContext::legal) agrees with [`legal`](Self::legal) for
+    /// every pseudo-legal move, and its `occupied()` is this board's
+    /// occupancy.
+    #[must_use]
+    pub fn legality_context(&self, counts: Counts) -> LegalityContext {
+        LegalityContext {
+            node: LegalNode::from_view(self.position_view()),
+            playable: counts.commoners() != 0 && counts.them_commoners() != 0,
+        }
     }
 
     /// Fill only `commoners_count` and `them_commoners_count` in `state`.
@@ -7573,6 +7633,27 @@ mod tests {
             }
         }
         assert!(visited > 300, "expected a real walk, got {visited}");
+    }
+
+    #[test]
+    fn legality_context_matches_legal_on_corpus() {
+        let corpus = perft_corpus_fens();
+        let mut checked = 0usize;
+        for fen in &corpus {
+            let board = Board::from_fen(fen).expect("corpus FEN must parse");
+            let mut state = StateInfo::new();
+            board.populate_state(&mut state);
+            let counts = board.counts();
+            let ctx = board.legality_context(counts);
+            assert_eq!(ctx.occupied(), board.occupied(), "{fen}");
+            let mut pseudo = MoveList::new();
+            crate::movegen::generate_pseudo_legal(&board, &mut pseudo);
+            for &m in pseudo.as_slice() {
+                assert_eq!(ctx.legal(m), board.legal(m, &state), "{fen} {m}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 500, "expected real candidates, got {checked}");
     }
 
     #[test]

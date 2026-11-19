@@ -59,3 +59,6 @@ Can we take inspiration from `https://github.com/niklasf/shakmaty` to increase p
 A downstream user of the library provided a wishlist for changes: `docs/plans/feedback/wishlist2.md`.
 Please draft one or multiple implementation plans to address the feedback.
 
+---
+
+Read the last report of `docs/plans/feedback/plan_wishlist2_index.md`. Then validate the next plan and execute it.

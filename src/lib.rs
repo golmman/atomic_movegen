@@ -71,7 +71,13 @@
 //! [`Board::legal`] and [`Board::is_legal_with_state`] actually read, written
 //! by [`Board::populate_counts`] and read by [`Board::counts`]. A full
 //! [`StateInfo`] (from [`Board::populate_state`]) is still required by the
-//! state-aware move-generation entry points. [`movegen::for_each_pseudo_legal`] and
+//! state-aware move-generation entry points. For a candidate loop,
+//! [`Board::legality_context`] builds a [`LegalityContext`] once per node from
+//! the board and its [`Counts`]; [`LegalityContext::legal`] then answers every
+//! pseudo-legal candidate through the same rules body as [`Board::legal`] and
+//! exposes the node's occupancy for child/effect reuse. It reads no
+//! `checkers`/`pinned` fields and populates no [`StateInfo`].
+//! [`movegen::for_each_pseudo_legal`] and
 //! [`movegen::for_each_legal`] walk the candidate and legal streams without
 //! allocating and support early exit, while [`Board::null_for`] builds a
 //! null-move position without a FEN round-trip. [`attacks::between`] and the
@@ -297,7 +303,8 @@ pub(crate) mod util;
 pub(crate) mod zobrist;
 
 pub use board::{
-    BlastCasualties, Board, Counts, FenLoadError, FenPolicy, StateInfo, ValidationErrors,
+    BlastCasualties, Board, Counts, FenLoadError, FenPolicy, LegalityContext, StateInfo,
+    ValidationErrors,
 };
 pub use conformance::{CASES as CONFORMANCE_CASES, ConformanceCase};
 pub use effects::{AfterState, EffectContext, MoveClassification, MoveEffect, PostMove};
@@ -353,6 +360,7 @@ mod tests {
         assert_send_sync::<Board>();
         assert_send_sync::<StateInfo>();
         assert_send_sync::<Counts>();
+        assert_send_sync::<LegalityContext>();
         assert_send_sync::<Move>();
         assert_send_sync::<MoveList>();
         assert_send_sync::<Bitboard>();

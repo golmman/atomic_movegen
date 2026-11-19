@@ -12,9 +12,9 @@ use atomic_movegen::board::FenError;
 use atomic_movegen::movegen::{generate_legal_with_state, generate_pseudo_legal};
 use atomic_movegen::{
     AfterState, Bitboard, BlastCasualties, Board, Board as BoardRoot, CONFORMANCE_CASES, Color,
-    Counts, EffectContext, EnPassantMode, FenLoadError, FenPolicy, Move, MoveClassification,
-    MoveEffect, MoveList, Outcome, PostMove, Square, StateInfo, Terminal, TerminalReason,
-    conformance,
+    Counts, EffectContext, EnPassantMode, FenLoadError, FenPolicy, LegalityContext, Move,
+    MoveClassification, MoveEffect, MoveList, Outcome, PostMove, Square, StateInfo, Terminal,
+    TerminalReason, conformance,
 };
 
 #[test]
@@ -97,6 +97,29 @@ fn counts_only_state_resolves_and_answers() {
         board.is_legal_with_state(e2e4, &cheap),
         board.is_legal_with_state(e2e4, &full)
     );
+}
+
+#[test]
+fn legality_context_resolves_and_answers() {
+    let board = Board::new();
+    let counts: Counts = board.counts();
+    let ctx: LegalityContext = board.legality_context(counts);
+    assert_eq!(ctx.occupied(), board.occupied());
+
+    let mut state = StateInfo::new();
+    board.populate_state(&mut state);
+    let mut pseudo = MoveList::new();
+    generate_pseudo_legal(&board, &mut pseudo);
+    assert!(!pseudo.is_empty());
+    for &m in pseudo.as_slice() {
+        assert_eq!(ctx.legal(m), board.legal(m, &state), "{m}");
+    }
+
+    // A zero count is the documented game-over guard.
+    let terminal = board.legality_context(Counts::new(0, counts.them_commoners()));
+    for &m in pseudo.as_slice() {
+        assert!(!terminal.legal(m), "{m}");
+    }
 }
 
 #[test]
@@ -196,6 +219,7 @@ fn public_types_are_send_and_sync() {
     assert_send_sync::<MoveEffect>();
     assert_send_sync::<PostMove>();
     assert_send_sync::<Counts>();
+    assert_send_sync::<LegalityContext>();
     assert_send_sync::<AfterState>();
     assert_send_sync::<EffectContext>();
     assert_send_sync::<Terminal>();

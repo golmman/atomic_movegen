@@ -552,59 +552,212 @@ pub(crate) fn child_view(view: &PositionView, m: Move, rule50: u16) -> Option<Ch
     })
 }
 
-/// Return `true` when `m` is legal in `view`, ignoring the "game is already
-/// over" guard.
+/// The placement facts the legality body reads.
 ///
-/// This is the body of [`Board::legal`] with the two commoner-count fields of
-/// [`StateInfo`] replaced by an explicit caller check:
-/// [`legal_in_view`] applies the guard from `state`, the effect path applies
-/// its own snapshot of the same counts.
+/// Implemented by [`PositionView`] for the board and effect paths, and by
+/// [`LegalNode`] for a node-local candidate loop. The body is generic over this
+/// source, so the board path keeps reading the borrowed view (no per-call node
+/// construction) while [`LegalityContext`](crate::LegalityContext) reads its
+/// cached snapshot. There is one rules implementation.
+pub(crate) trait LegalData {
+    /// The per-type piece sets.
+    fn by_type(&self) -> &[Bitboard; PieceType::NB];
+
+    /// The side to move.
+    fn side_to_move(&self) -> Color;
+
+    /// The occupied squares.
+    fn occupied(&self) -> Bitboard;
+
+    /// The pieces of the opponent.
+    fn their_pieces(&self) -> Bitboard;
+
+    /// The commoners of the side to move.
+    fn our_commoners(&self) -> Bitboard;
+
+    /// The commoners of the opponent.
+    fn their_commoners(&self) -> Bitboard;
+
+    /// Return `true` if an enemy non-commoner piece attacks `sq` on
+    /// `occupied`.
+    ///
+    /// Commoner attacks are intentionally excluded; callers handle adjacent
+    /// enemy commoners separately.
+    #[inline(always)]
+    fn attacked_by(&self, sq: Square, occupied: Bitboard, enemy_bb: Bitboard) -> bool {
+        is_attacked_by(sq, occupied, self.by_type(), enemy_bb, self.side_to_move())
+    }
+}
+
+impl LegalData for PositionView {
+    #[inline(always)]
+    fn by_type(&self) -> &[Bitboard; PieceType::NB] {
+        PositionView::by_type(self)
+    }
+
+    #[inline(always)]
+    fn side_to_move(&self) -> Color {
+        self.side_to_move
+    }
+
+    #[inline(always)]
+    fn occupied(&self) -> Bitboard {
+        PositionView::occupied(self)
+    }
+
+    #[inline(always)]
+    fn their_pieces(&self) -> Bitboard {
+        self.pieces_color(self.side_to_move.flip())
+    }
+
+    #[inline(always)]
+    fn our_commoners(&self) -> Bitboard {
+        self.commoners(self.side_to_move)
+    }
+
+    #[inline(always)]
+    fn their_commoners(&self) -> Bitboard {
+        self.commoners(self.side_to_move.flip())
+    }
+}
+
+/// Node-constant placement for a candidate legality loop.
 ///
-/// `m` must be pseudo-legal (the generator's precondition); a move whose origin
-/// is empty returns `false`.
-pub(crate) fn legal_with_counts(view: &PositionView, m: Move) -> bool {
+/// The board path reads a [`PositionView`] directly through [`LegalData`]; this
+/// snapshot exists so [`LegalityContext`](crate::LegalityContext) can answer a
+/// whole candidate list without re-deriving occupancy and the commoner sets for
+/// every move. Both feed the same [`legal_in`] body.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LegalNode {
+    /// Per-type piece sets.
+    by_type: [Bitboard; PieceType::NB],
+    /// The side to move.
+    side_to_move: Color,
+    /// The node's occupied squares.
+    occupied: Bitboard,
+    /// The pieces of the opponent.
+    their_pieces: Bitboard,
+    /// The commoners of the side to move.
+    our_commoners: Bitboard,
+    /// The commoners of the opponent.
+    their_commoners: Bitboard,
+}
+
+impl LegalNode {
+    /// Snapshot the node-constant data of `view`.
+    #[inline]
+    pub(crate) fn from_view(view: &PositionView) -> Self {
+        let us = view.side_to_move;
+        Self {
+            by_type: view.by_type,
+            side_to_move: us,
+            occupied: view.occupied(),
+            their_pieces: view.pieces_color(us.flip()),
+            our_commoners: view.commoners(us),
+            their_commoners: view.commoners(us.flip()),
+        }
+    }
+
+    /// The node's occupied squares.
+    #[inline]
+    #[must_use]
+    pub(crate) fn occupied(&self) -> Bitboard {
+        self.occupied
+    }
+
+    /// Return `true` when the pseudo-legal move `m` is legal in this node.
+    ///
+    /// This is the single rules body behind [`Board::legal`](crate::Board::legal)
+    /// and [`LegalityContext::legal`](crate::LegalityContext::legal). It does
+    /// not apply the game-over guard; the two callers do that from their own
+    /// commoner counts.
+    #[inline]
+    pub(crate) fn legal(&self, m: Move) -> bool {
+        legal_in(self, m)
+    }
+}
+
+impl LegalData for LegalNode {
+    #[inline(always)]
+    fn by_type(&self) -> &[Bitboard; PieceType::NB] {
+        &self.by_type
+    }
+
+    #[inline(always)]
+    fn side_to_move(&self) -> Color {
+        self.side_to_move
+    }
+
+    #[inline(always)]
+    fn occupied(&self) -> Bitboard {
+        self.occupied
+    }
+
+    #[inline(always)]
+    fn their_pieces(&self) -> Bitboard {
+        self.their_pieces
+    }
+
+    #[inline(always)]
+    fn our_commoners(&self) -> Bitboard {
+        self.our_commoners
+    }
+
+    #[inline(always)]
+    fn their_commoners(&self) -> Bitboard {
+        self.their_commoners
+    }
+}
+
+/// The single legality body over placement data.
+///
+/// It does not apply the game-over guard; [`legal_in_view`] reads the counts
+/// from a [`StateInfo`], and [`LegalityContext::legal`](crate::LegalityContext::legal)
+/// reads its stored snapshot. `m` must be pseudo-legal; a move whose origin is
+/// empty returns `false`.
+#[inline]
+fn legal_in<D: LegalData + ?Sized>(data: &D, m: Move) -> bool {
     let from = m.from_sq();
     let to = m.to_sq();
-    let us = view.side_to_move;
-    let them = us.flip();
+    let us = data.side_to_move();
 
-    if view.empty(from) {
+    if data.occupied() & Bitboard::square_bb(from) == Bitboard::EMPTY {
         return false;
     }
 
-    let is_capture = m.move_type() != MoveType::Castling
-        && (m.move_type() == MoveType::EnPassant || !view.empty(to));
+    let move_type = m.move_type();
+    let is_capture = move_type != MoveType::Castling
+        && (move_type == MoveType::EnPassant
+            || !(data.occupied() & Bitboard::square_bb(to)).is_empty());
 
-    if m.move_type() == MoveType::Castling {
+    if move_type == MoveType::Castling {
         let ksq = from;
-        let occupied = view.occupied();
         let pass_through = if to > ksq {
             [ksq, Square::from_index(ksq as i8 + 1)]
         } else {
             [Square::from_index(ksq as i8 - 1), ksq]
         };
-        let enemy_commoners = view.commoners(them);
         for &sq in &pass_through {
             // A commoner adjacent to this square makes the commoner
             // immune to every attack while it stands there.
-            if !(enemy_commoners & attacks::king_attacks(sq)).is_empty() {
+            if !(data.their_commoners() & attacks::king_attacks(sq)).is_empty() {
                 continue;
             }
-            if square_attacked_by(view, sq, occupied, view.pieces_color(them)) {
+            if data.attacked_by(sq, data.occupied(), data.their_pieces()) {
                 return false;
             }
         }
     }
 
-    let mut occupied = view.occupied() ^ Bitboard::square_bb(from);
+    let mut occupied = data.occupied() ^ Bitboard::square_bb(from);
     let mut kto = to;
 
-    if m.move_type() == MoveType::Castling {
+    if move_type == MoveType::Castling {
         let (_, kto_actual, rfrom, rto) = castling_squares(us, to > from);
         kto = kto_actual;
         occupied = occupied ^ Bitboard::square_bb(rfrom);
         occupied = occupied | Bitboard::square_bb(rto);
-    } else if m.move_type() == MoveType::EnPassant {
+    } else if move_type == MoveType::EnPassant {
         let capsq = match us {
             Color::White => Square::from_index(to as i8 - 8),
             Color::Black => Square::from_index(to as i8 + 8),
@@ -615,13 +768,13 @@ pub(crate) fn legal_with_counts(view: &PositionView, m: Move) -> bool {
     occupied = occupied | Bitboard::square_bb(kto);
 
     if is_capture {
-        let pre_pawns = view.pieces_pt(PieceType::Pawn);
-        let pre_non_pawns = view.occupied() ^ pre_pawns;
+        let pre_pawns = data.by_type()[PieceType::Pawn as usize];
+        let pre_non_pawns = data.occupied() ^ pre_pawns;
         let blast_adjacent = attacks::king_attacks(kto) & pre_non_pawns;
         occupied = occupied & !(blast_adjacent | Bitboard::square_bb(kto));
     }
 
-    let pre_commoners = view.commoners(us);
+    let pre_commoners = data.our_commoners();
     let mut our_commoners = pre_commoners & occupied;
 
     if !is_capture && !(pre_commoners & Bitboard::square_bb(from)).is_empty() {
@@ -636,7 +789,7 @@ pub(crate) fn legal_with_counts(view: &PositionView, m: Move) -> bool {
 
     // Capturing the enemy's only commoner wins immediately; the mover's
     // own commoner cannot be in check after the game has ended.
-    let enemy_commoners = view.commoners(them) & occupied;
+    let enemy_commoners = data.their_commoners() & occupied;
     if enemy_commoners.is_empty() {
         return true;
     }
@@ -647,7 +800,22 @@ pub(crate) fn legal_with_counts(view: &PositionView, m: Move) -> bool {
         return true;
     }
 
-    !square_attacked_by(view, ksq, occupied, view.pieces_color(them) & occupied)
+    !data.attacked_by(ksq, occupied, data.their_pieces() & occupied)
+}
+
+/// Return `true` when `m` is legal in `view`, ignoring the "game is already
+/// over" guard.
+///
+/// This is the body of [`Board::legal`] with the two commoner-count fields of
+/// [`StateInfo`] replaced by an explicit caller check:
+/// [`legal_in_view`] applies the guard from `state`, the effect path applies
+/// its own snapshot of the same counts.
+///
+/// `m` must be pseudo-legal (the generator's precondition); a move whose origin
+/// is empty returns `false`.
+#[inline]
+pub(crate) fn legal_with_counts(view: &PositionView, m: Move) -> bool {
+    legal_in(view, m)
 }
 
 /// The stored en-passant target, but only when the side to move has at least
@@ -691,20 +859,6 @@ pub(crate) fn legal_in_view(view: &PositionView, m: Move, state: &StateInfo) -> 
         return false;
     }
     legal_with_counts(view, m)
-}
-
-/// Return `true` if an enemy non-commoner piece attacks `sq` on `occupied`.
-///
-/// Commoner attacks are intentionally excluded; callers handle adjacent enemy
-/// commoners separately.
-#[inline(always)]
-fn square_attacked_by(
-    view: &PositionView,
-    sq: Square,
-    occupied: Bitboard,
-    enemy_bb: Bitboard,
-) -> bool {
-    is_attacked_by(sq, occupied, view.by_type(), enemy_bb, view.side_to_move)
 }
 
 /// The terminal-precedence prefix: the two cheap exits.

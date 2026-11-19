@@ -58,6 +58,15 @@ reference implementation.
   returns it as a `Counts` value. It is enough for single-move legality and
   for `EffectContext::new()`, but **not** for the state-aware move-generation
   entry points, which still require a full `Board::populate_state()`
+- Candidate-loop legality: `Board::legality_context(counts)` builds a
+  `LegalityContext` once per node; `LegalityContext::legal(m)` answers every
+  pseudo-legal candidate through the same rules body as `Board::legal()`, and
+  `LegalityContext::occupied()` exposes the node occupancy for child/effect
+  reuse. It reads no `checkers`/`pinned` state. The hot-path bench
+  (`cargo run --release --example hotpath_bench`) measures a ~0.94–0.95x
+  per-candidate ratio over `Board::legal()` with a populated state on this
+  crate's corpus and seeded play-outs; see the wishlist-2 plan report for the
+  exact run.
 - Move effects without a board write: `EffectContext` (built once per position
   with `Board::effect_context()`) classifies every pseudo-legal candidate into a
   `MoveEffect` — capture, blast casualties, checks or explodes the enemy

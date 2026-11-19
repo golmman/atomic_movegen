@@ -20,7 +20,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `examples/hotpath_bench.rs`, the stable-row hot-path cost harness. It starts
   with `populate_state`, `populate_counts`, `Board::counts` and
   `StateInfo::new`, over the perft/conformance corpus and the seeded play-out
-  walk.
+  walk, and now includes the per-candidate `Board::legal` vs
+  `LegalityContext::legal` rows plus context construction.
+- `LegalityContext` and `Board::legality_context(counts)`, a node-local
+  candidate legality loop. Build once per position and call
+  `LegalityContext::legal(m)` for every pseudo-legal candidate;
+  `LegalityContext::occupied()` exposes the node occupancy for a child/effect
+  query. The context reads only placement and the two `Counts`, shares the
+  single rules body with `Board::legal`, populates no `StateInfo`, and is
+  `Copy + Send + Sync`. Every legality answer, perft value, key, move order,
+  FEN output and terminality answer is unchanged. On this host the measured
+  all-candidate ratio is ~0.94–0.95x `Board::legal` with a populated state;
+  context construction is ~2–3 ns per node.
 
 ## [2.9.0] - 2026-11-18
 
