@@ -46,7 +46,9 @@ reference implementation.
   `Board::attackers_to_color()`, board-aware `Board::is_zeroing()` /
   `Board::is_double_push()`, and order-preserving `MoveList::retain()`
 - Hot-path helpers: allocation-free `Board::null_for()` (the null counterpart
-  of a position without a FEN round-trip), the public early-exit
+  of a position without a FEN round-trip) and `Board::null_for_advanced()`
+  (the same null with `rule50 + 1` and `game_ply + 1`, for a 50-move probe;
+  `null_for()` keeps its FEN-preserving clock), the public early-exit
   `movegen::for_each_pseudo_legal()` and `movegen::for_each_legal()` streams,
   typed `Board::has_castling_right()` with `CastlingSide`, and
   `attacks::between()` / `attacks::xray_*_attacks()` for engine-side legality

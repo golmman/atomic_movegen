@@ -1612,6 +1612,9 @@ impl Board {
     ///
     /// The result is an ordinary [`Board`]. A caller that needs an ephemeral
     /// null position must still keep it out of any keyed or stored state.
+    ///
+    /// For the search-clock variant that advances the half-move clock, see
+    /// [`null_for_advanced`](Self::null_for_advanced).
     #[must_use]
     pub fn null_for(&self, attacker: Color) -> Board {
         let mut board = self.clone();
@@ -1626,6 +1629,49 @@ impl Board {
             .saturating_mul(2)
             .saturating_add(if attacker == Color::White { 1 } else { 2 });
         board.recompute_hash();
+        board
+    }
+
+    /// The null counterpart of this position with an advanced half-move clock.
+    ///
+    /// Same pieces and castling rights, `attacker` to move, no en-passant
+    /// target, `rule50 + 1`, and `game_ply + 1`. The Zobrist key is updated for
+    /// the new side and cleared ep target; it is exactly the key of a board
+    /// with the same placement and state fields.
+    ///
+    /// Unlike [`null_for`](Self::null_for), this does **not** derive the game
+    /// ply from the preserved fullmove number. It advances the clock by one
+    /// ply unconditionally, as a 50-move-rule null probe requires. For the
+    /// usual `attacker = self.side_to_move().flip()`, the two methods agree on
+    /// the side and ep target but differ by the advanced clock. When the side
+    /// does not flip, the advanced result is not necessarily FEN-equivalent to
+    /// a same-fullmove round-trip, because its game ply no longer has the
+    /// parity implied by the stored side to move.
+    ///
+    /// Both clocks saturate: `rule50` at [`u16::MAX`] and the internal game
+    /// ply at its counter limit. The result is an ordinary [`Board`]. A caller
+    /// that uses it as an ephemeral null position must keep it out of keyed or
+    /// stored state.
+    #[must_use]
+    pub fn null_for_advanced(&self, attacker: Color) -> Board {
+        let mut board = self.clone();
+        let old_side = self.position.side_to_move;
+        let old_ep = self.position.ep_square;
+
+        board.position.side_to_move = attacker;
+        board.position.ep_square = None;
+        board.position.rule50 = self.position.rule50.saturating_add(1);
+        board.game_ply = self.game_ply.saturating_add(1);
+
+        // The key covers pieces, side, castling rights, and the stored ep
+        // file, but not either clock. Only the side and ep transitions need a
+        // delta; castling rights and every piece key are unchanged.
+        if attacker != old_side {
+            board.hash ^= crate::zobrist::ZOBRIST.side;
+        }
+        if let Some(sq) = old_ep {
+            board.hash ^= crate::zobrist::ZOBRIST.ep[file_of(sq) as usize];
+        }
         board
     }
 
@@ -6939,6 +6985,50 @@ mod tests {
         assert_eq!(null.ep_square(), None);
         assert_eq!(null.hash(), null.recomputed_hash());
         assert_ne!(null.hash(), board.hash());
+    }
+
+    #[test]
+    fn null_for_advanced_updates_hash_and_clocks_incrementally() {
+        // The high-fullmove and saturated-clock fixtures pin the paths that the
+        // public getters cannot represent exactly.
+        let extra = [
+            "4k3/8/8/8/8/8/8/4K3 w - - 0 65535",
+            "4k3/8/8/8/8/8/8/4K3 b - - 0 65535",
+            "4k3/8/8/8/8/8/8/4K3 w - - 65535 50",
+        ];
+        for fen in NULL_FOR_FIXTURES.iter().copied().chain(extra) {
+            let board = Board::from_fen(fen).expect("fixture FEN must parse");
+            for attacker in [Color::White, Color::Black] {
+                let advanced = board.null_for_advanced(attacker);
+
+                assert_eq!(advanced.squares, board.squares, "{fen} / {attacker:?}");
+                assert_eq!(
+                    advanced.position.castling_rights, board.position.castling_rights,
+                    "{fen} / {attacker:?}"
+                );
+                assert_eq!(advanced.position.side_to_move, attacker);
+                assert_eq!(advanced.position.ep_square, None);
+                assert_eq!(
+                    advanced.position.rule50,
+                    board.position.rule50.saturating_add(1),
+                    "{fen} / {attacker:?}"
+                );
+                assert_eq!(
+                    advanced.game_ply,
+                    board.game_ply.saturating_add(1),
+                    "{fen} / {attacker:?}"
+                );
+                // The incremental side/ep delta must equal a full recompute.
+                assert_eq!(
+                    advanced.hash,
+                    advanced.recomputed_hash(),
+                    "{fen} / {attacker:?}"
+                );
+
+                // The source board is untouched.
+                assert_eq!(board.fen(), fen, "{fen} / {attacker:?}");
+            }
+        }
     }
 
     #[test]

@@ -80,7 +80,9 @@
 //! [`movegen::for_each_pseudo_legal`] and
 //! [`movegen::for_each_legal`] walk the candidate and legal streams without
 //! allocating and support early exit, while [`Board::null_for`] builds a
-//! null-move position without a FEN round-trip. [`attacks::between`] and the
+//! null-move position without a FEN round-trip and
+//! [`Board::null_for_advanced`] advances both clocks for a 50-move probe.
+//! [`attacks::between`] and the
 //! `attacks::xray_*_attacks` helpers expose the geometry an engine needs for
 //! its own legality shortcuts.
 //!

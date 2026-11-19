@@ -65,4 +65,7 @@ Read the last report of `docs/plans/feedback/plan_wishlist2_index.md`. Then vali
 
 ---
 
-We finished `docs/plans/feedback/plan_wishlist2_index.md`. Perform hardening and a code cleanup. Then prepare a `cargo publish` and summarize the full results.
+We finished all plans in `docs/plans/feedback/plan_wishlist2_index.md`. Read the reports, then run a hardening and a code cleanup session.
+Assess all changes and decide if we need more follow up sessions: if so tell me and stop.
+
+If everything is nice prepare a `cargo publish` and summarize the full results.

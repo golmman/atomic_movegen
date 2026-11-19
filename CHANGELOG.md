@@ -42,6 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   non-double-push build none. No key, `ZOBRIST_VERSION`, perft, move-order, FEN
   or terminality answer changes. On this host the measured all-move ratio is
   ~0.40x the `PostMove` key path and ~0.71x `clone + do_move + hash_with()`.
+- `Board::null_for_advanced()`, the search-clock null counterpart of a
+  position: same pieces and castling rights, the requested attacker to move,
+  no en-passant target, `rule50 + 1`, `game_ply + 1`, and an incremental
+  side/ep Zobrist update without a full recompute or FEN round-trip. Both
+  clocks saturate. `Board::null_for()` and its FEN-preserving clock are
+  unchanged. No key composition, `ZOBRIST_VERSION`, perft, move-order, FEN or
+  terminality answer changes.
 
 ## [2.9.0] - 2026-11-18
 

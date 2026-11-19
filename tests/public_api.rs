@@ -41,6 +41,8 @@ fn crate_root_reexports_resolve() {
 
     // The classification type and its two entry points.
     let board = Board::new();
+    let _: Board = board.null_for(Color::Black);
+    let _: Board = board.null_for_advanced(Color::Black);
     let ctx = board.effect_context();
     let m = Move::from_uci("e2e4").unwrap();
     let classification: MoveClassification = ctx.classification(&board, m);

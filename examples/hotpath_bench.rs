@@ -22,8 +22,8 @@
 use atomic_movegen::movegen::{generate_legal_with_state, generate_pseudo_legal};
 use atomic_movegen::types::MoveType;
 use atomic_movegen::{
-    Board, CONFORMANCE_CASES, Counts, EffectContext, LegalityContext, Move, MoveList, PieceType,
-    StateInfo,
+    Board, CONFORMANCE_CASES, Color, Counts, EffectContext, EnPassantMode, LegalityContext, Move,
+    MoveList, PieceType, Setup, StateInfo,
 };
 use std::hint::black_box;
 use std::time::Instant;
@@ -658,6 +658,144 @@ fn print_children(name: &str, entries: &[CandidateEntry], rows: &ChildRows) {
     }
 }
 
+// --- null-move rows (plan 4, W9) -------------------------------------------
+
+/// The downstream adapter shape: copy the pieces into a fresh `Setup`, set the
+/// side/rights/ep/clocks, then build. A fresh `Setup` is constructed per call,
+/// so this row includes the piece-copy cost and is not a reused-`Setup` lower
+/// bound.
+fn setup_rebuild_null(board: &Board, attacker: Color) -> Board {
+    let mut setup = Setup::new();
+    for (square, piece) in board.pieces() {
+        setup.place(square, piece);
+    }
+    setup
+        .set_side_to_move(attacker)
+        .set_castling_rights(board.castling_rights())
+        .set_ep_square(None)
+        .set_rule50(board.rule50().saturating_add(1))
+        .set_game_ply(board.game_ply().saturating_add(1));
+    Board::from_setup(&setup).expect("null setup must build")
+}
+
+struct NullRows {
+    clone: f64,
+    null_for: f64,
+    advanced: f64,
+    advanced_same_side: f64,
+    setup_rebuild: f64,
+}
+
+fn measure_nulls(boards: &[Board], repeats: usize, passes: usize) -> NullRows {
+    for board in boards {
+        let same_side = board.side_to_move();
+        let flipped = same_side.flip();
+        for attacker in [flipped, same_side] {
+            let advanced = board.null_for_advanced(attacker);
+            let rebuilt = setup_rebuild_null(board, attacker);
+            assert_eq!(advanced.hash(), rebuilt.hash());
+            assert_eq!(
+                advanced.hash_with(EnPassantMode::Legal),
+                rebuilt.hash_with(EnPassantMode::Legal)
+            );
+            assert_eq!(advanced.rule50(), rebuilt.rule50());
+            assert_eq!(advanced.game_ply(), rebuilt.game_ply());
+            if board.game_ply() < u16::MAX {
+                assert_eq!(advanced.fen(), rebuilt.fen());
+            }
+        }
+    }
+
+    let clone = bench(
+        || {
+            for board in boards {
+                black_box(board.clone());
+            }
+        },
+        boards.len(),
+        repeats,
+        passes,
+    );
+
+    let null_for = bench(
+        || {
+            for board in boards {
+                black_box(board.null_for(black_box(board.side_to_move().flip())));
+            }
+        },
+        boards.len(),
+        repeats,
+        passes,
+    );
+
+    let advanced = bench(
+        || {
+            for board in boards {
+                black_box(board.null_for_advanced(black_box(board.side_to_move().flip())));
+            }
+        },
+        boards.len(),
+        repeats,
+        passes,
+    );
+
+    let advanced_same_side = bench(
+        || {
+            for board in boards {
+                black_box(board.null_for_advanced(black_box(board.side_to_move())));
+            }
+        },
+        boards.len(),
+        repeats,
+        passes,
+    );
+
+    let setup_rebuild = bench(
+        || {
+            for board in boards {
+                black_box(setup_rebuild_null(
+                    board,
+                    black_box(board.side_to_move().flip()),
+                ));
+            }
+        },
+        boards.len(),
+        repeats,
+        passes,
+    );
+
+    NullRows {
+        clone,
+        null_for,
+        advanced,
+        advanced_same_side,
+        setup_rebuild,
+    }
+}
+
+fn print_nulls(name: &str, boards: usize, rows: &NullRows) {
+    println!();
+    println!("{name} null moves: {boards} boards; ns/call (median), ratio to null_for_advanced");
+    for (label, value) in [
+        ("clone", rows.clone),
+        ("null_for", rows.null_for),
+        ("null_for_advanced", rows.advanced),
+        ("advanced (same side)", rows.advanced_same_side),
+        ("Setup rebuild", rows.setup_rebuild),
+    ] {
+        println!(
+            "  {label:<20} {value:>10.2} ns {:>8.3}x",
+            value / rows.advanced
+        );
+    }
+    println!(
+        "  ratios: advanced/null_for {:.3}x, advanced/Setup {:.3}x, advanced/clone {:.3}x",
+        rows.advanced / rows.null_for,
+        rows.advanced / rows.setup_rebuild,
+        rows.advanced / rows.clone,
+    );
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let repeats: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(9).max(3);
@@ -686,4 +824,10 @@ fn main() {
 
     let playout_child_rows = measure_children(&playout_candidates, repeats, passes);
     print_children("playouts", &playout_candidates, &playout_child_rows);
+
+    let corpus_null_rows = measure_nulls(&corpus, repeats, passes);
+    print_nulls("corpus", corpus.len(), &corpus_null_rows);
+
+    let playout_null_rows = measure_nulls(&playouts, repeats, passes);
+    print_nulls("playouts", playouts.len(), &playout_null_rows);
 }
