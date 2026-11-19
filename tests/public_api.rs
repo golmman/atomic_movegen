@@ -11,10 +11,10 @@
 use atomic_movegen::board::FenError;
 use atomic_movegen::movegen::{generate_legal_with_state, generate_pseudo_legal};
 use atomic_movegen::{
-    AfterState, Bitboard, BlastCasualties, Board, Board as BoardRoot, CONFORMANCE_CASES, Color,
-    Counts, EffectContext, EnPassantMode, FenLoadError, FenPolicy, LegalityContext, Move,
-    MoveClassification, MoveEffect, MoveList, Outcome, PostMove, Square, StateInfo, Terminal,
-    TerminalReason, conformance,
+    AfterState, Bitboard, BlastCasualties, Board, Board as BoardRoot, CONFORMANCE_CASES,
+    ChildEffect, Color, Counts, EffectContext, EnPassantMode, FenLoadError, FenPolicy,
+    LegalityContext, Move, MoveClassification, MoveEffect, MoveList, Outcome, PostMove, Square,
+    StateInfo, Terminal, TerminalReason, conformance,
 };
 
 #[test]
@@ -213,11 +213,28 @@ fn readme_composite_shape_compiles_and_answers() {
 }
 
 #[test]
+fn child_effect_resolves_and_answers() {
+    let board = Board::from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1").unwrap();
+    let counts: Counts = board.counts();
+    let m = Move::from_uci("e1g1").unwrap();
+    let effect: Option<ChildEffect> = board.child_effect(m, counts, EnPassantMode::Always);
+    let effect = effect.expect("pseudo-legal castling");
+    assert_eq!(effect.rule50, board.rule50_after(m));
+    assert_eq!(effect.key, board.hash_after(m));
+    assert!(!effect.capture);
+
+    let with_occupancy: Option<ChildEffect> =
+        board.child_effect_with_occupancy(m, board.occupied(), counts, EnPassantMode::Always);
+    assert_eq!(with_occupancy, Some(effect));
+}
+
+#[test]
 fn public_types_are_send_and_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<MoveClassification>();
     assert_send_sync::<MoveEffect>();
     assert_send_sync::<PostMove>();
+    assert_send_sync::<ChildEffect>();
     assert_send_sync::<Counts>();
     assert_send_sync::<LegalityContext>();
     assert_send_sync::<AfterState>();

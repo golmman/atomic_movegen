@@ -146,6 +146,17 @@
 //! field, and it reuses the already-derived child view: no clone, no board
 //! write, and no `StateInfo`.
 //!
+//! [`ChildEffect`] is the lean child query for a candidate loop:
+//! [`Board::child_effect`] returns only the child's occupancy, key, half-move
+//! clock, and capture flag, equal field for field to a cloned child after
+//! `do_move`. It builds no [`PostMove`] and copies no full placement view.
+//! [`Board::child_effect_with_occupancy`] accepts a parent occupancy already in
+//! hand (for example [`LegalityContext::occupied`]); the key arithmetic is
+//! shared with [`EffectContext::post_move_and_key_with`]. Under
+//! [`EnPassantMode::Legal`] only a double push whose child stores an ep target
+//! can ask the existing legal-EP helper; `Always` and every non-double-push
+//! build no child view. No key, table, or [`ZOBRIST_VERSION`] change.
+//!
 //! Cost is measured, not promised: `cargo run --release --example effect_bench`
 //! prints the child rows and, per child class (`quiet`, `capture`, `promotion`,
 //! `en-passant`, `castling`, `commoner-move`, the aggregate `built-ish` and
@@ -246,6 +257,7 @@
 //!   [`EffectContext::post_move`], [`PostMove::terminal`],
 //!   [`EffectContext::post_move_and_key`],
 //!   [`EffectContext::post_move_and_key_with`],
+//!   [`Board::child_effect`], [`Board::child_effect_with_occupancy`],
 //!   [`EffectContext::exploding_capture_after`],
 //!   [`EffectContext::is_legal`],
 //!   [`EffectContext::terminal_after`], [`EffectContext::child_outcome`],
@@ -307,7 +319,9 @@ pub use board::{
     ValidationErrors,
 };
 pub use conformance::{CASES as CONFORMANCE_CASES, ConformanceCase};
-pub use effects::{AfterState, EffectContext, MoveClassification, MoveEffect, PostMove};
+pub use effects::{
+    AfterState, ChildEffect, EffectContext, MoveClassification, MoveEffect, PostMove,
+};
 pub use setup::{Setup, SetupError};
 pub use types::{
     Bitboard, CastlingSide, Color, EnPassantMode, Move, MoveList, NO_PIECE, Outcome, Piece,
@@ -375,6 +389,7 @@ mod tests {
         assert_send_sync::<MoveEffect>();
         assert_send_sync::<MoveClassification>();
         assert_send_sync::<PostMove>();
+        assert_send_sync::<ChildEffect>();
         assert_send_sync::<Setup>();
         assert_send_sync::<FenLoadError>();
         assert_send_sync::<SetupError>();

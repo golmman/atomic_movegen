@@ -106,6 +106,17 @@ reference implementation.
   — no board clone and no `StateInfo` population for a double push. It is the
   same canonicalization as `Board::hash_with(Legal)` on the same key table:
   `ZOBRIST_VERSION` is unchanged
+- Lean child facts for a candidate loop: `Board::child_effect(m, counts, mode)`
+  returns a `ChildEffect { occupied, key, rule50, capture }`, equal field for
+  field to a cloned `do_move` child, without building a `PostMove` or copying a
+  `PositionView`. `Board::child_effect_with_occupancy()` accepts an occupancy
+  already in hand (for example from `LegalityContext::occupied()`), and the key
+  arithmetic is shared with `post_move_and_key_with()`. Under
+  `EnPassantMode::Legal` only a double push whose child stores an ep target can
+  ask the existing legal-EP helper; `Always` and non-double-pushes build no
+  child view. The hot-path bench measures the new query at roughly 0.4x the
+  `PostMove` key path and 0.7x `clone` + `do_move` + `hash_with()` on this
+  crate's corpus and seeded play-outs
 - One-ply child threat: `EffectContext::exploding_capture_after(board, m)`
   returns the first legal capture by the child's side to move whose blast
   removes the commoner of the side that played `m`, or `None`. It reads the
@@ -163,8 +174,8 @@ reference implementation.
   `Setup`, and the public enums are `Send + Sync`. The move path does not
   allocate (`generate_*`, `has_legal_move*`, `for_each_*`, `Board::legal`,
   `is_legal*`, `is_pseudo_legal`, `do_move`/`undo_move`, `hash*`,
-  `rule50_after`, `outcome*`, `terminal*`, `is_terminal`, `blast_casualties`,
-  `attackers_to*`, and `Move::write_uci`). Allocations are allowed in
+  `child_effect*`, `rule50_after`, `outcome*`, `terminal*`, `is_terminal`,
+  `blast_casualties`, `attackers_to*`, and `Move::write_uci`). Allocations are allowed in
   interchange (`fen`, `to_uci`, `san`, `Setup` construction) and in
   convenience methods that return `String`.
 - **Semver:** `#[non_exhaustive]` enums may gain variants in a minor release;

@@ -32,6 +32,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   FEN output and terminality answer is unchanged. On this host the measured
   all-candidate ratio is ~0.94–0.95x `Board::legal` with a populated state;
   context construction is ~2–3 ns per node.
+- `ChildEffect`, `Board::child_effect()` and
+  `Board::child_effect_with_occupancy()`: a lean child query returning only the
+  child's `occupied`, Zobrist `key`, `rule50` and `capture` flag. It equals a
+  cloned `do_move` child field for field, builds no `PostMove` and copies no
+  `PositionView`; the key arithmetic is shared with
+  `EffectContext::post_move_and_key_with()`. `Legal` may build a child view only
+  for a double push whose child stores an ep target; `Always` and every
+  non-double-push build none. No key, `ZOBRIST_VERSION`, perft, move-order, FEN
+  or terminality answer changes. On this host the measured all-move ratio is
+  ~0.40x the `PostMove` key path and ~0.71x `clone + do_move + hash_with()`.
 
 ## [2.9.0] - 2026-11-18
 

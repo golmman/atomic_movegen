@@ -186,7 +186,8 @@
 
 use crate::attacks;
 use crate::board::{
-    BlastCasualties, Board, StateInfo, castling_squares, is_attacked_by, piece_key,
+    BK_CASTLE, BQ_CASTLE, BlastCasualties, Board, Counts, StateInfo, WK_CASTLE, WQ_CASTLE,
+    castling_rights_after, castling_squares, is_attacked_by, piece_key,
 };
 use crate::position::{self, PositionView};
 use crate::types::*;
@@ -1084,6 +1085,188 @@ fn exploding_capture_in_view(view: &PositionView, target: Bitboard) -> Option<Mo
     found
 }
 
+/// The engine-facing facts of a child position.
+///
+/// Equal, field for field, to a cloned child board after `do_move(m)` for the
+/// same move: `occupied == child.occupied()`, `key == child.hash_with(mode)`,
+/// `rule50 == child.rule50()`, and `capture` is the move's capture flag.
+///
+/// This is intentionally smaller than [`PostMove`]: it carries no placement,
+/// casualties, castling rights, or terminality. Use [`PostMove`] (or a built
+/// child) for those.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ChildEffect {
+    /// The child's occupied squares.
+    pub occupied: Bitboard,
+    /// The child's Zobrist key under the requested en-passant policy.
+    pub key: u64,
+    /// The child's half-move clock.
+    pub rule50: u16,
+    /// Whether the move captures (normal capture or en passant).
+    pub capture: bool,
+}
+
+impl Board {
+    /// The child effect of `m`, without building a child board or a
+    /// [`PostMove`].
+    ///
+    /// Returns `None` for malformed input only ([`Move::NONE`], an empty
+    /// origin, or an origin without a piece of the side to move), like
+    /// [`EffectContext::post_move`]. Defined for well-formed illegal moves:
+    /// the returned facts describe the child `do_move` would build.
+    ///
+    /// `counts` must be current for this board. It is used only to skip the
+    /// legal-EP child view when either side has no commoner. `mode` selects
+    /// the same `Always`/`Legal` key policy as
+    /// [`Board::hash_after_with`](Board::hash_after_with).
+    ///
+    /// This is allocation-free and does not write the board.
+    #[must_use]
+    pub fn child_effect(
+        &self,
+        m: Move,
+        counts: Counts,
+        mode: EnPassantMode,
+    ) -> Option<ChildEffect> {
+        self.child_effect_with_occupancy(m, self.occupied(), counts, mode)
+    }
+
+    /// [`child_effect`](Self::child_effect) with a caller-supplied parent
+    /// occupancy.
+    ///
+    /// `occupied` must equal `self.occupied()` at the time of the call. The
+    /// intended producer is
+    /// [`LegalityContext::occupied`](crate::LegalityContext::occupied), so a
+    /// candidate loop does not recompute the parent occupancy.
+    ///
+    /// This is allocation-free and does not write the board.
+    #[must_use]
+    pub fn child_effect_with_occupancy(
+        &self,
+        m: Move,
+        occupied: Bitboard,
+        counts: Counts,
+        mode: EnPassantMode,
+    ) -> Option<ChildEffect> {
+        if m == Move::NONE {
+            return None;
+        }
+        let view = self.position_view();
+        let us = view.side_to_move();
+        let from = m.from_sq();
+        let to = m.to_sq();
+        let piece = self.piece_on(from);
+        if piece == NO_PIECE || piece.color() != Some(us) {
+            return None;
+        }
+        let moving_type = piece.type_of()?;
+        let move_type = m.move_type();
+        let castling = move_type == MoveType::Castling;
+        let is_capture = move_type == MoveType::EnPassant
+            || (move_type != MoveType::Castling && occupied.contains(to as usize));
+
+        // Quiet moves have no blast; only a capture pays for the casualty set.
+        let casualties = if is_capture {
+            self.blast_casualties(m)
+        } else {
+            BlastCasualties::default()
+        };
+
+        let child_ep =
+            if !castling && moving_type == PieceType::Pawn && (to as i8 - from as i8).abs() == 16 {
+                Some(match us {
+                    Color::White => Square::from_index(from as i8 + 8),
+                    Color::Black => Square::from_index(from as i8 - 8),
+                })
+            } else {
+                None
+            };
+
+        let child_rights = if castling {
+            view.castling_rights()
+                & match us {
+                    Color::White => !(WK_CASTLE | WQ_CASTLE),
+                    Color::Black => !(BK_CASTLE | BQ_CASTLE),
+                }
+        } else {
+            let post_blast = if is_capture {
+                let removed = Bitboard::square_bb(from) | casualties.all();
+                let after = |sq: Square| {
+                    if removed.contains(sq as usize) {
+                        NO_PIECE
+                    } else {
+                        self.piece_on(sq)
+                    }
+                };
+                [
+                    after(Square::H1),
+                    after(Square::A1),
+                    after(Square::E1),
+                    after(Square::H8),
+                    after(Square::A8),
+                    after(Square::E8),
+                ]
+            } else {
+                // Ignored by the helper when there is no capture.
+                [NO_PIECE; 6]
+            };
+            castling_rights_after(view.castling_rights(), from, to, is_capture, &post_blast)
+        };
+
+        let rule50 = if castling || (moving_type != PieceType::Pawn && !is_capture) {
+            view.rule50().saturating_add(1)
+        } else {
+            0
+        };
+
+        let child_occupied = if castling {
+            let (kfrom, kto, rfrom, rto) = castling_squares(us, to > from);
+            (occupied & !(Bitboard::square_bb(kfrom) | Bitboard::square_bb(rfrom)))
+                | Bitboard::square_bb(kto)
+                | Bitboard::square_bb(rto)
+        } else if is_capture {
+            occupied & !(Bitboard::square_bb(from) | casualties.all())
+        } else {
+            (occupied & !Bitboard::square_bb(from)) | Bitboard::square_bb(to)
+        };
+
+        let mut key = child_key_from_parts(
+            self,
+            view,
+            m,
+            is_capture,
+            casualties,
+            child_rights,
+            child_ep,
+        );
+
+        if mode == EnPassantMode::Legal {
+            if let Some(ep) = child_ep {
+                // `legal_ep_square_in_view` is necessarily `None` when either
+                // side has no commoner; the counts short-circuit avoids the
+                // child view in that case and still removes the ep-file key.
+                let legal_ep = if counts.commoners() != 0 && counts.them_commoners() != 0 {
+                    position::child_view(view, m, rule50)
+                        .and_then(|child| position::legal_ep_square_in_view(&child.view))
+                } else {
+                    None
+                };
+                if legal_ep.is_none() {
+                    key ^= crate::zobrist::ZOBRIST.ep[file_of(ep) as usize];
+                }
+            }
+        }
+
+        Some(ChildEffect {
+            occupied: child_occupied,
+            key,
+            rule50,
+            capture: is_capture,
+        })
+    }
+}
+
 /// The Zobrist key of `post`, `board` being the parent position.
 ///
 /// [`Board::hash`] is the XOR of the piece keys, the side key, the castling key
@@ -1113,6 +1296,36 @@ fn exploding_capture_in_view(view: &PositionView, target: Bitboard) -> Option<Mo
 /// lookup is on the hot path and the two are equal by construction — the
 /// context's view is a snapshot of this board.
 fn child_key(board: &Board, parent: &PositionView, post: &PostMove, m: Move) -> u64 {
+    child_key_from_parts(
+        board,
+        parent,
+        m,
+        post.is_capture(),
+        post.casualties(),
+        post.castling_rights(),
+        post.ep_square(),
+    )
+}
+
+/// The incremental child-key arithmetic shared by the [`PostMove`] path and
+/// [`Board::child_effect`].
+///
+/// `parent` is the parent placement, `is_capture` includes en passant,
+/// `casualties` is the move's blast-removal set (empty for quiet moves), and
+/// the child rights/ep values are the transition results. The parent's
+/// contents are read from the board (an array read), not from
+/// `parent.piece_on` (a scan over the per-type bitboards): the emptied-square
+/// lookup is on the hot path and the two are equal by construction — the
+/// parent view is a snapshot of this board.
+fn child_key_from_parts(
+    board: &Board,
+    parent: &PositionView,
+    m: Move,
+    is_capture: bool,
+    casualties: BlastCasualties,
+    child_castling_rights: u8,
+    child_ep: Option<Square>,
+) -> u64 {
     let us = parent.side_to_move();
     let from = m.from_sq();
     let to = m.to_sq();
@@ -1125,8 +1338,8 @@ fn child_key(board: &Board, parent: &PositionView, post: &PostMove, m: Move) -> 
     // `to` is the rook's origin square — the only non-capturing case where
     // `to` holds a piece.
     let castling = m.move_type() == MoveType::Castling;
-    if post.is_capture || castling {
-        let mut emptied = Bitboard::square_bb(from) | post.casualties().all();
+    if is_capture || castling {
+        let mut emptied = Bitboard::square_bb(from) | casualties.all();
         if castling {
             emptied = emptied | Bitboard::square_bb(to);
         }
@@ -1148,7 +1361,7 @@ fn child_key(board: &Board, parent: &PositionView, post: &PostMove, m: Move) -> 
         h ^= piece_key(kto, make_piece(us, PieceType::Commoner));
         h ^= piece_key(rto, make_piece(us, PieceType::Rook));
     } else {
-        let placed = if post.is_capture {
+        let placed = if is_capture {
             NO_PIECE
         } else if m.move_type() == MoveType::Promotion {
             make_piece(us, m.promotion_type())
@@ -1159,16 +1372,16 @@ fn child_key(board: &Board, parent: &PositionView, post: &PostMove, m: Move) -> 
     }
 
     let rights = parent.castling_rights();
-    if rights != post.castling_rights() {
+    if rights != child_castling_rights {
         h ^= crate::zobrist::ZOBRIST.castling[rights as usize];
-        h ^= crate::zobrist::ZOBRIST.castling[post.castling_rights() as usize];
+        h ^= crate::zobrist::ZOBRIST.castling[child_castling_rights as usize];
     }
 
     let ep_key = |sq: Option<Square>| match sq {
         Some(sq) => crate::zobrist::ZOBRIST.ep[file_of(sq) as usize],
         None => 0,
     };
-    h ^= ep_key(parent.ep_square()) ^ ep_key(post.ep_square());
+    h ^= ep_key(parent.ep_square()) ^ ep_key(child_ep);
 
     h
 }
