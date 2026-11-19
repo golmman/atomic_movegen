@@ -1,6 +1,6 @@
 //! The released public API surface, pinned by name.
 //!
-//! Every item the 2.9.0 release notes name must exist and resolve from the
+//! Every item the 2.10.0 release notes name must exist and resolve from the
 //! crate root, so the notes cannot drift from the code. This test says nothing
 //! about behaviour — the differential suites do that; it only fails when an
 //! item promised in `CHANGELOG.md` / `README.md` is missing, renamed, or no
@@ -19,7 +19,7 @@ use atomic_movegen::{
 
 #[test]
 fn crate_root_reexports_resolve() {
-    // Types named in the 2.9.0 notes.
+    // Types named in the 2.10.0 notes.
     let _: fn(&Board) -> Color = BoardRoot::side_to_move;
     let _: EffectContext = Board::new().effect_context();
     let _: Outcome = Outcome::Draw;

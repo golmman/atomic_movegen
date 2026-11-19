@@ -796,6 +796,63 @@ fn print_nulls(name: &str, boards: usize, rows: &NullRows) {
     );
 }
 
+// --- wishlist 2 release summary (plan 5) -----------------------------------
+
+/// One compact release row built from the per-class tables above. `old` is the
+/// 2.9.0 shape in the same run; the ratio is the release gate.
+fn print_summary(
+    name: &str,
+    setup: &Rows,
+    candidates: &CandidateRows,
+    children: &ChildRows,
+    nulls: &NullRows,
+) {
+    println!();
+    println!("wishlist 2 summary — {name}: ns/call (median), ratio to the current 2.9.0 shape");
+    println!(
+        "  {:<42} {:>10} {:>10} {:>8}",
+        "row (new / old)", "new", "old", "ratio"
+    );
+    let rows = [
+        (
+            "setup: populate_counts / populate_state",
+            setup.populate_counts,
+            setup.populate_state,
+        ),
+        (
+            "legality: ctx.legal / Board::legal",
+            candidates.context_legal[5],
+            candidates.board_legal[5],
+        ),
+        (
+            "child-A: child_effect / post_move_and_key",
+            children.effect_always[7],
+            children.post_always[7],
+        ),
+        (
+            "child-L: child_effect / post_move_and_key",
+            children.effect_legal[7],
+            children.post_legal[7],
+        ),
+        (
+            "null: null_for_advanced / null_for",
+            nulls.advanced,
+            nulls.null_for,
+        ),
+        (
+            "null: null_for_advanced / Setup rebuild",
+            nulls.advanced,
+            nulls.setup_rebuild,
+        ),
+    ];
+    for (label, new, old) in rows {
+        println!(
+            "  {label:<42} {new:>7.2} ns {old:>7.2} ns {:>7.3}x",
+            new / old
+        );
+    }
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let repeats: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(9).max(3);
@@ -830,4 +887,19 @@ fn main() {
 
     let playout_null_rows = measure_nulls(&playouts, repeats, passes);
     print_nulls("playouts", playouts.len(), &playout_null_rows);
+
+    print_summary(
+        "corpus",
+        &corpus_rows,
+        &corpus_candidate_rows,
+        &corpus_child_rows,
+        &corpus_null_rows,
+    );
+    print_summary(
+        "playouts",
+        &playout_rows,
+        &playout_candidate_rows,
+        &playout_child_rows,
+        &playout_null_rows,
+    );
 }

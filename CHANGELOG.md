@@ -5,7 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.10.0] - 2026-11-19
+
+Wishlist-2 release: additive hot-path shapes for counts-only state, a
+candidate-loop legality context, lean child effects, and an advanced-clock null
+move. No existing legality answer, perft value, move order, FEN output,
+terminality answer, `Always`/`Legal` key, or `ZOBRIST_VERSION` changes. The
+completed wishlist-2 plans and reports record the measurements; this release
+makes no claim about a downstream search tree or another machine's wall clock.
 
 ### Added
 
