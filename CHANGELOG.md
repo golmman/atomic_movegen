@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `Counts`, `Board::counts()` and `Board::populate_counts()`: the two commoner
+  counts are the whole cached state `Board::legal()` and
+  `Board::is_legal_with_state()` read. `populate_counts` writes only those two
+  fields and leaves `checkers`, `pinned`, and undo data untouched. Move
+  generation (`generate_legal_with_state`, `for_each_legal_with_state`,
+  `has_legal_move_with_state`) still requires a full `Board::populate_state()`;
+  the method and precondition docs now say so. No legality answer, perft
+  value, key, move order, FEN output or terminality changes.
+- `examples/hotpath_bench.rs`, the stable-row hot-path cost harness. It starts
+  with `populate_state`, `populate_counts`, `Board::counts` and
+  `StateInfo::new`, over the perft/conformance corpus and the seeded play-out
+  walk.
+
 ## [2.9.0] - 2026-11-18
 
 ### Added

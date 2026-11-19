@@ -52,6 +52,12 @@ reference implementation.
   `attacks::between()` / `attacks::xray_*_attacks()` for engine-side legality
   shortcuts. `movegen::for_each_legal()` and `movegen::has_legal_move()` use the
   same fast-legality ladder as `generate_legal()`
+- Counts-only legality state: `Board::legal()` and
+  `Board::is_legal_with_state()` read only the two commoner counts, so
+  `Board::populate_counts()` fills that cheap state and `Board::counts()`
+  returns it as a `Counts` value. It is enough for single-move legality and
+  for `EffectContext::new()`, but **not** for the state-aware move-generation
+  entry points, which still require a full `Board::populate_state()`
 - Move effects without a board write: `EffectContext` (built once per position
   with `Board::effect_context()`) classifies every pseudo-legal candidate into a
   `MoveEffect` — capture, blast casualties, checks or explodes the enemy

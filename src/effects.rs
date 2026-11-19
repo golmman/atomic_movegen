@@ -385,10 +385,12 @@ impl AfterState {
 impl EffectContext {
     /// Build the context from a populated [`StateInfo`].
     ///
-    /// `state` must have been populated by
-    /// [`Board::populate_state`] for `board`; a stale state changes which
-    /// positions count as already over, exactly as it does for
-    /// [`Board::legal`].
+    /// Only the two commoner counts are read, for the `game_over` snapshot, so
+    /// [`Board::populate_counts`](crate::Board::populate_counts) is sufficient
+    /// for this constructor. The child/effect queries derive their own child
+    /// placement and do not read `checkers` or `pinned`. A stale count pair
+    /// changes which positions count as already over, exactly as it does for
+    /// [`Board::legal`](crate::Board::legal).
     #[must_use]
     pub fn new(board: &Board, state: &StateInfo) -> Self {
         Self {

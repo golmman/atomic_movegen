@@ -22,7 +22,7 @@
 use crate::attacks;
 use crate::bitboard::between_bb;
 use crate::board::{
-    BK_CASTLE, BQ_CASTLE, BlastCasualties, Board, StateInfo, WK_CASTLE, WQ_CASTLE,
+    BK_CASTLE, BQ_CASTLE, BlastCasualties, Board, Counts, StateInfo, WK_CASTLE, WQ_CASTLE,
     castling_rights_after, castling_squares, is_attacked_by,
 };
 use crate::types::*;
@@ -294,6 +294,20 @@ impl PositionView {
         state.pinned = self.pinned(us);
         state.commoners_count = self.commoners(us).count();
         state.them_commoners_count = self.commoners(us.flip()).count();
+    }
+
+    /// The two commoner counts of this view's side to move.
+    ///
+    /// Shared by the board's counts-only writer and reader so the pair has one
+    /// expression. [`populate_state`](Self::populate_state) keeps its original
+    /// inline writes; it computes pins and checkers anyway.
+    #[inline]
+    pub(crate) fn counts(&self) -> Counts {
+        let us = self.side_to_move;
+        Counts::new(
+            self.commoners(us).count(),
+            self.commoners(us.flip()).count(),
+        )
     }
 
     /// Return `true` when both colors have exactly one commoner and no other
@@ -926,6 +940,19 @@ mod tests {
             assert_eq!(
                 from_view.them_commoners_count, from_board.them_commoners_count,
                 "{fen}: counts"
+            );
+
+            // The counts-only shape is one expression shared by both writers.
+            assert_eq!(view.counts(), Counts::from(&from_board), "{fen}: counts");
+            let mut counts_only = StateInfo::new();
+            view.populate_state(&mut counts_only);
+            let mut full = StateInfo::new();
+            board.populate_state(&mut full);
+            board.populate_counts(&mut counts_only);
+            assert_eq!(counts_only.commoners_count, full.commoners_count);
+            assert_eq!(
+                counts_only.them_commoners_count, full.them_commoners_count,
+                "{fen}: counts-only writer"
             );
         }
     }

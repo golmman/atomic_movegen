@@ -12,8 +12,9 @@ use atomic_movegen::board::FenError;
 use atomic_movegen::movegen::{generate_legal_with_state, generate_pseudo_legal};
 use atomic_movegen::{
     AfterState, Bitboard, BlastCasualties, Board, Board as BoardRoot, CONFORMANCE_CASES, Color,
-    EffectContext, EnPassantMode, FenLoadError, FenPolicy, Move, MoveClassification, MoveEffect,
-    MoveList, Outcome, PostMove, Square, StateInfo, Terminal, TerminalReason, conformance,
+    Counts, EffectContext, EnPassantMode, FenLoadError, FenPolicy, Move, MoveClassification,
+    MoveEffect, MoveList, Outcome, PostMove, Square, StateInfo, Terminal, TerminalReason,
+    conformance,
 };
 
 #[test]
@@ -74,6 +75,28 @@ fn crate_root_reexports_resolve() {
     assert!(!CONFORMANCE_CASES.is_empty());
     assert_eq!(CONFORMANCE_CASES.len(), conformance::CASES.len());
     assert!(!conformance::CHILD_CASES.is_empty());
+}
+
+#[test]
+fn counts_only_state_resolves_and_answers() {
+    let board = Board::new();
+    let counts: Counts = board.counts();
+    assert_eq!(counts.commoners(), 1);
+    assert_eq!(counts.them_commoners(), 1);
+    let _: Counts = Counts::new(1, 1);
+
+    let mut full = StateInfo::new();
+    board.populate_state(&mut full);
+    assert_eq!(counts, Counts::from(&full));
+
+    let mut cheap = StateInfo::new();
+    board.populate_counts(&mut cheap);
+    let e2e4 = Move::from_uci("e2e4").unwrap();
+    assert_eq!(board.legal(e2e4, &cheap), board.legal(e2e4, &full));
+    assert_eq!(
+        board.is_legal_with_state(e2e4, &cheap),
+        board.is_legal_with_state(e2e4, &full)
+    );
 }
 
 #[test]
@@ -172,6 +195,7 @@ fn public_types_are_send_and_sync() {
     assert_send_sync::<MoveClassification>();
     assert_send_sync::<MoveEffect>();
     assert_send_sync::<PostMove>();
+    assert_send_sync::<Counts>();
     assert_send_sync::<AfterState>();
     assert_send_sync::<EffectContext>();
     assert_send_sync::<Terminal>();

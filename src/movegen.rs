@@ -331,8 +331,11 @@ pub fn generate_legal(board: &Board, moves: &mut MoveList) {
 ///
 /// The caller is responsible for ensuring `state` is up to date (e.g. by calling
 /// [`Board::populate_state`]) before invoking this function. It does not call
-/// `populate_state` itself. The output preserves the pseudo-legal order; see
-/// the generation-order contract on [`for_each_pseudo_legal`].
+/// `populate_state` itself. Unlike [`Board::legal`], this entry point reads
+/// `checkers` and `pinned`, so a counts-only state from
+/// [`Board::populate_counts`] is **not** sufficient. The output preserves the
+/// pseudo-legal order; see the generation-order contract on
+/// [`for_each_pseudo_legal`].
 pub fn generate_legal_with_state(board: &Board, state: &StateInfo, moves: &mut MoveList) {
     generate_legal_in_view(board.position_view(), state, moves);
 }
@@ -402,7 +405,9 @@ pub fn for_each_legal<B>(
 ///
 /// The caller is responsible for ensuring `state` is up to date (e.g. by
 /// calling [`Board::populate_state`]) before invoking this function. It does
-/// not call `populate_state` itself.
+/// not call `populate_state` itself. This entry point reads `checkers` and
+/// `pinned`, so a counts-only state from [`Board::populate_counts`] is **not**
+/// sufficient.
 ///
 /// # Equivalence contract
 ///
@@ -459,7 +464,9 @@ pub fn has_legal_move(board: &Board) -> bool {
 ///
 /// The caller is responsible for ensuring `state` is up to date (e.g. by
 /// calling [`Board::populate_state`]) before invoking this function. It
-/// does not call `populate_state` itself.
+/// does not call `populate_state` itself. This entry point reads `checkers` and
+/// `pinned`, so a counts-only state from [`Board::populate_counts`] is **not**
+/// sufficient.
 ///
 /// # Equivalence contract
 ///

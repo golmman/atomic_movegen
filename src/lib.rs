@@ -67,7 +67,11 @@
 //! # Hot-path helpers
 //!
 //! [`StateInfo`] is re-exported at the crate root for callers that cache
-//! legality state. [`movegen::for_each_pseudo_legal`] and
+//! legality state. The cheap shape is [`Counts`]: the two commoner counts
+//! [`Board::legal`] and [`Board::is_legal_with_state`] actually read, written
+//! by [`Board::populate_counts`] and read by [`Board::counts`]. A full
+//! [`StateInfo`] (from [`Board::populate_state`]) is still required by the
+//! state-aware move-generation entry points. [`movegen::for_each_pseudo_legal`] and
 //! [`movegen::for_each_legal`] walk the candidate and legal streams without
 //! allocating and support early exit, while [`Board::null_for`] builds a
 //! null-move position without a FEN round-trip. [`attacks::between`] and the
@@ -225,7 +229,8 @@
 //!   [`Board::is_pseudo_legal`], [`Board::do_move`], [`Board::undo_move`],
 //!   [`Board::hash`], [`Board::hash_with`], [`Board::hash_after`],
 //!   [`Board::hash_after_with`], [`Board::hash_and_rule50_after`],
-//!   [`Board::rule50_after`], [`Board::outcome`], [`Board::outcome_with_state`],
+//!   [`Board::rule50_after`], [`Board::counts`], [`Board::populate_counts`],
+//!   [`Board::outcome`], [`Board::outcome_with_state`],
 //!   [`Board::outcome_with`], [`Board::terminal`], [`Board::terminal_with_state`],
 //!   [`Board::terminal_with`], [`Board::is_terminal`],
 //!   [`Board::outcome_after`], [`Board::terminal_after`],
@@ -291,7 +296,9 @@ pub mod types;
 pub(crate) mod util;
 pub(crate) mod zobrist;
 
-pub use board::{BlastCasualties, Board, FenLoadError, FenPolicy, StateInfo, ValidationErrors};
+pub use board::{
+    BlastCasualties, Board, Counts, FenLoadError, FenPolicy, StateInfo, ValidationErrors,
+};
 pub use conformance::{CASES as CONFORMANCE_CASES, ConformanceCase};
 pub use effects::{AfterState, EffectContext, MoveClassification, MoveEffect, PostMove};
 pub use setup::{Setup, SetupError};
@@ -345,6 +352,7 @@ mod tests {
     fn send_sync_assertions() {
         assert_send_sync::<Board>();
         assert_send_sync::<StateInfo>();
+        assert_send_sync::<Counts>();
         assert_send_sync::<Move>();
         assert_send_sync::<MoveList>();
         assert_send_sync::<Bitboard>();

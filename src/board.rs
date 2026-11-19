@@ -734,6 +734,10 @@ fn lichess_validation_errors(board: &Board) -> ValidationErrors {
 ///
 /// Fields are populated by [`Board::populate_state`] and consumed by
 /// [`Board::legal`] and [`generate_legal`](crate::movegen::generate_legal).
+/// A caller that only needs [`Board::legal`] or
+/// [`Board::is_legal_with_state`] can fill the two commoner counts with
+/// [`Board::populate_counts`] instead; move generation still requires the full
+/// cached state.
 #[derive(Debug, Clone, Copy)]
 pub struct StateInfo {
     /// Enemy pieces attacking the side to move's commoner (hot).
@@ -791,6 +795,50 @@ impl StateInfo {
             cap_pt: PieceType::Pawn,
             hash: 0,
         }
+    }
+}
+
+/// The two commoner counts a legality check reads.
+///
+/// The first count belongs to the side to move; the second to its opponent.
+/// A legal atomic position has zero (game over) or one commoner per side.
+///
+/// This value is a snapshot of the board's placement. A stale `Counts` changes
+/// the legality answer in exactly the same way a stale [`StateInfo`] does: a
+/// zero count rejects every candidate, and a nonzero count no longer matches
+/// the board if a commoner has been captured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Counts {
+    commoners: u32,
+    them_commoners: u32,
+}
+
+impl Counts {
+    /// Build a count pair for a side to move and its opponent.
+    #[must_use]
+    pub const fn new(commoners: u32, them_commoners: u32) -> Self {
+        Self {
+            commoners,
+            them_commoners,
+        }
+    }
+
+    /// The number of commoners of the side to move.
+    #[must_use]
+    pub const fn commoners(self) -> u32 {
+        self.commoners
+    }
+
+    /// The number of commoners of the opponent.
+    #[must_use]
+    pub const fn them_commoners(self) -> u32 {
+        self.them_commoners
+    }
+}
+
+impl From<&StateInfo> for Counts {
+    fn from(state: &StateInfo) -> Self {
+        Self::new(state.commoners_count, state.them_commoners_count)
     }
 }
 
@@ -2370,9 +2418,37 @@ impl Board {
     ///
     /// The computation lives on the crate-private position view, so the same
     /// code populates the state of a child position that is derived from
-    /// bitboards.
+    /// bitboards. This is still required for the state-aware move-generation
+    /// entry points; a caller that only checks [`legal`](Self::legal) or
+    /// [`is_legal_with_state`](Self::is_legal_with_state) can use
+    /// [`populate_counts`](Self::populate_counts) instead.
     pub fn populate_state(&self, state: &mut StateInfo) {
         self.position_view().populate_state(state);
+    }
+
+    /// The two commoner counts of this position.
+    ///
+    /// This is the whole cached state [`legal`](Self::legal) reads: a call
+    /// with a [`StateInfo`] whose two count fields equal this value answers
+    /// exactly like one populated by [`populate_state`](Self::populate_state).
+    #[must_use]
+    pub fn counts(&self) -> Counts {
+        self.position_view().counts()
+    }
+
+    /// Fill only `commoners_count` and `them_commoners_count` in `state`.
+    ///
+    /// `checkers`, `pinned`, and the undo fields are left untouched. This is
+    /// enough for [`legal`](Self::legal) and
+    /// [`is_legal_with_state`](Self::is_legal_with_state), but **not** for
+    /// [`generate_legal_with_state`](crate::movegen::generate_legal_with_state),
+    /// [`has_legal_move_with_state`](crate::movegen::has_legal_move_with_state),
+    /// or any other state-aware move-generation query; those still require
+    /// [`populate_state`](Self::populate_state).
+    pub fn populate_counts(&self, state: &mut StateInfo) {
+        let counts = self.position_view().counts();
+        state.commoners_count = counts.commoners();
+        state.them_commoners_count = counts.them_commoners();
     }
 
     /// Make `m` on the board, storing undo information in `state`.
@@ -2674,7 +2750,11 @@ impl Board {
     /// the enemy's only commoner away.
     ///
     /// `state` must contain up-to-date cached fields for the current position.
-    /// A terminal board (either side has no commoner) has no legal moves.
+    /// Only the two commoner counts are read: `state.commoners_count` and
+    /// `state.them_commoners_count` (written by
+    /// [`populate_counts`](Self::populate_counts)). `checkers` and `pinned`
+    /// are not consulted. A terminal board (either side has no commoner) has
+    /// no legal moves.
     ///
     /// The rule body lives on the crate-private position view, shared with the
     /// move generator, the fast-legality ladder, the effect path, and the
@@ -2684,9 +2764,10 @@ impl Board {
     /// # Preconditions
     ///
     /// This is the low-level predicate used by the move generator. It assumes
-    /// that `m` is pseudo-legal and that `state` has been populated with
-    /// [`populate_state`](Self::populate_state). For untrusted move input use
-    /// [`is_legal`](Self::is_legal) or
+    /// that `m` is pseudo-legal and that the two commoner counts in `state`
+    /// are current for this board; [`populate_state`](Self::populate_state) and
+    /// [`populate_counts`](Self::populate_counts) both satisfy that. For
+    /// untrusted move input use [`is_legal`](Self::is_legal) or
     /// [`is_legal_with_state`](Self::is_legal_with_state), which validate the
     /// move shape first.
     #[must_use]
@@ -2717,9 +2798,11 @@ impl Board {
     /// [`legal`](Self::legal) would otherwise accept it. The hot move generator
     /// keeps calling [`legal`](Self::legal) directly.
     ///
-    /// The caller is responsible for ensuring `state` is up to date; stale
-    /// state can change the answer, exactly as it does for
-    /// [`legal`](Self::legal).
+    /// Only `state.commoners_count` and `state.them_commoners_count` are read,
+    /// so [`populate_counts`](Self::populate_counts) is sufficient; `checkers`
+    /// and `pinned` are not consulted. The caller is responsible for ensuring
+    /// those two counts are up to date; stale counts can change the answer,
+    /// exactly as they do for [`legal`](Self::legal).
     #[must_use]
     pub fn is_legal_with_state(&self, m: Move, state: &StateInfo) -> bool {
         self.is_pseudo_legal(m) && self.legal(m, state)
@@ -7393,5 +7476,183 @@ mod tests {
             Board::blast_zone(Square::E4),
             attacks::king_attacks(Square::E4) | Bitboard::square_bb(Square::E4)
         );
+    }
+
+    /// Read the FEN column of the perft table for the counts tests.
+    fn perft_corpus_fens() -> Vec<String> {
+        let content = include_str!("../tests/perft_values.md");
+        let mut fens = Vec::new();
+        for line in content.lines() {
+            if !line.starts_with('|') {
+                continue;
+            }
+            let Some(start) = line.find('`') else {
+                continue;
+            };
+            let Some(len) = line[start + 1..].find('`') else {
+                continue;
+            };
+            fens.push(line[start + 1..start + 1 + len].to_owned());
+        }
+        assert_eq!(fens.len(), 41, "expected 41 perft corpus positions");
+        fens
+    }
+
+    #[test]
+    fn counts_constructor_getters() {
+        let counts = Counts::new(1, 0);
+        assert_eq!(counts.commoners(), 1);
+        assert_eq!(counts.them_commoners(), 0);
+        assert_eq!(counts, Counts::new(1, 0));
+        assert_ne!(counts, Counts::new(0, 1));
+
+        let mut state = StateInfo::new();
+        state.commoners_count = 1;
+        state.them_commoners_count = 1;
+        assert_eq!(Counts::from(&state), Counts::new(1, 1));
+    }
+
+    #[test]
+    fn counts_match_full_populate() {
+        const FIXTURES: &[&str] = &[
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/8/8/8/8/8/8/k7 w - - 0 1",
+            "k7/8/8/8/8/8/8/7K w - - 0 1",
+            "8/8/8/8/8/8/8/8 w - - 0 1",
+        ];
+
+        let corpus = perft_corpus_fens();
+        let fens: Vec<&str> = corpus
+            .iter()
+            .map(String::as_str)
+            .chain(FIXTURES.iter().copied())
+            .collect();
+        let mut checked = 0usize;
+        let mut zero_count = 0usize;
+        for fen in fens {
+            let board = Board::from_fen(fen).expect("counts FEN must parse");
+            let mut full = StateInfo::new();
+            board.populate_state(&mut full);
+            let counts = board.counts();
+            assert_eq!(counts, Counts::from(&full), "{fen}");
+            assert_eq!(counts.commoners(), full.commoners_count, "{fen}");
+            assert_eq!(counts.them_commoners(), full.them_commoners_count, "{fen}");
+            if full.commoners_count == 0 || full.them_commoners_count == 0 {
+                zero_count += 1;
+            }
+            checked += 1;
+        }
+        assert!(checked > 45, "expected the corpus, got {checked}");
+        assert!(zero_count > 0, "corpus should include terminal boards");
+
+        // A seeded walk keeps the same relation while pieces disappear.
+        const START_FENS: &[&str] = &[
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1",
+        ];
+        let mut visited = 0usize;
+        for (i, fen) in START_FENS.iter().enumerate() {
+            for seed in 0..4u64 {
+                let mut board = Board::from_fen(fen).expect("start FEN must parse");
+                let mut rng = Xorshift2::new(0xC2B2_AE3D_27D4_EB4F ^ ((i as u64) << 32) ^ seed);
+                let mut state = StateInfo::new();
+                for _ in 0..80 {
+                    board.populate_state(&mut state);
+                    assert_eq!(board.counts(), Counts::from(&state), "{fen} seed {seed}");
+                    visited += 1;
+                    let mut list = MoveList::new();
+                    crate::movegen::generate_legal_with_state(&board, &state, &mut list);
+                    if list.is_empty() {
+                        break;
+                    }
+                    let idx = (rng.next() % list.len() as u64) as usize;
+                    board.do_move(list.as_slice()[idx], &mut state);
+                }
+            }
+        }
+        assert!(visited > 300, "expected a real walk, got {visited}");
+    }
+
+    #[test]
+    fn populate_counts_preserves_other_fields() {
+        let board = Board::from_fen("4k3/4r3/8/8/8/8/4R3/4K3 w - - 7 23").expect("FEN");
+        let mut state = StateInfo::new();
+        state.checkers = Bitboard::square_bb(Square::A1);
+        state.pinned = Bitboard::square_bb(Square::H8);
+        state.captured_count = 9;
+        state.cap_sq = Some(Square::D4);
+        state.hash = 0xDEAD_BEEF;
+
+        board.populate_counts(&mut state);
+        assert_eq!(state.checkers, Bitboard::square_bb(Square::A1));
+        assert_eq!(state.pinned, Bitboard::square_bb(Square::H8));
+        assert_eq!(state.captured_count, 9);
+        assert_eq!(state.cap_sq, Some(Square::D4));
+        assert_eq!(state.hash, 0xDEAD_BEEF);
+        assert_eq!(state.commoners_count, 1);
+        assert_eq!(state.them_commoners_count, 1);
+
+        // The full writer still overwrites every cached field.
+        board.populate_state(&mut state);
+        assert_eq!(state.checkers, board.checkers());
+        assert_eq!(state.pinned, board.pinned(Color::White));
+        assert_eq!(state.captured_count, 9, "undo fields are not cleared");
+        assert_eq!(state.hash, 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn counts_only_state_is_not_sufficient_for_move_generation() {
+        // The white rook on e2 is pinned by the black rook on e7. A counts-only
+        // state has correct counts but an empty `pinned` set, so the generator's
+        // fast path would accept Re2-d2. This documents the boundary.
+        let board = Board::from_fen("4k3/4r3/8/8/8/8/4R3/4K3 w - - 0 1").expect("FEN");
+        let mut full = StateInfo::new();
+        board.populate_state(&mut full);
+        let mut counts = StateInfo::new();
+        board.populate_counts(&mut counts);
+
+        let mut full_moves = MoveList::new();
+        crate::movegen::generate_legal_with_state(&board, &full, &mut full_moves);
+        let mut counts_moves = MoveList::new();
+        crate::movegen::generate_legal_with_state(&board, &counts, &mut counts_moves);
+        assert_ne!(
+            full_moves.as_slice(),
+            counts_moves.as_slice(),
+            "a counts-only state must not be treated as a full one"
+        );
+        assert!(
+            !full_moves
+                .as_slice()
+                .contains(&Move::from_uci("e2d2").unwrap()),
+            "the pinned rook move is illegal"
+        );
+
+        // And a checkmate: with no checkers cached, the fast path can claim a
+        // legal move where the full state has none.
+        let board =
+            Board::from_fen("rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3")
+                .expect("FEN");
+        board.populate_state(&mut full);
+        board.populate_counts(&mut counts);
+        assert!(!crate::movegen::has_legal_move_with_state(&board, &full));
+        assert!(
+            crate::movegen::has_legal_move_with_state(&board, &counts),
+            "the checkmate fixture should expose the missing checkers"
+        );
+    }
+
+    #[test]
+    fn unfilled_state_rejects_every_move() {
+        let board = Board::new();
+        let state = StateInfo::new();
+        let mut list = MoveList::new();
+        crate::movegen::generate_pseudo_legal(&board, &mut list);
+        assert!(!list.is_empty());
+        for &m in list.as_slice() {
+            assert!(!board.legal(m, &state), "{m}");
+            assert!(!board.is_legal_with_state(m, &state), "{m}");
+        }
     }
 }
