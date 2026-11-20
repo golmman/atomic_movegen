@@ -638,21 +638,23 @@ impl EvasionMask {
         pass: Bitboard(u64::MAX),
     };
 
-    /// Derive the mask from a view and the caller-supplied `StateInfo::checkers`.
+    /// Derive the mask from the node-constant parts already computed by
+    /// [`LegalNode`].
     ///
-    /// Neither side's commoner set is recomputed from attackers; the caller's
-    /// checker data is the only source of the in-check fact. A missing commoner
-    /// or touching commoners disable the mask, matching the game-over guard and
-    /// the commoner immunity in [`PositionView::checkers`].
-    pub(crate) fn from_view(view: &PositionView, checkers: Bitboard) -> Self {
+    /// The caller supplies the occupancy and commoner sets it has already
+    /// snapshotted, so mask construction does not repeat those lookups. The
+    /// caller's `checkers` remains the only source of the in-check fact.
+    fn from_parts(
+        occupied: Bitboard,
+        our_commoners: Bitboard,
+        their_commoners: Bitboard,
+        by_type: &[Bitboard; PieceType::NB],
+        ep_square: Option<Square>,
+        checkers: Bitboard,
+    ) -> Self {
         if checkers.is_empty() {
             return Self::NONE;
         }
-
-        let us = view.side_to_move;
-        let them = us.flip();
-        let our_commoners = view.commoners(us);
-        let their_commoners = view.commoners(them);
         if our_commoners.is_empty() || their_commoners.is_empty() {
             return Self::NONE;
         }
@@ -666,9 +668,9 @@ impl EvasionMask {
         // and our commoner. A leaper cannot be blocked, and two checkers cannot
         // both be answered by one quiet destination.
         let block = if checkers.count() == 1 {
-            let sliders = view.by_type[PieceType::Bishop as usize]
-                | view.by_type[PieceType::Rook as usize]
-                | view.by_type[PieceType::Queen as usize];
+            let sliders = by_type[PieceType::Bishop as usize]
+                | by_type[PieceType::Rook as usize]
+                | by_type[PieceType::Queen as usize];
             if (checkers & sliders).is_empty() {
                 Bitboard::EMPTY
             } else {
@@ -683,11 +685,26 @@ impl EvasionMask {
         // without a second source-square test. The stored en-passant target is
         // added because its destination is empty. The extra destinations can
         // only lose rejections, never accept a move.
-        let mut pass = block | view.occupied() | attacks::king_attacks(ksq);
-        if let Some(ep) = view.ep_square() {
+        let mut pass = block | occupied | attacks::king_attacks(ksq);
+        if let Some(ep) = ep_square {
             pass = pass | Bitboard::square_bb(ep);
         }
         Self { pass }
+    }
+
+    /// Test-only view constructor; production goes through
+    /// [`LegalNode::from_view_with_checkers`], which supplies the parts once.
+    #[cfg(test)]
+    fn from_view(view: &PositionView, checkers: Bitboard) -> Self {
+        let us = view.side_to_move;
+        Self::from_parts(
+            view.occupied(),
+            view.commoners(us),
+            view.commoners(us.flip()),
+            &view.by_type,
+            view.ep_square(),
+            checkers,
+        )
     }
 
     /// Return `true` only when the destination cannot answer the check and does
@@ -740,14 +757,24 @@ impl LegalNode {
     #[inline]
     pub(crate) fn from_view_with_checkers(view: &PositionView, checkers: Bitboard) -> Self {
         let us = view.side_to_move;
+        let occupied = view.occupied();
+        let our_commoners = view.commoners(us);
+        let their_commoners = view.commoners(us.flip());
         Self {
             by_type: view.by_type,
             side_to_move: us,
-            occupied: view.occupied(),
+            occupied,
             their_pieces: view.pieces_color(us.flip()),
-            our_commoners: view.commoners(us),
-            their_commoners: view.commoners(us.flip()),
-            evasion: EvasionMask::from_view(view, checkers),
+            our_commoners,
+            their_commoners,
+            evasion: EvasionMask::from_parts(
+                occupied,
+                our_commoners,
+                their_commoners,
+                &view.by_type,
+                view.ep_square(),
+                checkers,
+            ),
         }
     }
 

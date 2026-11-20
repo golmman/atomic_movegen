@@ -103,11 +103,13 @@ The existing `legality_context_resolves_and_answers` pin is unchanged.
 
 ### Corpus and fixtures
 
-- 87 positions: 6 terminal, 16 in check, 71 not in check, 8 slider-block,
-  8 empty-block, 7 pinned, 4 ep, 19 with castling rights.
-- 1,715 candidates: 8 castling, 2 ep, 1,388 legal.
-- In check: 232 candidates (204 quiet, 27 capture, 0 ep, 1 castling,
-  73 commoner), 125 predicted mask rejections, **0 legal among them**.
+- 90 positions: 6 terminal, 17 in check, 73 not in check, 9 slider-block,
+  8 empty-block, 7 pinned, 4 ep, 19 with castling rights. (The plan-2 run
+  before the follow-up hardening session had 87 positions; three permissive
+  multiple-commoner fixtures were added afterwards.)
+- 1,750 candidates: 8 castling, 2 ep, 1,417 legal.
+- In check: 242 candidates (214 quiet, 27 capture, 0 ep, 1 castling,
+  83 commoner), 130 predicted mask rejections, **0 legal among them**.
 
 ### Seeded play-outs
 
@@ -241,6 +243,10 @@ No dependency was added; `Cargo.lock` changed only its own package version
 - `tests/public_api.rs` — release pin for
   `Board::legality_context_with_state`.
 - `docs/plans/feedback/report_wishlist3_2.md` — this report.
+- `docs/plans/hardening/plan_wishlist3.md`, `report_wishlist3.md` — follow-up
+  hardening session (tests only).
+- `docs/plans/cleanup/plan-code-cleanup6.md`, `report-code-cleanup6.md` —
+  follow-up cleanup (mask construction reuses the node snapshot).
 
 No source module, dependency, `unsafe`, allocation, `StateInfo` layout,
 `ZOBRIST_VERSION`, move order, FEN or terminality changed. Excluding the new

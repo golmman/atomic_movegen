@@ -65,6 +65,11 @@ const EDGE_FIXTURES: &[&str] = &[
     "8/8/8/8/8/8/3kK3/8 w - - 0 1",
     "8/8/8/8/1k6/8/2P5/4K3 w - - 0 1",
     "4k3/8/8/8/8/8/4q3/4K3 w - - 0 1",
+    // Permissive multiple-commoner boards: the mask must stay exact even
+    // though legal atomic play has at most one commoner per side.
+    "4r1k1/8/8/8/8/K7/8/4K3 w - - 0 1",
+    "4r1k1/8/8/8/8/K7/8/4K3 b - - 0 1",
+    "4k3/8/8/8/8/8/8/K3K3 w - - 0 1",
 ];
 
 #[derive(Default)]

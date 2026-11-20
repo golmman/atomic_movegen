@@ -9,7 +9,8 @@ mod common;
 
 use atomic_movegen::movegen::generate_legal_with_state;
 use atomic_movegen::{
-    Board, CONFORMANCE_CASES, Color, Counts, EnPassantMode, FenPolicy, Move, MoveList, StateInfo,
+    Bitboard, Board, CONFORMANCE_CASES, Color, Counts, EnPassantMode, FenPolicy, Move, MoveList,
+    Square, StateInfo,
 };
 
 fn robustness_boards() -> Vec<Board> {
@@ -45,6 +46,9 @@ fn wishlist2_predicates_are_total_for_arbitrary_move_bits() {
     for board in wishlist2_robustness_boards() {
         let counts = board.counts();
         let ctx = board.legality_context(counts);
+        let mut state = StateInfo::new();
+        board.populate_state(&mut state);
+        let state_aware = board.legality_context_with_state(counts, &state);
         std::hint::black_box(ctx.occupied());
         for bits in 0..=u16::MAX {
             let Some(m) = Move::from_bits(bits) else {
@@ -60,10 +64,48 @@ fn wishlist2_predicates_are_total_for_arbitrary_move_bits() {
                 EnPassantMode::Legal,
             ));
             std::hint::black_box(ctx.legal(m));
+            std::hint::black_box(state_aware.legal(m));
         }
         for attacker in [Color::White, Color::Black] {
             std::hint::black_box(board.null_for(attacker));
             std::hint::black_box(board.null_for_advanced(attacker));
+        }
+    }
+}
+
+/// The state-aware context may reject more than the body when the caller's
+/// checker data is stale, but it must never accept a move the shared body
+/// rejects, and it must be total for every move encoding and checker pattern.
+#[test]
+fn state_aware_context_is_rejection_only_for_arbitrary_checker_data() {
+    for board in wishlist2_robustness_boards() {
+        let mut current = StateInfo::new();
+        board.populate_state(&mut current);
+        let counts = board.counts();
+        let checker_sets = [
+            current.checkers,
+            Bitboard::EMPTY,
+            !Bitboard::EMPTY,
+            board.occupied(),
+            Bitboard::square_bb(Square::A1),
+        ];
+        for checkers in checker_sets {
+            let mut state = current;
+            state.checkers = checkers;
+            let ctx = board.legality_context_with_state(counts, &state);
+            assert_eq!(ctx.occupied(), board.occupied());
+            for bits in 0..=u16::MAX {
+                let Some(m) = Move::from_bits(bits) else {
+                    continue;
+                };
+                if ctx.legal(m) {
+                    assert!(
+                        board.legal(m, &state),
+                        "{board:?} checkers={checkers:?} {m}: context accepted \
+                         a move the shared body rejects"
+                    );
+                }
+            }
         }
     }
 }
