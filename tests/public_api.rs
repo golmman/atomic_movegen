@@ -125,6 +125,34 @@ fn legality_context_resolves_and_answers() {
 }
 
 #[test]
+fn state_aware_legality_context_resolves_and_answers() {
+    // The 2.11.0 additive surface: an in-check candidate loop that already has
+    // a populated `StateInfo` opts in with the checker set.
+    let board = Board::from_fen("4r1k1/8/8/8/8/8/8/r1B1K3 w - - 0 1").unwrap();
+    let mut state = StateInfo::new();
+    board.populate_state(&mut state);
+    assert!(!state.checkers.is_empty(), "fixture must be in check");
+
+    let counts: Counts = board.counts();
+    let ctx: LegalityContext = board.legality_context_with_state(counts, &state);
+    assert_eq!(ctx.occupied(), board.occupied());
+
+    let mut pseudo = MoveList::new();
+    generate_pseudo_legal(&board, &mut pseudo);
+    assert!(!pseudo.is_empty());
+    for &m in pseudo.as_slice() {
+        assert_eq!(ctx.legal(m), board.legal(m, &state), "{m}");
+    }
+
+    // The game-over guard is the same as the check-blind constructor's.
+    let terminal =
+        board.legality_context_with_state(Counts::new(0, counts.them_commoners()), &state);
+    for &m in pseudo.as_slice() {
+        assert!(!terminal.legal(m), "{m}");
+    }
+}
+
+#[test]
 fn classification_is_usable_from_a_legal_list() {
     // The consuming shape the API exists for: a caller that already has the
     // legal list classifies without a second legality query.

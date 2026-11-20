@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.11.0] - 2026-11-20
+
+Wishlist-3 release: the additive, opt-in evasion-aware candidate legality
+context (`W10`). No existing legality answer, perft value, move order, FEN
+output, terminality answer, `Always`/`Legal` key, or `ZOBRIST_VERSION` changes.
+The measurement is same-host only; this release makes no claim about a
+downstream search tree, a `.pvr`, proof acceptance, or another machine's wall
+clock.
+
+### Added
+
+- `Board::legality_context_with_state(counts, &state)`: the checker-aware
+  counterpart of `Board::legality_context(counts)` for a caller that already has
+  a populated `StateInfo`. Only `state.checkers` is read; `pinned`, undo data
+  and the remaining fields are ignored, and no state is populated or
+  recomputed. The context builds a rejection-only evasion mask from the checker
+  set and rejects quiet non-commoner moves whose destination cannot answer the
+  check before running the shared legality body. Captures, en passant, commoner
+  moves, castling outside check, quiet moves outside check, and block-ray
+  candidates still use the full shared body; the mask never accepts a move.
+  The check-blind constructor is unchanged. The differential over the perft
+  corpus, conformance/child cases, effect/board/edge fixtures and seeded
+  play-outs finds zero legal moves among the predicted mask rejections. On this
+  host (`hotpath_bench 9 8`) the in-check quiet row is 0.224x the check-blind
+  context on the corpus and 0.287x on the seeded play-outs; in-check all is
+  0.502x and 0.637x; all candidates is 0.951x and 0.988x; out-of-check all is
+  1.013x and 0.995x. Setup costs 0.18–0.26 ns more per node. The small
+  in-check capture/commoner fall-through rows measure up to ~1.05x the
+  check-blind context, but they remain at or below `Board::legal` because they
+  run the same shared body plus one destination test. No primary or
+  out-of-check row regresses beyond the ~2% blocker. A stale or hand-written
+  state can only over-reject, never add an accepting path.
+
 ## [2.10.0] - 2026-11-19
 
 Wishlist-2 release: additive hot-path shapes for counts-only state, a

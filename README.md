@@ -73,7 +73,10 @@ reference implementation.
   `state.checkers` once and rejects quiet non-commoner moves that cannot answer
   the check before running the shared body; captures, en passant, commoner
   moves and block-ray candidates still use the full rules. The check-blind
-  constructor is unchanged.
+  constructor is unchanged. On the same host the state-aware context measures
+  ~0.22–0.29x the check-blind context on in-check quiet candidates and
+  ~0.95–0.99x on all candidates, with ~1.0x on out-of-check candidates; see
+  `report_wishlist3_2.md` for the exact rows.
 - Move effects without a board write: `EffectContext` (built once per position
   with `Board::effect_context()`) classifies every pseudo-legal candidate into a
   `MoveEffect` — capture, blast casualties, checks or explodes the enemy
@@ -235,7 +238,7 @@ Add `atomic-movegen` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-atomic-movegen = "2.10.0"
+atomic-movegen = "2.11.0"
 ```
 
 ```rust

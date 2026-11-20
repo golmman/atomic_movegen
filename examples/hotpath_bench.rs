@@ -288,8 +288,11 @@ fn candidate_entries(boards: &[Board]) -> Vec<CandidateEntry> {
     for board in boards {
         board.populate_state(&mut state);
         let counts = board.counts();
-        let ctx = board.legality_context(counts);
-        let evasion_ctx = board.legality_context_with_state(counts, &state);
+        // Make both contexts opaque to the optimizer. The check-blind
+        // constructor is otherwise constant-folded to the `pass = !0` sentinel,
+        // which makes the comparison measure a specialization no caller gets.
+        let ctx = black_box(board.legality_context(counts));
+        let evasion_ctx = black_box(board.legality_context_with_state(counts, &state));
         let effect = board.effect_context_with_state(&state);
         pseudo.clear();
         generate_pseudo_legal(board, &mut pseudo);
@@ -989,6 +992,72 @@ fn print_summary(
     }
 }
 
+// --- wishlist 3 release summary (plan 2) -----------------------------------
+
+/// The compact W10 release table: setup, all candidates, the in-check split
+/// with its quiet subset, and the out-of-check fall-through cost. Stable row
+/// names; the full per-class tables stay in the plan-1 report.
+fn print_wishlist3_summary(name: &str, rows: &CandidateRows) {
+    const ALL: usize = 5;
+    const IN_CHECK_QUIET: usize = 0;
+    const IN_CHECK_ALL: usize = 5;
+    const OUT_OF_CHECK_QUIET: usize = 6;
+    const OUT_OF_CHECK_ALL: usize = 7;
+
+    println!();
+    println!("wishlist 3 summary — {name}: ns/call (median), ratio to the check-blind context");
+    println!(
+        "  {:<30} {:>9} {:>9} {:>9} {:>9} {:>8}",
+        "row", "Board", "old ctx", "evasion", "ev/ctx", "ev/board"
+    );
+    for (label, board, old, new) in [
+        (
+            "all candidates",
+            rows.board_legal[ALL],
+            rows.context_legal[ALL],
+            rows.evasion_legal[ALL],
+        ),
+        (
+            "in-check all",
+            rows.split_board[IN_CHECK_ALL],
+            rows.split_context[IN_CHECK_ALL],
+            rows.split_evasion[IN_CHECK_ALL],
+        ),
+        (
+            "in-check quiet",
+            rows.split_board[IN_CHECK_QUIET],
+            rows.split_context[IN_CHECK_QUIET],
+            rows.split_evasion[IN_CHECK_QUIET],
+        ),
+        (
+            "out-of-check quiet",
+            rows.split_board[OUT_OF_CHECK_QUIET],
+            rows.split_context[OUT_OF_CHECK_QUIET],
+            rows.split_evasion[OUT_OF_CHECK_QUIET],
+        ),
+        (
+            "out-of-check all",
+            rows.split_board[OUT_OF_CHECK_ALL],
+            rows.split_context[OUT_OF_CHECK_ALL],
+            rows.split_evasion[OUT_OF_CHECK_ALL],
+        ),
+    ] {
+        println!(
+            "  {label:<30} {board:>7.2} ns {old:>7.2} ns {new:>7.2} ns {:>7.3}x {:>7.3}x",
+            new / old,
+            new / board
+        );
+    }
+    println!(
+        "  {:<30} {:>9} {:>7.2} ns {:>7.2} ns {:>7.3}x",
+        "setup (ns/node)",
+        "-",
+        rows.context,
+        rows.evasion_context,
+        rows.evasion_context / rows.context
+    );
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let repeats: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(9).max(3);
@@ -1038,4 +1107,7 @@ fn main() {
         &playout_child_rows,
         &playout_null_rows,
     );
+
+    print_wishlist3_summary("corpus", &corpus_candidate_rows);
+    print_wishlist3_summary("playouts", &playout_candidate_rows);
 }
