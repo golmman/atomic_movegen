@@ -618,6 +618,91 @@ impl LegalData for PositionView {
     }
 }
 
+/// Rejection-only node data for an in-check candidate loop.
+///
+/// The mask is built once from the caller-supplied checker set and only ever
+/// rejects moves. It never accepts a move: every candidate it does not reject
+/// still goes through the shared [`legal_in`] body.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EvasionMask {
+    /// Destinations that may still answer the check or need the shared body:
+    /// the block ray, every occupied square (captures), the commoner's
+    /// neighbourhood (commoner moves), and the stored en-passant target. A
+    /// destination outside this set cannot answer the check.
+    pass: Bitboard,
+}
+
+impl EvasionMask {
+    /// No check information: every destination passes to the shared body.
+    pub(crate) const NONE: Self = Self {
+        pass: Bitboard(u64::MAX),
+    };
+
+    /// Derive the mask from a view and the caller-supplied `StateInfo::checkers`.
+    ///
+    /// Neither side's commoner set is recomputed from attackers; the caller's
+    /// checker data is the only source of the in-check fact. A missing commoner
+    /// or touching commoners disable the mask, matching the game-over guard and
+    /// the commoner immunity in [`PositionView::checkers`].
+    pub(crate) fn from_view(view: &PositionView, checkers: Bitboard) -> Self {
+        if checkers.is_empty() {
+            return Self::NONE;
+        }
+
+        let us = view.side_to_move;
+        let them = us.flip();
+        let our_commoners = view.commoners(us);
+        let their_commoners = view.commoners(them);
+        if our_commoners.is_empty() || their_commoners.is_empty() {
+            return Self::NONE;
+        }
+
+        let ksq = our_commoners.lsb();
+        if !(their_commoners & attacks::king_attacks(ksq)).is_empty() {
+            return Self::NONE;
+        }
+
+        // A single slider can be blocked on the squares strictly between it
+        // and our commoner. A leaper cannot be blocked, and two checkers cannot
+        // both be answered by one quiet destination.
+        let block = if checkers.count() == 1 {
+            let sliders = view.by_type[PieceType::Bishop as usize]
+                | view.by_type[PieceType::Rook as usize]
+                | view.by_type[PieceType::Queen as usize];
+            if (checkers & sliders).is_empty() {
+                Bitboard::EMPTY
+            } else {
+                between_bb(ksq, checkers.lsb())
+            }
+        } else {
+            Bitboard::EMPTY
+        };
+
+        // Expanding the block ray by the occupied set and the commoner
+        // neighbourhood keeps captures and commoner moves on the shared body
+        // without a second source-square test. The stored en-passant target is
+        // added because its destination is empty. The extra destinations can
+        // only lose rejections, never accept a move.
+        let mut pass = block | view.occupied() | attacks::king_attacks(ksq);
+        if let Some(ep) = view.ep_square() {
+            pass = pass | Bitboard::square_bb(ep);
+        }
+        Self { pass }
+    }
+
+    /// Return `true` only when the destination cannot answer the check and does
+    /// not need the shared body.
+    ///
+    /// A move whose destination is in the stored pass set is decided by the
+    /// shared body: captures, en passant, commoner moves, castling, and quiet
+    /// moves onto the block ray or into the commoner's neighbourhood. Only a
+    /// quiet non-commoner destination outside that set is rejected here.
+    #[inline(always)]
+    pub(crate) fn rejects(&self, m: Move) -> bool {
+        !self.pass.contains(m.dest_index())
+    }
+}
+
 /// Node-constant placement for a candidate legality loop.
 ///
 /// The board path reads a [`PositionView`] directly through [`LegalData`]; this
@@ -638,12 +723,22 @@ pub(crate) struct LegalNode {
     our_commoners: Bitboard,
     /// The commoners of the opponent.
     their_commoners: Bitboard,
+    /// Rejection-only in-check data; [`EvasionMask::NONE`] for the check-blind
+    /// constructor.
+    evasion: EvasionMask,
 }
 
 impl LegalNode {
-    /// Snapshot the node-constant data of `view`.
+    /// Snapshot the node-constant data of `view`, without checker information.
     #[inline]
     pub(crate) fn from_view(view: &PositionView) -> Self {
+        Self::from_view_with_checkers(view, Bitboard::EMPTY)
+    }
+
+    /// Snapshot the node-constant data of `view` and build its evasion mask
+    /// from the caller-supplied checker set.
+    #[inline]
+    pub(crate) fn from_view_with_checkers(view: &PositionView, checkers: Bitboard) -> Self {
         let us = view.side_to_move;
         Self {
             by_type: view.by_type,
@@ -652,6 +747,7 @@ impl LegalNode {
             their_pieces: view.pieces_color(us.flip()),
             our_commoners: view.commoners(us),
             their_commoners: view.commoners(us.flip()),
+            evasion: EvasionMask::from_view(view, checkers),
         }
     }
 
@@ -671,6 +767,9 @@ impl LegalNode {
     /// pseudo-legal; a move whose origin is empty returns `false`.
     #[inline]
     pub(crate) fn legal(&self, m: Move) -> bool {
+        if self.evasion.rejects(m) {
+            return false;
+        }
         legal_in(self, m)
     }
 }
@@ -1307,6 +1406,103 @@ mod tests {
         let mut state = StateInfo::new();
         view.populate_state(&mut state);
         state
+    }
+
+    /// The evasion mask is built only from the supplied checker set and stays
+    /// disabled for the check-blind input and for touching commoners.
+    #[test]
+    fn evasion_mask_builds_only_for_live_single_slider_checks() {
+        let start = view_of("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        assert!(
+            !EvasionMask::from_view(&start, Bitboard::EMPTY)
+                .rejects(Move::make_move(Square::E2, Square::E4))
+        );
+
+        let touching = view_of("8/8/8/8/8/8/1k6/2K5 w - - 0 1");
+        let touching_state = state_of(&touching);
+        assert!(touching_state.checkers.is_empty());
+        assert!(
+            !EvasionMask::from_view(&touching, touching_state.checkers)
+                .rejects(Move::make_move(Square::A2, Square::A3))
+        );
+
+        let slider = view_of("4r1k1/8/8/8/8/8/8/4K1N1 w - - 0 1");
+        let slider_state = state_of(&slider);
+        let mask = EvasionMask::from_view(&slider, slider_state.checkers);
+        assert_eq!(
+            mask.pass & !slider.occupied(),
+            between_bb(Square::E1, Square::E8) | attacks::king_attacks(Square::E1),
+            "single rook check exposes its ray plus the commoner moves"
+        );
+
+        let leaper = view_of("4k3/8/8/8/8/5n2/P7/4K3 w - - 0 1");
+        let leaper_state = state_of(&leaper);
+        let leaper_mask = EvasionMask::from_view(&leaper, leaper_state.checkers);
+        assert!(
+            leaper_mask.pass & !leaper.occupied() & !attacks::king_attacks(Square::E1)
+                == Bitboard::EMPTY,
+            "a knight check cannot be blocked"
+        );
+
+        let double = view_of("4k3/8/8/8/1b6/8/4r3/4K1N1 w - - 0 1");
+        let double_state = state_of(&double);
+        assert_eq!(double_state.checkers.count(), 2);
+        let double_mask = EvasionMask::from_view(&double, double_state.checkers);
+        assert!(
+            double_mask.pass & !double.occupied() & !attacks::king_attacks(Square::E1)
+                == Bitboard::EMPTY,
+            "double check needs the body"
+        );
+
+        let adjacent = view_of("4k3/8/8/8/8/8/8/3rK3 w - - 0 1");
+        let adjacent_state = state_of(&adjacent);
+        assert_eq!(adjacent_state.checkers.count(), 1);
+        let adjacent_mask = EvasionMask::from_view(&adjacent, adjacent_state.checkers);
+        assert!(
+            adjacent_mask.pass & !adjacent.occupied() & !attacks::king_attacks(Square::E1)
+                == Bitboard::EMPTY,
+            "an adjacent slider has no intervening square"
+        );
+    }
+
+    /// The prefilter rejects only quiet non-commoner destinations outside the
+    /// pass set while in check; captures, en passant, commoner moves and
+    /// castling fall through to the shared body.
+    #[test]
+    fn evasion_mask_rejects_only_unanswerable_quiet_moves() {
+        let view = view_of("4r1k1/8/8/8/8/8/8/4K1N1 w - - 0 1");
+        let state = state_of(&view);
+        let mask = EvasionMask::from_view(&view, state.checkers);
+        assert!(!mask.rejects(Move::make_move(Square::G1, Square::E2)));
+        assert!(mask.rejects(Move::make_move(Square::G1, Square::F3)));
+        assert!(!mask.rejects(Move::make_move(Square::E1, Square::D1)));
+        assert!(
+            !mask.rejects(Move::make_move(Square::G1, Square::E8)),
+            "a capture falls through even outside the block ray"
+        );
+        let not_in_check = EvasionMask::NONE;
+        assert!(!not_in_check.rejects(Move::make_move(Square::G1, Square::F3)));
+
+        let castle_view = view_of("r3k2r/8/8/8/8/8/4r3/R3K2R w KQkq - 0 1");
+        let castle_state = state_of(&castle_view);
+        let castle_mask = EvasionMask::from_view(&castle_view, castle_state.checkers);
+        assert!(
+            !castle_mask.rejects(Move::make_castling(Square::E1, Square::H1)),
+            "castling keeps the shared body, which rejects it while in check"
+        );
+
+        let ep_view = view_of("4k3/8/8/3pP3/4K3/8/P7/8 w - d6 0 1");
+        let ep_state = state_of(&ep_view);
+        let ep_mask = EvasionMask::from_view(&ep_view, ep_state.checkers);
+        assert!(
+            !ep_mask.rejects(Move::make_enpassant(Square::E5, Square::D6)),
+            "the stored en-passant target always falls through"
+        );
+
+        let leaper = view_of("4k3/8/8/8/8/5n2/P7/4K3 w - - 0 1");
+        let leaper_state = state_of(&leaper);
+        let leaper_mask = EvasionMask::from_view(&leaper, leaper_state.checkers);
+        assert!(leaper_mask.rejects(Move::make_move(Square::A2, Square::A3)));
     }
 
     /// The prefix decides extinction in both directions and the commoner-only

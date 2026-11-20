@@ -68,7 +68,12 @@ reference implementation.
   (`cargo run --release --example hotpath_bench`) measures a ~0.94–0.95x
   per-candidate ratio over `Board::legal()` with a populated state on this
   crate's corpus and seeded play-outs; see the wishlist-2 plan report for the
-  exact run.
+  exact run. An in-check candidate loop can opt in to
+  `Board::legality_context_with_state(counts, &state)`, which reads
+  `state.checkers` once and rejects quiet non-commoner moves that cannot answer
+  the check before running the shared body; captures, en passant, commoner
+  moves and block-ray candidates still use the full rules. The check-blind
+  constructor is unchanged.
 - Move effects without a board write: `EffectContext` (built once per position
   with `Board::effect_context()`) classifies every pseudo-legal candidate into a
   `MoveEffect` — capture, blast casualties, checks or explodes the enemy

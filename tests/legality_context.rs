@@ -18,7 +18,9 @@
 mod common;
 
 use atomic_movegen::movegen::{generate_legal_with_state, generate_pseudo_legal};
-use atomic_movegen::{Board, Counts, LegalityContext, MoveList, StateInfo};
+use atomic_movegen::{
+    Bitboard, Board, Counts, LegalityContext, Move, MoveList, PieceType, StateInfo, attacks,
+};
 
 /// The effect fixtures (`src/effects.rs::tests::CORPUS`), copied here because
 /// that corpus is crate-private. They exercise quiet moves, captures, en
@@ -70,6 +72,9 @@ struct Stats {
     positions: usize,
     terminal_positions: usize,
     in_check_positions: usize,
+    not_in_check_positions: usize,
+    slider_block_positions: usize,
+    empty_block_positions: usize,
     pinned_positions: usize,
     ep_positions: usize,
     castling_right_positions: usize,
@@ -77,6 +82,53 @@ struct Stats {
     ep_candidates: usize,
     candidates: usize,
     legal_candidates: usize,
+    in_check_candidates: usize,
+    in_check_quiet_candidates: usize,
+    in_check_capture_candidates: usize,
+    in_check_ep_candidates: usize,
+    in_check_castling_candidates: usize,
+    in_check_commoner_candidates: usize,
+    mask_rejections: usize,
+    legal_mask_rejections: usize,
+}
+
+/// True when the move's origin holds a commoner of the side to move.
+fn is_our_commoner(board: &Board, m: Move) -> bool {
+    let piece = board.piece_on(m.from_sq());
+    piece.type_of() == Some(PieceType::Commoner) && piece.color() == Some(board.side_to_move())
+}
+
+/// The block mask the production context derives from `state.checkers`, using
+/// only public data. `None` means "not in check" (no rejection is predicted).
+fn predicted_block(board: &Board, state: &StateInfo) -> Option<Bitboard> {
+    if state.checkers.is_empty() {
+        return None;
+    }
+    if state.checkers.count() == 1 {
+        let sliders = board.pieces_pt(PieceType::Bishop)
+            | board.pieces_pt(PieceType::Rook)
+            | board.pieces_pt(PieceType::Queen);
+        if state.checkers & sliders != Bitboard::EMPTY {
+            let commoner = board.commoners(board.side_to_move()).lsb();
+            return Some(attacks::between(commoner, state.checkers.lsb()));
+        }
+    }
+    Some(Bitboard::EMPTY)
+}
+
+/// Predict whether the evasion prefilter rejects `m`, from public data.
+/// `None` means the position is not in check.
+fn predicted_rejection(board: &Board, state: &StateInfo, m: Move) -> Option<bool> {
+    let block = predicted_block(board, state)?;
+    let commoner = board.commoners(board.side_to_move()).lsb();
+    // The production mask lets captures (occupied), commoner moves (the
+    // commoner's neighbourhood) and the stored en-passant target fall through
+    // before testing the destination.
+    let mut pass = block | board.occupied() | attacks::king_attacks(commoner);
+    if let Some(ep) = board.ep_square() {
+        pass = pass | Bitboard::square_bb(ep);
+    }
+    Some(pass & Bitboard::square_bb(m.to_sq()) == Bitboard::EMPTY)
 }
 
 fn check_position(board: &Board, stats: &mut Stats) {
@@ -85,7 +137,9 @@ fn check_position(board: &Board, stats: &mut Stats) {
     let counts = board.counts();
     assert_eq!(counts, Counts::from(&full), "{board:?}");
     let ctx: LegalityContext = board.legality_context(counts);
+    let evasion_ctx = board.legality_context_with_state(counts, &full);
     assert_eq!(ctx.occupied(), board.occupied(), "{board:?}");
+    assert_eq!(evasion_ctx.occupied(), board.occupied(), "{board:?}");
 
     let mut counts_only = StateInfo::new();
     board.populate_counts(&mut counts_only);
@@ -99,6 +153,13 @@ fn check_position(board: &Board, stats: &mut Stats) {
     }
     if !full.checkers.is_empty() {
         stats.in_check_positions += 1;
+        if predicted_block(board, &full).is_some_and(|block| block.is_empty()) {
+            stats.empty_block_positions += 1;
+        } else {
+            stats.slider_block_positions += 1;
+        }
+    } else {
+        stats.not_in_check_positions += 1;
     }
     if !full.pinned.is_empty() {
         stats.pinned_positions += 1;
@@ -121,7 +182,47 @@ fn check_position(board: &Board, stats: &mut Stats) {
             stats.ep_candidates += 1;
         }
         let full_legal = board.legal(m, &full);
+        let evasion_legal = evasion_ctx.legal(m);
+        assert_eq!(
+            evasion_legal,
+            full_legal,
+            "{} {m}: evasion context",
+            board.fen()
+        );
         assert_eq!(ctx.legal(m), full_legal, "{} {m}: full", board.fen());
+
+        if let Some(rejected) = predicted_rejection(board, &full, m) {
+            stats.in_check_candidates += 1;
+            let capture = board.is_capture(m);
+            if is_our_commoner(board, m) {
+                stats.in_check_commoner_candidates += 1;
+            }
+            if m.is_castling() {
+                stats.in_check_castling_candidates += 1;
+            } else if m.is_en_passant() {
+                stats.in_check_ep_candidates += 1;
+            } else if capture {
+                stats.in_check_capture_candidates += 1;
+            } else {
+                stats.in_check_quiet_candidates += 1;
+            }
+            if rejected {
+                stats.mask_rejections += 1;
+                assert!(
+                    !full_legal,
+                    "{} {m}: mask rejection must be illegal under Board::legal",
+                    board.fen()
+                );
+                assert!(
+                    !evasion_legal,
+                    "{} {m}: production prefilter must reject",
+                    board.fen()
+                );
+                if full_legal {
+                    stats.legal_mask_rejections += 1;
+                }
+            }
+        }
         assert_eq!(
             ctx.legal(m),
             board.legal(m, &counts_only),
@@ -143,6 +244,11 @@ fn check_position(board: &Board, stats: &mut Stats) {
     generate_legal_with_state(board, &full, &mut legal);
     for &m in legal.as_slice() {
         assert!(ctx.legal(m), "{} {m}: legal member", board.fen());
+        assert!(
+            evasion_ctx.legal(m),
+            "{} {m}: evasion legal member",
+            board.fen()
+        );
     }
 
     // The context is a snapshot, not a board write.
@@ -182,6 +288,26 @@ fn corpus_and_fixtures_match_board_legal() {
         "corpus must include terminals"
     );
     assert!(stats.in_check_positions > 0, "corpus must include checks");
+    assert!(
+        stats.slider_block_positions > 0,
+        "corpus must include a single slider check with a block ray"
+    );
+    assert!(
+        stats.empty_block_positions > 0,
+        "corpus must include an unblockable or double check"
+    );
+    assert!(
+        stats.in_check_quiet_candidates > 0,
+        "corpus must include quiet candidates in check"
+    );
+    assert!(
+        stats.mask_rejections > 0,
+        "corpus must exercise mask rejections"
+    );
+    assert_eq!(
+        stats.legal_mask_rejections, 0,
+        "the corpus must reject no legal move"
+    );
     assert!(stats.pinned_positions > 0, "corpus must include pins");
     assert!(stats.ep_positions > 0, "corpus must include ep targets");
     assert!(stats.ep_candidates > 0, "corpus must include ep candidates");
@@ -197,10 +323,13 @@ fn corpus_and_fixtures_match_board_legal() {
     assert!(stats.legal_candidates > 0);
 
     eprintln!(
-        "legality context corpus: {} positions ({} terminal, {} in check, {} pinned, {} ep, {} with rights), {} candidates ({} castling, {} ep), {} legal",
+        "legality context corpus: {} positions ({} terminal, {} in check, {} not in check, {} slider-block, {} empty-block, {} pinned, {} ep, {} with rights), {} candidates ({} castling, {} ep), {} legal",
         stats.positions,
         stats.terminal_positions,
         stats.in_check_positions,
+        stats.not_in_check_positions,
+        stats.slider_block_positions,
+        stats.empty_block_positions,
         stats.pinned_positions,
         stats.ep_positions,
         stats.castling_right_positions,
@@ -208,6 +337,17 @@ fn corpus_and_fixtures_match_board_legal() {
         stats.castling_candidates,
         stats.ep_candidates,
         stats.legal_candidates
+    );
+    eprintln!(
+        "legality context corpus in check: {} candidates ({} quiet, {} capture, {} ep, {} castling, {} commoner), {} predicted mask rejections, {} legal among them",
+        stats.in_check_candidates,
+        stats.in_check_quiet_candidates,
+        stats.in_check_capture_candidates,
+        stats.in_check_ep_candidates,
+        stats.in_check_castling_candidates,
+        stats.in_check_commoner_candidates,
+        stats.mask_rejections,
+        stats.legal_mask_rejections,
     );
 }
 
@@ -222,6 +362,26 @@ fn seeded_playouts_match_board_legal() {
     assert!(stats.positions > 14_000, "expected a long walk");
     assert!(stats.terminal_positions > 0, "walk must reach terminals");
     assert!(stats.in_check_positions > 0, "walk must reach checks");
+    assert!(
+        stats.slider_block_positions > 0,
+        "walk must reach a single slider check with a block ray"
+    );
+    assert!(
+        stats.empty_block_positions > 0,
+        "walk must reach an unblockable or double check"
+    );
+    assert!(
+        stats.in_check_quiet_candidates > 0,
+        "walk must reach quiet candidates in check"
+    );
+    assert!(
+        stats.mask_rejections > 0,
+        "walk must exercise mask rejections"
+    );
+    assert_eq!(
+        stats.legal_mask_rejections, 0,
+        "the walk must reject no legal move"
+    );
     assert!(stats.pinned_positions > 0, "walk must reach pins");
     assert!(stats.ep_positions > 0, "walk must reach ep targets");
     assert!(
@@ -239,10 +399,13 @@ fn seeded_playouts_match_board_legal() {
     assert!(stats.legal_candidates > 50_000);
 
     eprintln!(
-        "legality context play-outs: {} positions ({} terminal, {} in check, {} pinned, {} ep, {} with rights), {} candidates ({} castling, {} ep), {} legal",
+        "legality context play-outs: {} positions ({} terminal, {} in check, {} not in check, {} slider-block, {} empty-block, {} pinned, {} ep, {} with rights), {} candidates ({} castling, {} ep), {} legal",
         stats.positions,
         stats.terminal_positions,
         stats.in_check_positions,
+        stats.not_in_check_positions,
+        stats.slider_block_positions,
+        stats.empty_block_positions,
         stats.pinned_positions,
         stats.ep_positions,
         stats.castling_right_positions,
@@ -250,6 +413,255 @@ fn seeded_playouts_match_board_legal() {
         stats.castling_candidates,
         stats.ep_candidates,
         stats.legal_candidates
+    );
+    eprintln!(
+        "legality context play-outs in check: {} candidates ({} quiet, {} capture, {} ep, {} castling, {} commoner), {} predicted mask rejections, {} legal among them",
+        stats.in_check_candidates,
+        stats.in_check_quiet_candidates,
+        stats.in_check_capture_candidates,
+        stats.in_check_ep_candidates,
+        stats.in_check_castling_candidates,
+        stats.in_check_commoner_candidates,
+        stats.mask_rejections,
+        stats.legal_mask_rejections,
+    );
+}
+
+fn pseudo_moves(board: &Board) -> MoveList {
+    let mut pseudo = MoveList::new();
+    generate_pseudo_legal(board, &mut pseudo);
+    pseudo
+}
+
+fn normal_move(board: &Board, from: atomic_movegen::Square, to: atomic_movegen::Square) -> Move {
+    *pseudo_moves(board)
+        .as_slice()
+        .iter()
+        .find(|m| {
+            m.move_type() == atomic_movegen::types::MoveType::Normal
+                && m.from_sq() == from
+                && m.to_sq() == to
+        })
+        .unwrap_or_else(|| panic!("{board:?}: missing normal move {from:?}{to:?}"))
+}
+
+fn assert_verdict(board: &Board, state: &StateInfo, m: Move, expected: bool) {
+    let ctx = board.legality_context_with_state(board.counts(), state);
+    assert_eq!(ctx.occupied(), board.occupied(), "{board:?}: occupancy");
+    assert_eq!(ctx.legal(m), expected, "{board:?} {m}: context verdict");
+    assert_eq!(
+        board.legal(m, state),
+        expected,
+        "{board:?} {m}: board verdict"
+    );
+}
+
+#[test]
+fn focused_evasion_fixtures() {
+    use atomic_movegen::Square;
+
+    // One slider check: g1e2 is inside the e-file block ray, g1f3 is outside
+    // it, and the commoner move e1d1 falls through.
+    let board = Board::from_fen("4r1k1/8/8/8/8/8/8/4K1N1 w - - 0 1").unwrap();
+    let mut state = StateInfo::new();
+    board.populate_state(&mut state);
+    assert_eq!(state.checkers.count(), 1);
+    assert_eq!(
+        predicted_block(&board, &state),
+        Some(attacks::between(Square::E1, Square::E8))
+    );
+    assert_verdict(
+        &board,
+        &state,
+        normal_move(&board, Square::G1, Square::E2),
+        true,
+    );
+    assert_verdict(
+        &board,
+        &state,
+        normal_move(&board, Square::G1, Square::F3),
+        false,
+    );
+    assert_verdict(
+        &board,
+        &state,
+        normal_move(&board, Square::E1, Square::D1),
+        true,
+    );
+
+    // Double check: no quiet move can answer both checkers.
+    let board = Board::from_fen("4k3/8/8/8/1b6/8/4r3/4K1N1 w - - 0 1").unwrap();
+    let mut state = StateInfo::new();
+    board.populate_state(&mut state);
+    assert_eq!(state.checkers.count(), 2);
+    assert_eq!(predicted_block(&board, &state), Some(Bitboard::EMPTY));
+    assert_verdict(
+        &board,
+        &state,
+        normal_move(&board, Square::G1, Square::F3),
+        false,
+    );
+    assert_verdict(
+        &board,
+        &state,
+        normal_move(&board, Square::E1, Square::D1),
+        true,
+    );
+
+    // Knight check: a2a3 cannot block a leaper.
+    let board = Board::from_fen("4k3/8/8/8/8/5n2/P7/4K3 w - - 0 1").unwrap();
+    let mut state = StateInfo::new();
+    board.populate_state(&mut state);
+    assert_eq!(state.checkers.count(), 1);
+    assert_eq!(predicted_block(&board, &state), Some(Bitboard::EMPTY));
+    assert_verdict(
+        &board,
+        &state,
+        normal_move(&board, Square::A2, Square::A3),
+        false,
+    );
+    assert_verdict(
+        &board,
+        &state,
+        normal_move(&board, Square::E1, Square::D1),
+        true,
+    );
+
+    // Pawn check: same leaper reasoning.
+    let board = Board::from_fen("4k3/8/8/8/8/8/P2p4/4K3 w - - 0 1").unwrap();
+    let mut state = StateInfo::new();
+    board.populate_state(&mut state);
+    assert_eq!(state.checkers.count(), 1);
+    assert_eq!(predicted_block(&board, &state), Some(Bitboard::EMPTY));
+    assert_verdict(
+        &board,
+        &state,
+        normal_move(&board, Square::A2, Square::A3),
+        false,
+    );
+    assert_verdict(
+        &board,
+        &state,
+        normal_move(&board, Square::E1, Square::D1),
+        true,
+    );
+
+    // Touching commoners grant immunity: no checker data and no rejection.
+    let board = Board::from_fen("8/8/8/8/8/8/1k6/2K5 w - - 0 1").unwrap();
+    let mut state = StateInfo::new();
+    board.populate_state(&mut state);
+    assert!(state.checkers.is_empty());
+    assert_eq!(predicted_block(&board, &state), None);
+    let ctx = board.legality_context_with_state(board.counts(), &state);
+    for &m in pseudo_moves(&board).as_slice() {
+        assert_eq!(ctx.legal(m), board.legal(m, &state), "{board:?} {m}");
+        assert_eq!(predicted_rejection(&board, &state, m), None);
+    }
+
+    // Castling while in check: both pseudo-legal castling candidates are
+    // rejected by the mask and by the shared body.
+    let board = Board::from_fen("r3k2r/8/8/8/8/8/4r3/R3K2R w KQkq - 0 1").unwrap();
+    let mut state = StateInfo::new();
+    board.populate_state(&mut state);
+    assert!(!state.checkers.is_empty());
+    let pseudo = pseudo_moves(&board);
+    let castles: Vec<Move> = pseudo
+        .as_slice()
+        .iter()
+        .copied()
+        .filter(|m| m.is_castling() && m.from_sq() == Square::E1)
+        .collect();
+    assert_eq!(castles.len(), 2, "both castling candidates must be present");
+    for m in castles {
+        assert_eq!(
+            predicted_rejection(&board, &state, m),
+            Some(false),
+            "castling falls through to the shared body"
+        );
+        assert_verdict(&board, &state, m, false);
+    }
+
+    // En passant in check: the mask must let it fall through, and this one is
+    // legal because the ep capture removes the checking pawn.
+    let board = Board::from_fen("4k3/8/8/3pP3/4K3/8/P7/8 w - d6 0 1").unwrap();
+    let mut state = StateInfo::new();
+    board.populate_state(&mut state);
+    assert!(!state.checkers.is_empty());
+    let ep = *pseudo_moves(&board)
+        .as_slice()
+        .iter()
+        .find(|m| m.is_en_passant() && m.from_sq() == Square::E5 && m.to_sq() == Square::D6)
+        .expect("ep candidate");
+    assert_eq!(predicted_rejection(&board, &state, ep), Some(false));
+    assert_verdict(&board, &state, ep, true);
+
+    // A promotion push that blocks the check: all four encodings fall through
+    // the mask and are legal.
+    let board = Board::from_fen("K6r/6P1/4k3/8/8/8/8/8 w - - 0 1").unwrap();
+    let mut state = StateInfo::new();
+    board.populate_state(&mut state);
+    assert_eq!(state.checkers.count(), 1);
+    let promotions: Vec<Move> = pseudo_moves(&board)
+        .as_slice()
+        .iter()
+        .copied()
+        .filter(|m| {
+            m.move_type() == atomic_movegen::types::MoveType::Promotion
+                && m.from_sq() == Square::G7
+                && m.to_sq() == Square::G8
+        })
+        .collect();
+    assert_eq!(promotions.len(), 4, "all four promotions must be present");
+    for m in promotions {
+        assert_eq!(predicted_rejection(&board, &state, m), Some(false));
+        assert_verdict(&board, &state, m, true);
+    }
+
+    // A quiet move that opens a second line to the commoner. The destination
+    // is outside the sole slider's block ray, so the mask rejects it directly.
+    let board = Board::from_fen("4r1k1/8/8/8/8/8/8/rN2K3 w - - 0 1").unwrap();
+    let mut state = StateInfo::new();
+    board.populate_state(&mut state);
+    assert_verdict(
+        &board,
+        &state,
+        normal_move(&board, Square::B1, Square::D2),
+        false,
+    );
+    assert_verdict(
+        &board,
+        &state,
+        normal_move(&board, Square::E1, Square::D1),
+        true,
+    );
+
+    // The same idea with the destination *inside* the block ray: c1e3 blocks
+    // the e8 rook but uncovers the a1 rook along the first rank. The mask
+    // accepts it into the shared body, which must reject it.
+    let board = Board::from_fen("4r1k1/8/8/8/8/8/8/r1B1K3 w - - 0 1").unwrap();
+    let mut state = StateInfo::new();
+    board.populate_state(&mut state);
+    assert_eq!(state.checkers.count(), 1);
+    let block = predicted_block(&board, &state).expect("in check");
+    assert!(
+        block & Bitboard::square_bb(Square::E3) != Bitboard::EMPTY,
+        "c1e3 must land on the block ray"
+    );
+    assert_eq!(
+        predicted_rejection(&board, &state, normal_move(&board, Square::C1, Square::E3)),
+        Some(false)
+    );
+    assert_verdict(
+        &board,
+        &state,
+        normal_move(&board, Square::C1, Square::E3),
+        false,
+    );
+    assert_verdict(
+        &board,
+        &state,
+        normal_move(&board, Square::E1, Square::D1),
+        true,
     );
 }
 

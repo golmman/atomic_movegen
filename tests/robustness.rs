@@ -9,7 +9,7 @@ mod common;
 
 use atomic_movegen::movegen::generate_legal_with_state;
 use atomic_movegen::{
-    Board, CONFORMANCE_CASES, Color, EnPassantMode, FenPolicy, Move, MoveList, StateInfo,
+    Board, CONFORMANCE_CASES, Color, Counts, EnPassantMode, FenPolicy, Move, MoveList, StateInfo,
 };
 
 fn robustness_boards() -> Vec<Board> {
@@ -65,6 +65,31 @@ fn wishlist2_predicates_are_total_for_arbitrary_move_bits() {
             std::hint::black_box(board.null_for(attacker));
             std::hint::black_box(board.null_for_advanced(attacker));
         }
+    }
+}
+
+#[test]
+fn state_aware_context_keeps_the_game_over_guard_over_current_checkers() {
+    let board = Board::from_fen("4r1k1/8/8/8/8/8/8/4K1N1 w - - 0 1").unwrap();
+    let mut state = StateInfo::new();
+    board.populate_state(&mut state);
+    assert!(!state.checkers.is_empty(), "fixture must be in check");
+
+    // The checkers are current, but the counts deliberately say the game is
+    // over. The guard wins; the current checker data must not add an accepting
+    // path or panic.
+    let ctx = board.legality_context_with_state(Counts::new(0, 0), &state);
+    let mut pseudo = MoveList::new();
+    atomic_movegen::movegen::generate_pseudo_legal(&board, &mut pseudo);
+    assert!(!pseudo.is_empty());
+    for &m in pseudo.as_slice() {
+        assert!(!ctx.legal(m), "{m}: counts-zero context");
+    }
+
+    // A zero opponent count is the other terminal direction.
+    let ctx = board.legality_context_with_state(Counts::new(1, 0), &state);
+    for &m in pseudo.as_slice() {
+        assert!(!ctx.legal(m), "{m}: opponent-zero context");
     }
 }
 

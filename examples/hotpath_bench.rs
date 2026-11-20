@@ -246,6 +246,7 @@ struct CandidateEntry {
     state: StateInfo,
     counts: Counts,
     ctx: LegalityContext,
+    evasion_ctx: LegalityContext,
     effect: EffectContext,
     moves: Vec<(u8, Move)>,
     child_moves: Vec<(u8, Move)>,
@@ -288,6 +289,7 @@ fn candidate_entries(boards: &[Board]) -> Vec<CandidateEntry> {
         board.populate_state(&mut state);
         let counts = board.counts();
         let ctx = board.legality_context(counts);
+        let evasion_ctx = board.legality_context_with_state(counts, &state);
         let effect = board.effect_context_with_state(&state);
         pseudo.clear();
         generate_pseudo_legal(board, &mut pseudo);
@@ -309,6 +311,7 @@ fn candidate_entries(boards: &[Board]) -> Vec<CandidateEntry> {
             state,
             counts,
             ctx,
+            evasion_ctx,
             effect,
             moves,
             child_moves,
@@ -319,9 +322,15 @@ fn candidate_entries(boards: &[Board]) -> Vec<CandidateEntry> {
 
 struct CandidateRows {
     context: f64,
+    evasion_context: f64,
     classes: [usize; 6],
     board_legal: [f64; 6],
     context_legal: [f64; 6],
+    evasion_legal: [f64; 6],
+    split_classes: [usize; 8],
+    split_board: [f64; 8],
+    split_context: [f64; 8],
+    split_evasion: [f64; 8],
 }
 
 const CANDIDATE_CLASSES: [(&str, u8); 6] = [
@@ -333,10 +342,44 @@ const CANDIDATE_CLASSES: [(&str, u8); 6] = [
     ("all", CLASS_ALL),
 ];
 
+/// Check-state split of the candidate rows. The label names the in-check class
+/// (`in-check-...`) or the out-of-check control (`out-of-check-...`).
+const EVASION_CLASSES: [(&str, u8, bool); 8] = [
+    ("in-check-quiet", CLASS_QUIET, true),
+    ("in-check-capture", CLASS_CAPTURE, true),
+    ("in-check-en-passant", CLASS_EN_PASSANT, true),
+    ("in-check-castling", CLASS_CASTLING, true),
+    ("in-check-commoner", CLASS_COMMONER, true),
+    ("in-check-all", CLASS_ALL, true),
+    ("out-of-check-quiet", CLASS_QUIET, false),
+    ("out-of-check-all", CLASS_ALL, false),
+];
+
 fn class_calls(entries: &[CandidateEntry], mask: u8) -> Vec<(usize, Move)> {
     entries
         .iter()
         .enumerate()
+        .flat_map(|(index, entry)| {
+            entry
+                .moves
+                .iter()
+                .filter(|(class, _)| *class & mask != 0)
+                .map(move |&(_, m)| (index, m))
+        })
+        .collect()
+}
+
+/// The in-check/out-of-check split of the plan-1 rows. `in_check` is the
+/// entry's already-populated `StateInfo`; classification happens before timing.
+fn class_calls_in_check(
+    entries: &[CandidateEntry],
+    mask: u8,
+    in_check: bool,
+) -> Vec<(usize, Move)> {
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| (!entry.state.checkers.is_empty()) == in_check)
         .flat_map(|(index, entry)| {
             entry
                 .moves
@@ -355,22 +398,29 @@ fn class_passes(calls: usize, repeats: usize, passes: usize) -> usize {
     passes.max(target.max(1))
 }
 
+#[derive(Clone, Copy)]
+enum LegalityRow {
+    Board,
+    Context,
+    Evasion,
+}
+
 fn bench_class(
     entries: &[CandidateEntry],
     calls: &[(usize, Move)],
     repeats: usize,
     passes: usize,
-    context: bool,
+    row: LegalityRow,
 ) -> f64 {
     let passes = class_passes(calls.len(), repeats, passes);
     bench(
         || {
             for &(index, m) in calls {
                 let entry = &entries[index];
-                let verdict = if context {
-                    entry.ctx.legal(black_box(m))
-                } else {
-                    entry.board.legal(black_box(m), &entry.state)
+                let verdict = match row {
+                    LegalityRow::Board => entry.board.legal(black_box(m), &entry.state),
+                    LegalityRow::Context => entry.ctx.legal(black_box(m)),
+                    LegalityRow::Evasion => entry.evasion_ctx.legal(black_box(m)),
                 };
                 black_box(verdict);
             }
@@ -384,10 +434,14 @@ fn bench_class(
 fn measure_candidates(entries: &[CandidateEntry], repeats: usize, passes: usize) -> CandidateRows {
     for entry in entries {
         assert_eq!(entry.ctx.occupied(), entry.board.occupied());
-        assert_eq!(entry.ctx.legal(entry.moves[0].1), {
-            let m = entry.moves[0].1;
-            entry.board.legal(m, &entry.state)
-        });
+        assert_eq!(entry.evasion_ctx.occupied(), entry.board.occupied());
+        for &(_, m) in &entry.moves {
+            assert_eq!(
+                entry.evasion_ctx.legal(m),
+                entry.board.legal(m, &entry.state),
+                "evasion context must be exact"
+            );
+        }
     }
 
     let context = bench(
@@ -401,24 +455,64 @@ fn measure_candidates(entries: &[CandidateEntry], repeats: usize, passes: usize)
         passes,
     );
 
+    let evasion_context = bench(
+        || {
+            for entry in entries {
+                black_box(
+                    entry
+                        .board
+                        .legality_context_with_state(black_box(entry.counts), &entry.state),
+                );
+            }
+        },
+        entries.len(),
+        repeats,
+        passes,
+    );
+
     let mut classes = [0usize; 6];
     let mut board_legal = [0.0; 6];
     let mut context_legal = [0.0; 6];
+    let mut evasion_legal = [0.0; 6];
     for (index, (_, mask)) in CANDIDATE_CLASSES.iter().enumerate() {
         let calls = class_calls(entries, *mask);
         classes[index] = calls.len();
         if calls.is_empty() {
             continue;
         }
-        board_legal[index] = bench_class(entries, &calls, repeats, passes, false);
-        context_legal[index] = bench_class(entries, &calls, repeats, passes, true);
+        board_legal[index] = bench_class(entries, &calls, repeats, passes, LegalityRow::Board);
+        // The evasion context is between the two neighbors in `LegalityRow`;
+        // keep the run order interleaved so drift affects all rows.
+        context_legal[index] = bench_class(entries, &calls, repeats, passes, LegalityRow::Context);
+        evasion_legal[index] = bench_class(entries, &calls, repeats, passes, LegalityRow::Evasion);
+    }
+
+    let mut split_classes = [0usize; 8];
+    let mut split_board = [0.0; 8];
+    let mut split_context = [0.0; 8];
+    let mut split_evasion = [0.0; 8];
+    for (index, (_, mask, in_check)) in EVASION_CLASSES.iter().enumerate() {
+        let calls = class_calls_in_check(entries, *mask, *in_check);
+        split_classes[index] = calls.len();
+        if calls.is_empty() {
+            continue;
+        }
+        split_board[index] = bench_class(entries, &calls, repeats, passes, LegalityRow::Board);
+        split_context[index] = bench_class(entries, &calls, repeats, passes, LegalityRow::Context);
+        split_evasion[index] = bench_class(entries, &calls, repeats, passes, LegalityRow::Evasion);
     }
 
     CandidateRows {
         context,
+        evasion_context,
         classes,
         board_legal,
         context_legal,
+        evasion_legal,
+        split_classes,
+        split_board,
+        split_context,
+        split_evasion,
     }
 }
 
@@ -434,8 +528,18 @@ fn print_candidates(name: &str, entries: &[CandidateEntry], rows: &CandidateRows
         "legality_context", rows.context
     );
     println!(
-        "  {:<20} {:>10} {:>12} {:>12} {:>9}",
-        "class", "calls", "Board::legal", "ctx.legal", "ratio"
+        "  {:<20} {:>10.2} ns/node",
+        "legality_context_with_state", rows.evasion_context
+    );
+    println!(
+        "  {:<20} {:>10} {:>12} {:>12} {:>12} {:>9} {:>9}",
+        "class",
+        "calls",
+        "Board::legal",
+        "ctx.legal",
+        "evasion.legal",
+        "ctx ratio",
+        "evasion ratio"
     );
     for (index, (label, _)) in CANDIDATE_CLASSES.iter().enumerate() {
         let calls = rows.classes[index];
@@ -444,12 +548,44 @@ fn print_candidates(name: &str, entries: &[CandidateEntry], rows: &CandidateRows
             continue;
         }
         println!(
-            "  {:<20} {:>10} {:>10.2} ns {:>10.2} ns {:>8.3}x",
+            "  {:<20} {:>10} {:>10.2} ns {:>10.2} ns {:>10.2} ns {:>8.3}x {:>8.3}x",
             label,
             calls,
             rows.board_legal[index],
             rows.context_legal[index],
-            rows.context_legal[index] / rows.board_legal[index]
+            rows.evasion_legal[index],
+            rows.context_legal[index] / rows.board_legal[index],
+            rows.evasion_legal[index] / rows.board_legal[index]
+        );
+    }
+
+    println!();
+    println!("  in-check / out-of-check split (same nodes; ns/call)");
+    println!(
+        "  {:<20} {:>10} {:>12} {:>12} {:>12} {:>9} {:>9}",
+        "class",
+        "calls",
+        "Board::legal",
+        "ctx.legal",
+        "evasion.legal",
+        "evasion/ctx",
+        "evasion/board"
+    );
+    for (index, (label, _, _)) in EVASION_CLASSES.iter().enumerate() {
+        let calls = rows.split_classes[index];
+        if calls == 0 {
+            println!("  {label:<20} {calls:>10}");
+            continue;
+        }
+        println!(
+            "  {:<20} {:>10} {:>10.2} ns {:>10.2} ns {:>10.2} ns {:>8.3}x {:>8.3}x",
+            label,
+            calls,
+            rows.split_board[index],
+            rows.split_context[index],
+            rows.split_evasion[index],
+            rows.split_evasion[index] / rows.split_context[index],
+            rows.split_evasion[index] / rows.split_board[index]
         );
     }
 }

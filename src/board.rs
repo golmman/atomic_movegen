@@ -844,17 +844,20 @@ impl From<&StateInfo> for Counts {
 
 /// Node-local cached data for a candidate legality loop.
 ///
-/// Build once per position with [`Board::legality_context`], then ask
+/// Build once per position with [`Board::legality_context`] (check-blind) or
+/// [`Board::legality_context_with_state`] (evasion-aware), then ask
 /// [`legal`](Self::legal) for every pseudo-legal candidate. The context is a
 /// snapshot: it stays valid while the board does not change and holds no
 /// reference to it. A stale context answers for the old placement, exactly as a
 /// stale [`StateInfo`] does.
 ///
-/// This is not a position representation and does not generate moves. It needs
-/// only the placement and the two [`Counts`]; it reads no `checkers`/`pinned`
-/// fields and populates no [`StateInfo`]. The occupancy computed for the node
-/// is exposed by [`occupied`](Self::occupied) so a child/effect query can reuse
-/// it.
+/// This is not a position representation and does not generate moves. The
+/// check-blind constructor needs only the placement and the two [`Counts`] and
+/// reads no `checkers`/`pinned` fields. The evasion-aware constructor also
+/// reads `state.checkers` once to reject quiet moves that cannot answer a
+/// check; it still never populates a [`StateInfo`]. The occupancy computed for
+/// the node is exposed by [`occupied`](Self::occupied) so a child/effect query
+/// can reuse it.
 #[derive(Debug, Clone, Copy)]
 pub struct LegalityContext {
     /// The node-constant placement the rule body reads.
@@ -2541,6 +2544,38 @@ impl Board {
     pub fn legality_context(&self, counts: Counts) -> LegalityContext {
         LegalityContext {
             node: LegalNode::from_view(self.position_view()),
+            playable: counts.commoners() != 0 && counts.them_commoners() != 0,
+        }
+    }
+
+    /// Build a check-aware node-local [`LegalityContext`] for a candidate loop.
+    ///
+    /// `counts` and `state` must describe this board and its side to move. Only
+    /// `state.checkers` is read; `pinned`, undo fields, and the remaining
+    /// `StateInfo` fields are ignored, and no state is populated or recomputed.
+    /// Use [`populate_state`](Self::populate_state) before this call. A stale
+    /// state changes answers exactly as a stale [`Counts`] does.
+    ///
+    /// The context rejects quiet non-commoner moves that cannot answer a check
+    /// before running the shared legality body. Captures, en passant, commoner
+    /// moves, castling outside check, quiet moves outside check, and quiet
+    /// moves onto the block ray still use the full shared body. The
+    /// check-blind [`legality_context`](Self::legality_context) constructor is
+    /// unchanged.
+    ///
+    /// # Panics
+    ///
+    /// This method does not panic. A stale or hand-written `state` can only
+    /// make the context reject moves the current board would allow; it never
+    /// adds an accepting path.
+    #[must_use]
+    pub fn legality_context_with_state(
+        &self,
+        counts: Counts,
+        state: &StateInfo,
+    ) -> LegalityContext {
+        LegalityContext {
+            node: LegalNode::from_view_with_checkers(self.position_view(), state.checkers),
             playable: counts.commoners() != 0 && counts.them_commoners() != 0,
         }
     }
@@ -7852,6 +7887,33 @@ mod tests {
         for &m in list.as_slice() {
             assert!(!board.legal(m, &state), "{m}");
             assert!(!board.is_legal_with_state(m, &state), "{m}");
+        }
+    }
+
+    #[test]
+    fn legality_context_with_state_matches_board_legal() {
+        for fen in [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "4r1k1/8/8/8/8/8/8/4K1N1 w - - 0 1",
+            "4k3/8/8/8/1b6/8/4r3/4K1N1 w - - 0 1",
+            "8/8/8/8/8/8/1k6/2K5 w - - 0 1",
+        ] {
+            let board = Board::from_fen(fen).expect("fixture must parse");
+            let counts = board.counts();
+            let mut state = StateInfo::new();
+            board.populate_state(&mut state);
+            let blind = board.legality_context(counts);
+            let aware = board.legality_context_with_state(counts, &state);
+            assert_eq!(aware.occupied(), board.occupied(), "{fen}: occupied");
+
+            let mut pseudo = MoveList::new();
+            crate::movegen::generate_pseudo_legal(&board, &mut pseudo);
+            assert!(!pseudo.is_empty(), "{fen}: candidates");
+            for &m in pseudo.as_slice() {
+                let expected = board.legal(m, &state);
+                assert_eq!(blind.legal(m), expected, "{fen} {m}: blind");
+                assert_eq!(aware.legal(m), expected, "{fen} {m}: aware");
+            }
         }
     }
 }

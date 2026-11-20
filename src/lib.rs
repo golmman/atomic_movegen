@@ -76,7 +76,12 @@
 //! the board and its [`Counts`]; [`LegalityContext::legal`] then answers every
 //! pseudo-legal candidate through the same rules body as [`Board::legal`] and
 //! exposes the node's occupancy for child/effect reuse. It reads no
-//! `checkers`/`pinned` fields and populates no [`StateInfo`].
+//! `checkers`/`pinned` fields and populates no [`StateInfo`]. A caller with a
+//! populated [`StateInfo`] can opt in to
+//! [`Board::legality_context_with_state`], which reads only `state.checkers`
+//! once and rejects quiet non-commoner moves that cannot answer a check before
+//! the shared body; captures, en passant, commoner moves, castling outside
+//! check and block-ray candidates still use the full rules.
 //! [`movegen::for_each_pseudo_legal`] and
 //! [`movegen::for_each_legal`] walk the candidate and legal streams without
 //! allocating and support early exit, while [`Board::null_for`] builds a
